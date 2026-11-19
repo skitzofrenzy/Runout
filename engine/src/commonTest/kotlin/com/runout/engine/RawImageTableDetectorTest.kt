@@ -284,6 +284,27 @@ class RawImageTableDetectorTest {
     }
 
     @Test
+    fun wntTournamentBlackSetAndEndOnOrientationRoundTrip() {
+        assertRoundTrip(
+            layout = nineBallLayout(),
+            quad = trapezoidQuad,
+            cloth = ClothHueCategory.SLATE_GREY,
+            ballSet = BallSetProfile.wntTournamentBlackPool(),
+        )
+        val endOnQuad = listOf(
+            Vec2(210.0, 20.0),
+            Vec2(515.0, 20.0),
+            Vec2(615.0, 325.0),
+            Vec2(110.0, 325.0),
+        )
+        assertTrue(RawImageTableDetector.isEndOnPerspectiveQuad(endOnQuad))
+        assertTrue(!RawImageTableDetector.isEndOnPerspectiveQuad(trapezoidQuad))
+        val (oriented, pose) = RawImageTableDetector.orientQuadForHomography(endOnQuad, table)
+        assertEquals(listOf(endOnQuad[0], endOnQuad[3], endOnQuad[2], endOnQuad[1]), oriented)
+        assertTrue(pose.x > table.lengthMeters)
+    }
+
+    @Test
     fun trackBallInArgbVideoFramesRecoversTrajectoryAndEventsFromPixels() {
         val fps = 60.0
         val dt = 1.0 / fps

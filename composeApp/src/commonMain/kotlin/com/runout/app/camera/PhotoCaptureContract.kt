@@ -148,18 +148,27 @@ object PhotoCaptureEvaluator {
         frame: ArgbImageFrame,
         tableSpec: TableSpec = TableSpec.nineFootPool(),
         ballSet: BallSetProfile = BallSetProfile.standardPool(),
-        cameraPoseMeters: Vec3 = Vec3(-0.55, tableSpec.widthMeters * 0.5, 1.55),
+        cameraPoseMeters: Vec3? = null,
         overriddenQuadCornersPx: List<Vec2>? = null,
     ): Pair<RawFrameDetectionSummary, VisionRectificationResult> {
         val summary = RawImageTableDetector.analyzeArgbFrame(frame)
-        val corners = overriddenQuadCornersPx ?: summary.detectedQuadCornersPx
+        val (autoCorners, autoPose) = RawImageTableDetector.orientQuadForHomography(
+            summary.detectedQuadCornersPx,
+            tableSpec,
+        )
+        val corners = overriddenQuadCornersPx ?: autoCorners
+        val resolvedPose = cameraPoseMeters ?: autoPose
+        val resolvedBallSet = BallSetProfile.inferFromDetectedColors(
+            summary.detectedCandidates.map { it.dominantColor },
+            ballSet,
+        )
         val homography = PerspectiveHomography.fromTableQuad(corners, tableSpec)
         val rectified = BallIdentificationAndAssignment.rectifyAndIdentifyBalls(
             candidates = summary.detectedCandidates,
             homography = homography,
             table = tableSpec,
-            ballSet = ballSet,
-            cameraPositionMeters = cameraPoseMeters,
+            ballSet = resolvedBallSet,
+            cameraPositionMeters = resolvedPose,
         )
         return summary to rectified
     }

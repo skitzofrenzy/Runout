@@ -263,7 +263,10 @@ object BallIdentificationAndAssignment {
     ): Double = colourCost(candidate, ballSet.colorForBall(number)) +
         whiteFractionCost(candidate.whiteFraction, number)
 
-    private fun colourCost(candidate: DetectedBallCandidate, expected: BallPaletteColor): Double {
+    private fun colourCost(
+        candidate: DetectedBallCandidate,
+        expected: BallPaletteColor,
+    ): Double {
         val dominant = candidate.dominantColor
         return when {
             dominant == expected -> 0.0
@@ -274,10 +277,10 @@ object BallIdentificationAndAssignment {
     }
 
     private fun whiteFractionCost(whiteFraction: Double, number: Int): Double = when (number) {
-        0 -> max(0.0, 0.80 - whiteFraction) * WHITE_FRACTION_SLOPE
-        8 -> max(0.0, whiteFraction - 0.28) * WHITE_FRACTION_SLOPE
-        in 1..7 -> max(0.0, whiteFraction - 0.25) * WHITE_FRACTION_SLOPE
-        in 9..15 -> max(0.0, 0.35 - whiteFraction) * WHITE_FRACTION_SLOPE
+        0 -> max(0.0, 0.78 - whiteFraction) * WHITE_FRACTION_SLOPE
+        8 -> max(0.0, whiteFraction - 0.30) * WHITE_FRACTION_SLOPE
+        in 1..7 -> max(0.0, whiteFraction - 0.35) * WHITE_FRACTION_SLOPE
+        in 9..15 -> max(0.0, 0.40 - whiteFraction) * WHITE_FRACTION_SLOPE
         else -> 0.0
     }
 
