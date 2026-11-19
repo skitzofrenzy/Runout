@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check:
+    name: Build, Test & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@f29f5a9db6b0cbe2fc2fb82f84a8e4390517a6c0 # v4.2.2
+
+      - name: Run engine JVM unit tests
+        run: ./gradlew :engine:jvmTest --stacktrace
+
+      - name: Run Android Lint
+        run: ./gradlew lint --stacktrace
+
+      - name: Assemble debug APK
+        run: ./gradlew :composeApp:assembleDebug --stacktrace
