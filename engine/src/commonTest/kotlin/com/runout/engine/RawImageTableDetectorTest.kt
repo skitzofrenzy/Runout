@@ -305,6 +305,58 @@ class RawImageTableDetectorTest {
     }
 
     @Test
+    fun ukBlackballInferenceAndLowAngleRedClothQuadRecoverBalls() {
+        val inferred = BallSetProfile.inferFromDetectedColors(
+            listOf(
+                com.runout.engine.model.BallPaletteColor.WHITE,
+                com.runout.engine.model.BallPaletteColor.YELLOW,
+                com.runout.engine.model.BallPaletteColor.YELLOW,
+                com.runout.engine.model.BallPaletteColor.YELLOW,
+                com.runout.engine.model.BallPaletteColor.RED,
+                com.runout.engine.model.BallPaletteColor.RED,
+                com.runout.engine.model.BallPaletteColor.RED,
+                com.runout.engine.model.BallPaletteColor.BLACK,
+            ),
+        )
+        assertEquals("UK Blackball", inferred.name)
+        assertEquals(com.runout.engine.model.BallPaletteColor.YELLOW, inferred.colorForBall(4))
+        assertEquals(com.runout.engine.model.BallPaletteColor.RED, inferred.colorForBall(12))
+
+        val steepRedQuad = listOf(
+            Vec2(140.0, 75.0),
+            Vec2(430.0, 82.0),
+            Vec2(610.0, 260.0),
+            Vec2(45.0, 260.0),
+        )
+        val layout = TableLayout(
+            table = table,
+            balls = listOf(
+                ball(0, 1.15, 0.62),
+                ball(4, 1.00, 0.35),
+                ball(5, 1.85, 0.78),
+                ball(8, 1.55, 0.42),
+            ),
+        )
+        val frame = RawImageTableDetector.renderSyntheticTablePhotoArgb(
+            layout = layout,
+            quadCornersPx = steepRedQuad,
+            cameraPoseMeters = camera,
+            clothCategory = ClothHueCategory.CHAMPIONSHIP_RED,
+            ballSet = BallSetProfile.standardPool(),
+        )
+        val summary = RawImageTableDetector.analyzeArgbFrame(frame)
+        assertEquals(ClothHueCategory.CHAMPIONSHIP_RED, summary.clothSurface.category)
+        assertEquals(4, summary.detectedQuadCornersPx.size)
+        for (i in 0 until 4) {
+            assertTrue(
+                summary.detectedQuadCornersPx[i].distanceTo(steepRedQuad[i]) < 5.0,
+                "Steep red corner $i mismatch: ${summary.detectedQuadCornersPx[i]} vs ${steepRedQuad[i]}",
+            )
+        }
+        assertEquals(4, summary.detectedCandidates.size)
+    }
+
+    @Test
     fun trackBallInArgbVideoFramesRecoversTrajectoryAndEventsFromPixels() {
         val fps = 60.0
         val dt = 1.0 / fps

@@ -83,6 +83,25 @@ data class BallSetProfile(
             13 to BallPaletteColor.PURPLE,
         )
 
+        private val UK_BLACKBALL_MAP: Map<Int, BallPaletteColor> = mapOf(
+            0 to BallPaletteColor.WHITE,
+            1 to BallPaletteColor.YELLOW,
+            2 to BallPaletteColor.YELLOW,
+            3 to BallPaletteColor.YELLOW,
+            4 to BallPaletteColor.YELLOW,
+            5 to BallPaletteColor.YELLOW,
+            6 to BallPaletteColor.YELLOW,
+            7 to BallPaletteColor.YELLOW,
+            8 to BallPaletteColor.BLACK,
+            9 to BallPaletteColor.RED,
+            10 to BallPaletteColor.RED,
+            11 to BallPaletteColor.RED,
+            12 to BallPaletteColor.RED,
+            13 to BallPaletteColor.RED,
+            14 to BallPaletteColor.RED,
+            15 to BallPaletteColor.RED,
+        )
+
         fun standardPool(): BallSetProfile = BallSetProfile(
             name = "Standard Pool",
             numberToColor = STANDARD_MAP,
@@ -98,17 +117,33 @@ data class BallSetProfile(
             numberToColor = WNT_TOURNAMENT_BLACK_MAP,
         )
 
+        fun ukBlackballPool(): BallSetProfile = BallSetProfile(
+            name = "UK Blackball",
+            numberToColor = UK_BLACKBALL_MAP,
+        )
+
         /**
-         * Infers whether a detected set of ball palette colours comes from a WNT Tournament Black
-         * set (`4 = PINK, 5 = PURPLE, 7 = BROWN`), a TV Tournament set (`4 = PINK, 7 = BROWN`),
-         * or the caller's [defaultProfile].
+         * Infers whether a detected set of ball palette colours comes from a UK Blackball
+         * (yellows `1..7` and reds `9..15`), WNT Tournament Black (`4 = PINK, 5 = PURPLE,
+         * 7 = BROWN`), TV Tournament (`4 = PINK, 7 = BROWN`), or the caller's [defaultProfile].
          */
         fun inferFromDetectedColors(
             dominantColors: Iterable<BallPaletteColor>,
             defaultProfile: BallSetProfile = standardPool(),
         ): BallSetProfile {
             if (defaultProfile.name != "Standard Pool") return defaultProfile
-            val colors = dominantColors.toSet()
+            val list = dominantColors.toList()
+            val yellowCount = list.count { it == BallPaletteColor.YELLOW }
+            val redFamilyCount = list.count {
+                it == BallPaletteColor.RED || it == BallPaletteColor.MAROON || it == BallPaletteColor.BROWN
+            }
+            val otherColorCount = list.count {
+                it == BallPaletteColor.BLUE || it == BallPaletteColor.GREEN || it == BallPaletteColor.PURPLE
+            }
+            if ((yellowCount >= 3 || redFamilyCount >= 3) && otherColorCount == 0) {
+                return ukBlackballPool()
+            }
+            val colors = list.toSet()
             val hasPink = BallPaletteColor.PINK in colors
             val hasPurple = BallPaletteColor.PURPLE in colors
             val hasBrown = BallPaletteColor.BROWN in colors

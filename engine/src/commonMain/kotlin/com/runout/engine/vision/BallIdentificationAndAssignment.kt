@@ -261,7 +261,7 @@ object BallIdentificationAndAssignment {
         number: Int,
         ballSet: BallSetProfile,
     ): Double = colourCost(candidate, ballSet.colorForBall(number)) +
-        whiteFractionCost(candidate.whiteFraction, number)
+        whiteFractionCost(candidate.whiteFraction, number, ballSet.name == "UK Blackball")
 
     private fun colourCost(
         candidate: DetectedBallCandidate,
@@ -276,11 +276,23 @@ object BallIdentificationAndAssignment {
         }
     }
 
-    private fun whiteFractionCost(whiteFraction: Double, number: Int): Double = when (number) {
+    private fun whiteFractionCost(
+        whiteFraction: Double,
+        number: Int,
+        isUkBlackball: Boolean = false,
+    ): Double = when (number) {
         0 -> max(0.0, 0.78 - whiteFraction) * WHITE_FRACTION_SLOPE
         8 -> max(0.0, whiteFraction - 0.30) * WHITE_FRACTION_SLOPE
-        in 1..7 -> max(0.0, whiteFraction - 0.35) * WHITE_FRACTION_SLOPE
-        in 9..15 -> max(0.0, 0.40 - whiteFraction) * WHITE_FRACTION_SLOPE
+        in 1..7 -> if (isUkBlackball) {
+            max(0.0, whiteFraction - 0.65) * WHITE_FRACTION_SLOPE
+        } else {
+            max(0.0, whiteFraction - 0.35) * WHITE_FRACTION_SLOPE
+        }
+        in 9..15 -> if (isUkBlackball) {
+            max(0.0, whiteFraction - 0.65) * WHITE_FRACTION_SLOPE
+        } else {
+            max(0.0, 0.40 - whiteFraction) * WHITE_FRACTION_SLOPE
+        }
         else -> 0.0
     }
 
