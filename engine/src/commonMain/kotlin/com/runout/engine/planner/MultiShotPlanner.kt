@@ -401,11 +401,17 @@ object MultiShotPlanner {
                 val overlapsBall = advanced.layout.balls.any {
                     !it.isCueBall && it.position.distanceTo(landing) < LANDING_CLEARANCE_FACTOR * cue.radiusMeters
                 }
-                val heatValue = if (overlapsBall || !table.isWithinPlayableBounds(landing, cue.radiusMeters)) {
-                    0.0
-                } else {
-                    heat.valueAt(landing)
-                }
+                val hasClearNextShot = !overlapsBall &&
+                    table.isWithinPlayableBounds(landing, cue.radiusMeters) &&
+                    table.pockets.any { nextPocket ->
+                        playableAim(
+                            layout = advanced.layout,
+                            cue = Ball(number = 0, position = landing, radiusMeters = cue.radiusMeters),
+                            target = finalBall,
+                            pocket = nextPocket,
+                        ) != null
+                    }
+                val heatValue = if (!hasClearNextShot) 0.0 else heat.valueAt(landing)
                 val cloudEase = evaluateFinalBallLandingCloudEase(
                     landingCloud = uncertainty.landingCloud,
                     finalBall = finalBall,
@@ -427,11 +433,19 @@ object MultiShotPlanner {
                 val overlapsBall = advanced.layout.balls.any {
                     !it.isCueBall && it.position.distanceTo(landing) < LANDING_CLEARANCE_FACTOR * cue.radiusMeters
                 }
-                val heatValue = if (overlapsBall || !table.isWithinPlayableBounds(landing, cue.radiusMeters)) {
-                    0.0
-                } else {
-                    heat.valueAt(landing)
-                }
+                val hasClearNextShot = !overlapsBall &&
+                    table.isWithinPlayableBounds(landing, cue.radiusMeters) &&
+                    advanced.nextTargets.any { nextTarget ->
+                        table.pockets.any { nextPocket ->
+                            playableAim(
+                                layout = advanced.layout,
+                                cue = Ball(number = 0, position = landing, radiusMeters = cue.radiusMeters),
+                                target = nextTarget,
+                                pocket = nextPocket,
+                            ) != null
+                        }
+                    }
+                val heatValue = if (!hasClearNextShot) 0.0 else heat.valueAt(landing)
                 LEAVE_FLOOR + (1.0 - LEAVE_FLOOR) * heatValue
             }
         }
@@ -671,6 +685,9 @@ object MultiShotPlanner {
             layout = afterFirst,
             targetBallNumbers = targetNumbers,
             playerProfile = playerProfile,
+            cols = 32,
+            rows = 16,
+            preferredPocketId = steps.getOrNull(1)?.pocketId,
         )
     }
 

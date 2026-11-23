@@ -3,15 +3,57 @@ package com.runout.engine.planner
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.Ball
 import com.runout.engine.model.PlayerProfile
+import com.runout.engine.model.PocketId
 import com.runout.engine.model.PocketSpec
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.AimGeometry
 import com.runout.engine.physics.GhostBallAiming
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.max
+import kotlin.math.sin
+import kotlin.math.sqrt
+
+/**
+ * Spreading occlusion shadow cone cast from a ghost-ball aim point [originMeters] past a
+ * blocking ball at [blockerPosition]. Any cue-ball centre inside this cone or exclusion disk
+ * cannot see the ghost ball directly without hitting the blocker.
+ */
+data class OcclusionShadowWedge(
+    val blockerBallNumber: Int,
+    val blockerPosition: Vec2,
+    val exclusionRadiusMeters: Double,
+    val originMeters: Vec2,
+    val leftTangentMeters: Vec2,
+    val rightTangentMeters: Vec2,
+    val leftFarMeters: Vec2,
+    val rightFarMeters: Vec2,
+    val midFarMeters: Vec2,
+    val centerAngleRadians: Double,
+    val halfAngleRadians: Double,
+    val blockerDistanceMeters: Double,
+)
+
+/**
+ * Visibility geometry for potting [targetBallNumber] into [pocketId] on a table layout.
+ * When [isPocketClear] is false (any ball obstructs the target-to-pocket corridor or ghost ball),
+ * the direct pocket lane is blocked across the entire table.
+ */
+data class PocketVisibilityRegion(
+    val targetBallNumber: Int,
+    val targetBallPosition: Vec2,
+    val targetExclusionRadiusMeters: Double,
+    val pocketId: PocketId,
+    val ghostBallCenter: Vec2,
+    val objectToPocketDirection: Vec2,
+    val isPocketClear: Boolean,
+    val shadowWedges: List<OcclusionShadowWedge>,
+)
 
 /**
  * One cell of a [HeatZoneMap]: grid index, cell centre in table metres and a position value in `0.0..1.0`
@@ -64,6 +106,8 @@ object HeatZoneGenerator {
     private const val POCKET_WINDOW_FRACTION: Double = 0.8
     private const val MIN_CUT_COSINE: Double = 0.22
     private const val ERROR_DISTANCE_GAIN: Double = 0.18
+    private const val OCCLUSION_CLEARANCE_PAD_METERS: Double = 0.002
+    const val MAX_HEAT_CUT_ANGLE_RAD: Double = 78.0 * PI / 180.0
 
     fun computeForNextBalls(
         layout: TableLayout,
@@ -71,6 +115,7 @@ object HeatZoneGenerator {
         playerProfile: PlayerProfile = PlayerProfile(),
         cols: Int = 16,
         rows: Int = 8,
+        preferredPocketId: PocketId? = null,
     ): HeatZoneMap {
         val table = layout.table
         val safeCols = cols.coerceAtLeast(1)
@@ -79,6 +124,26 @@ object HeatZoneGenerator {
         val objectBalls = layout.balls.filter { !it.isCueBall }
         val primary = targetBallNumbers.firstOrNull()?.let { layout.ballByNumber(it) }
         val secondary = targetBallNumbers.getOrNull(1)?.let { layout.ballByNumber(it) }
+
+        val primaryVisibilities = if (primary != null) {
+            val pockets = if (preferredPocketId != null) {
+                table.pockets.filter { it.id == preferredPocketId }
+            } else {
+                table.pockets
+            }
+            pockets.map { pocket ->
+                pocket to computePocketVisibility(layout, primary, pocket, cueRadius)
+            }
+        } else {
+            emptyList()
+        }
+        val secondaryVisibilities = if (secondary != null) {
+            table.pockets.map { pocket ->
+                pocket to computePocketVisibility(layout, secondary, pocket, cueRadius)
+            }
+        } else {
+            emptyList()
+        }
 
         val cellWidth = table.lengthMeters / safeCols
         val cellHeight = table.widthMeters / safeRows
@@ -93,7 +158,9 @@ object HeatZoneGenerator {
                     cueRadius = cueRadius,
                     objectBalls = objectBalls,
                     primary = primary,
+                    primaryVisibilities = primaryVisibilities,
                     secondary = secondary,
+                    secondaryVisibilities = secondaryVisibilities,
                     aimErrorStdRad = playerProfile.aimErrorStdRad,
                 )
                 cells += HeatZoneCell(col = col, row = row, centerMeters = center, value = value)
@@ -109,13 +176,131 @@ object HeatZoneGenerator {
         )
     }
 
+    /**
+     * Computes exact pocket visibility and spreading blocking-ball shadow wedges for shooting
+     * [targetBall] into [pocket]. Every other object ball on [layout] — both non-playable and
+     * friendly — casts a spreading shadow wedge if it blocks the approach, or invalidates the
+     * entire pocket if it obstructs [targetBall] -> [pocket] or the ghost ball.
+     */
+    fun computePocketVisibility(
+        layout: TableLayout,
+        targetBall: Ball,
+        pocket: PocketSpec,
+        cueRadius: Double = layout.table.ballRadiusMeters,
+    ): PocketVisibilityRegion {
+        val table = layout.table
+        val objToPocket = (pocket.center - targetBall.position).normalized()
+        val contactDist = cueRadius + targetBall.radiusMeters
+        val ghostCenter = targetBall.position - objToPocket * contactDist
+        val obstacles = layout.balls.filter { !it.isCueBall && it.number != targetBall.number }
+
+        val pocketPathClear = GhostBallAiming.isSegmentClear(
+            start = targetBall.position,
+            end = pocket.center,
+            movingRadius = targetBall.radiusMeters,
+            obstacles = obstacles,
+            clearanceMarginMeters = -OCCLUSION_CLEARANCE_PAD_METERS,
+        )
+        val ghostOnTable = table.isWithinPlayableBounds(ghostCenter, cueRadius)
+        val ghostClear = obstacles.none {
+            it.position.distanceTo(ghostCenter) < cueRadius + it.radiusMeters + OCCLUSION_CLEARANCE_PAD_METERS
+        }
+        val isPocketClear = pocketPathClear && ghostOnTable && ghostClear
+
+        val farDist = max(table.lengthMeters, table.widthMeters) * 3.0
+        val wedges = obstacles.map { blocker ->
+            val toBlocker = blocker.position - ghostCenter
+            val dist = toBlocker.length()
+            val exclusionR = cueRadius + blocker.radiusMeters + OCCLUSION_CLEARANCE_PAD_METERS
+            val centerAngle = atan2(toBlocker.y, toBlocker.x)
+            val halfAngle = if (dist <= exclusionR + 1e-6) {
+                PI * 0.495
+            } else {
+                asin((exclusionR / dist).coerceIn(0.0, 0.9999))
+            }
+            val tangentDist = if (dist <= exclusionR + 1e-6) {
+                0.0
+            } else {
+                sqrt((dist * dist - exclusionR * exclusionR).coerceAtLeast(0.0))
+            }
+            val leftDir = Vec2(cos(centerAngle - halfAngle), sin(centerAngle - halfAngle))
+            val rightDir = Vec2(cos(centerAngle + halfAngle), sin(centerAngle + halfAngle))
+            val midDir = Vec2(cos(centerAngle), sin(centerAngle))
+            OcclusionShadowWedge(
+                blockerBallNumber = blocker.number,
+                blockerPosition = blocker.position,
+                exclusionRadiusMeters = exclusionR,
+                originMeters = ghostCenter,
+                leftTangentMeters = ghostCenter + leftDir * tangentDist,
+                rightTangentMeters = ghostCenter + rightDir * tangentDist,
+                leftFarMeters = ghostCenter + leftDir * farDist,
+                rightFarMeters = ghostCenter + rightDir * farDist,
+                midFarMeters = ghostCenter + midDir * farDist,
+                centerAngleRadians = centerAngle,
+                halfAngleRadians = halfAngle,
+                blockerDistanceMeters = dist,
+            )
+        }
+
+        return PocketVisibilityRegion(
+            targetBallNumber = targetBall.number,
+            targetBallPosition = targetBall.position,
+            targetExclusionRadiusMeters = cueRadius + targetBall.radiusMeters + OCCLUSION_CLEARANCE_PAD_METERS,
+            pocketId = pocket.id,
+            ghostBallCenter = ghostCenter,
+            objectToPocketDirection = objToPocket,
+            isPocketClear = isPocketClear,
+            shadowWedges = wedges,
+        )
+    }
+
+    /**
+     * Returns `true` if a cue ball centered at [point] is occluded behind a blocking ball, sits
+     * inside a ball overlap exclusion disk, faces a blocked [region] pocket, or lies beyond the
+     * cut-angle plane (`> [maxCutAngleRad]`).
+     */
+    fun isPointOccludedForPocket(
+        point: Vec2,
+        region: PocketVisibilityRegion,
+        maxCutAngleRad: Double = MAX_HEAT_CUT_ANGLE_RAD,
+    ): Boolean {
+        if (!region.isPocketClear) return true
+        if (point.distanceTo(region.targetBallPosition) < region.targetExclusionRadiusMeters) return true
+
+        val toGhost = region.ghostBallCenter - point
+        if (toGhost.lengthSquared() < 1e-10) return true
+        val cutAngle = abs(toGhost.normalized().angleTo(region.objectToPocketDirection))
+        if (cutAngle > maxCutAngleRad) return true
+
+        for (wedge in region.shadowWedges) {
+            if (point.distanceTo(wedge.blockerPosition) < wedge.exclusionRadiusMeters) return true
+            val toPoint = point - wedge.originMeters
+            val ptDist = toPoint.length()
+            val tangentDist = sqrt(
+                (wedge.blockerDistanceMeters * wedge.blockerDistanceMeters -
+                    wedge.exclusionRadiusMeters * wedge.exclusionRadiusMeters).coerceAtLeast(0.0),
+            )
+            if (ptDist + 1e-6 >= tangentDist) {
+                val ptAngle = atan2(toPoint.y, toPoint.x)
+                val delta = ptAngle - wedge.centerAngleRadians
+                val wrapped = abs(atan2(sin(delta), cos(delta)))
+                if (wrapped <= wedge.halfAngleRadians + 1e-6) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     private fun cellValue(
         center: Vec2,
         table: TableSpec,
         cueRadius: Double,
         objectBalls: List<Ball>,
         primary: Ball?,
+        primaryVisibilities: List<Pair<PocketSpec, PocketVisibilityRegion>>,
         secondary: Ball?,
+        secondaryVisibilities: List<Pair<PocketSpec, PocketVisibilityRegion>>,
         aimErrorStdRad: Double,
     ): Double {
         if (primary == null) return 0.0
@@ -125,9 +310,9 @@ object HeatZoneGenerator {
         }
         if (overlaps) return 0.0
 
-        val primaryValue = bestShotValue(center, cueRadius, primary, table, objectBalls, aimErrorStdRad)
+        val primaryValue = bestShotValue(center, cueRadius, primary, table, objectBalls, primaryVisibilities, aimErrorStdRad)
         if (secondary == null) return primaryValue.coerceIn(0.0, 1.0)
-        val secondaryValue = bestShotValue(center, cueRadius, secondary, table, objectBalls, aimErrorStdRad)
+        val secondaryValue = bestShotValue(center, cueRadius, secondary, table, objectBalls, secondaryVisibilities, aimErrorStdRad)
         return ((1.0 - SECONDARY_TARGET_WEIGHT) * primaryValue + SECONDARY_TARGET_WEIGHT * secondaryValue)
             .coerceIn(0.0, 1.0)
     }
@@ -139,11 +324,13 @@ object HeatZoneGenerator {
         target: Ball,
         table: TableSpec,
         objectBalls: List<Ball>,
+        visibilities: List<Pair<PocketSpec, PocketVisibilityRegion>>,
         aimErrorStdRad: Double,
     ): Double {
         val cue = Ball(number = 0, position = cuePosition, radiusMeters = cueRadius)
         var best = 0.0
-        for (pocket in table.pockets) {
+        for ((pocket, visibility) in visibilities) {
+            if (isPointOccludedForPocket(cuePosition, visibility)) continue
             val aim = GhostBallAiming.computeAimGeometry(
                 cueBall = cue,
                 objectBall = target,

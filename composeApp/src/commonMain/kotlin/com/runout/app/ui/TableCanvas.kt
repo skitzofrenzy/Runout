@@ -17,9 +17,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.PathOperation
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -46,17 +48,22 @@ import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.DisplacedBallPath
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.physics.TrajectoryPath
+import com.runout.engine.planner.HeatZoneGenerator
 import com.runout.engine.planner.HeatZoneMap
 import com.runout.engine.planner.PlannedShotStep
+import com.runout.engine.planner.PocketVisibilityRegion
 import com.runout.engine.planner.ProblemBallReport
 import com.runout.engine.planner.RunoutPlan
 import com.runout.engine.planner.ShotRecommendation
 import com.runout.engine.planner.ShotUncertaintyResult
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
 
 private val RailWoodOuterColor = Color(0xFF3E2415)
 private val RailWoodInnerColor = Color(0xFF54321E)
@@ -357,15 +364,31 @@ fun PoolTableCanvas(
             size = Size(playWidth, playHeight),
         )
 
+        // Shared active step & pocket visibility for cloth heat-zone, pockets, and landing-cloud occlusion
+        val planSteps = activeRunoutPlan?.steps.orEmpty()
+        val clampedStepIdx = focusedStepIndex
+            ?.takeIf { planSteps.isNotEmpty() }
+            ?.coerceIn(0, planSteps.lastIndex)
+        val focusedStep = if (clampedStepIdx != null) planSteps[clampedStepIdx] else planSteps.firstOrNull()
+        val activeVisibility = if (!isDraggingBall && activeRunoutPlan != null && planSteps.isNotEmpty()) {
+            resolveStepNextVisibility(layout, activeRunoutPlan, clampedStepIdx ?: 0)
+        } else {
+            null
+        }
+
         // 2b. Optional Milestone 3 position-value heat-zone grid over the cloth before balls/lines
         val heatZone = activeRunoutPlan?.nextBallHeatZone
         if (!isDraggingBall && showHeatZone && heatZone != null) {
             drawHeatZoneOverlay(
                 heatZone = heatZone,
+                visibility = activeVisibility,
+                table = table,
                 playLeft = playLeft,
                 playTop = playTop,
                 playWidth = playWidth,
                 playHeight = playHeight,
+                pxPerMeter = pxPerMeter,
+                toCanvasOffset = ::toCanvasOffset,
             )
         }
 
@@ -408,11 +431,6 @@ fun PoolTableCanvas(
         drawCircle(color = TableMarkingColor, radius = spotRadiusPx, center = footSpotCenter)
 
         // 5. Six pockets (layout.table.pockets)
-        val planSteps = activeRunoutPlan?.steps.orEmpty()
-        val clampedStepIdx = focusedStepIndex
-            ?.takeIf { planSteps.isNotEmpty() }
-            ?.coerceIn(0, planSteps.lastIndex)
-        val focusedStep = if (clampedStepIdx != null) planSteps[clampedStepIdx] else planSteps.firstOrNull()
         val targetPocketId = if (!isDraggingBall) (focusedStep?.pocketId ?: selectedShot?.pocket?.id) else null
         val selectablePocketsSet = if (!isDraggingBall) availablePockets.toSet() else emptySet()
         for (pocket in table.pockets) {
@@ -459,6 +477,7 @@ fun PoolTableCanvas(
                     layout = layout,
                     plan = activeRunoutPlan,
                     focusedStepIndex = clampedStepIdx,
+                    nextVisibility = activeVisibility,
                     showLandingCloud = showLandingCloud,
                     ballRadiusPx = ballRadiusPx,
                     pxPerMeter = pxPerMeter,
@@ -787,13 +806,117 @@ private fun DrawScope.drawPoolBall(
     )
 }
 
+private fun resolveStepNextVisibility(
+    layout: TableLayout,
+    plan: RunoutPlan,
+    activeIdx: Int,
+): PocketVisibilityRegion? {
+    val steps = plan.steps
+    val primaryStep = steps.getOrNull(activeIdx) ?: return null
+    val nextStep = steps.getOrNull(activeIdx + 1) ?: return null
+    val postShotLayout = primaryStep.resultingLayout ?: TableLayout(
+        table = layout.table,
+        balls = layout.balls.filter { it.number != primaryStep.targetBall.number },
+    )
+    val nextTarget = postShotLayout.ballByNumber(nextStep.targetBall.number) ?: nextStep.targetBall
+    val nextPocket = postShotLayout.table.pockets.firstOrNull { it.id == nextStep.pocketId } ?: return null
+    return HeatZoneGenerator.computePocketVisibility(
+        layout = postShotLayout,
+        targetBall = nextTarget,
+        pocket = nextPocket,
+        cueRadius = layout.table.ballRadiusMeters,
+    )
+}
+
+private fun buildOcclusionCutoutPath(
+    visibility: PocketVisibilityRegion,
+    table: TableSpec,
+    toCanvasOffset: (Vec2) -> Offset,
+    pxPerMeter: Float,
+): Path {
+    var combined: Path? = null
+    fun addUnion(shape: Path) {
+        combined = if (combined == null) {
+            shape
+        } else {
+            Path.combine(PathOperation.Union, combined!!, shape)
+        }
+    }
+
+    val farDist = max(table.lengthMeters, table.widthMeters) * 3.0
+
+    // 1. Spreading angular shadow cones + exclusion disks for every blocking ball
+    for (wedge in visibility.shadowWedges) {
+        val blockerDisk = Path().apply {
+            val c = toCanvasOffset(wedge.blockerPosition)
+            val rPx = (wedge.exclusionRadiusMeters * pxPerMeter).toFloat()
+            addOval(Rect(c.x - rPx, c.y - rPx, c.x + rPx, c.y + rPx))
+        }
+        addUnion(blockerDisk)
+
+        val conePath = Path().apply {
+            val lt = toCanvasOffset(wedge.leftTangentMeters)
+            val rt = toCanvasOffset(wedge.rightTangentMeters)
+            moveTo(lt.x, lt.y)
+            val steps = 5
+            val startAngle = wedge.centerAngleRadians - wedge.halfAngleRadians
+            val endAngle = wedge.centerAngleRadians + wedge.halfAngleRadians
+            for (i in 0..steps) {
+                val frac = i.toDouble() / steps.toDouble()
+                val a = startAngle + (endAngle - startAngle) * frac
+                val pt = toCanvasOffset(wedge.originMeters + Vec2(cos(a), sin(a)) * farDist)
+                lineTo(pt.x, pt.y)
+            }
+            lineTo(rt.x, rt.y)
+            close()
+        }
+        addUnion(conePath)
+    }
+
+    // 2. Target ball exclusion disk
+    val targetDisk = Path().apply {
+        val tc = toCanvasOffset(visibility.targetBallPosition)
+        val tr = (visibility.targetExclusionRadiusMeters * pxPerMeter).toFloat()
+        addOval(Rect(tc.x - tr, tc.y - tr, tc.x + tr, tc.y + tr))
+    }
+    addUnion(targetDisk)
+
+    // 3. Impossible back-cut region on the pocket side of the ghost ball (|cut| > MAX_HEAT_CUT_ANGLE_RAD)
+    val objDir = visibility.objectToPocketDirection
+    val pocketAngle = atan2(objDir.y, objDir.x)
+    val invalidHalfSweep = PI - HeatZoneGenerator.MAX_HEAT_CUT_ANGLE_RAD
+    val backCutSector = Path().apply {
+        val gOffset = toCanvasOffset(visibility.ghostBallCenter)
+        moveTo(gOffset.x, gOffset.y)
+        val segs = 6
+        val aStart = pocketAngle - invalidHalfSweep
+        val aEnd = pocketAngle + invalidHalfSweep
+        for (i in 0..segs) {
+            val frac = i.toDouble() / segs.toDouble()
+            val a = aStart + (aEnd - aStart) * frac
+            val rim = toCanvasOffset(visibility.ghostBallCenter + Vec2(cos(a), sin(a)) * farDist)
+            lineTo(rim.x, rim.y)
+        }
+        close()
+    }
+    addUnion(backCutSector)
+
+    return combined ?: Path()
+}
+
 private fun DrawScope.drawHeatZoneOverlay(
     heatZone: HeatZoneMap,
+    visibility: PocketVisibilityRegion? = null,
+    table: TableSpec,
     playLeft: Float,
     playTop: Float,
     playWidth: Float,
     playHeight: Float,
+    pxPerMeter: Float,
+    toCanvasOffset: (Vec2) -> Offset,
 ) {
+    if (visibility != null && !visibility.isPocketClear) return
+
     val safeCols = heatZone.cols.coerceAtLeast(1)
     val safeRows = heatZone.rows.coerceAtLeast(1)
     val cellWidthPx = playWidth / safeCols.toFloat()
@@ -801,12 +924,7 @@ private fun DrawScope.drawHeatZoneOverlay(
     val maxRight = playLeft + playWidth
     val maxBottom = playTop + playHeight
 
-    clipRect(
-        left = playLeft,
-        top = playTop,
-        right = maxRight,
-        bottom = maxBottom,
-    ) {
+    fun drawCells() {
         for (cell in heatZone.cells) {
             val cellColor = when {
                 cell.value >= 0.62 -> HeatZoneHighColor
@@ -828,12 +946,34 @@ private fun DrawScope.drawHeatZoneOverlay(
             )
         }
     }
+
+    clipRect(
+        left = playLeft,
+        top = playTop,
+        right = maxRight,
+        bottom = maxBottom,
+    ) {
+        if (visibility != null) {
+            val cutout = buildOcclusionCutoutPath(
+                visibility = visibility,
+                table = table,
+                toCanvasOffset = toCanvasOffset,
+                pxPerMeter = pxPerMeter,
+            )
+            clipPath(path = cutout, clipOp = ClipOp.Difference) {
+                drawCells()
+            }
+        } else {
+            drawCells()
+        }
+    }
 }
 
 private fun DrawScope.drawRunoutPlanOverlay(
     layout: TableLayout,
     plan: RunoutPlan,
     focusedStepIndex: Int? = null,
+    nextVisibility: PocketVisibilityRegion? = null,
     showLandingCloud: Boolean,
     ballRadiusPx: Float,
     pxPerMeter: Float,
@@ -896,11 +1036,13 @@ private fun DrawScope.drawRunoutPlanOverlay(
         toCanvasOffset = toCanvasOffset,
     )
 
-    // Active step 3-level position heat zone & landing cloud (strictly clipped inside playable felt)
+    // Active step 3-level position heat zone & landing cloud (strictly clipped inside playable felt and carved by blocking balls)
     if (showLandingCloud) {
         drawLandingCloudOverlay(
             uncertainty = primaryStep.uncertainty,
             tightness = shotTightness,
+            visibility = nextVisibility,
+            table = layout.table,
             ballRadiusPx = ballRadiusPx,
             pxPerMeter = pxPerMeter,
             playLeft = playLeft,
@@ -1117,6 +1259,8 @@ private fun DrawScope.drawStepNumberBadge(
 private fun DrawScope.drawLandingCloudOverlay(
     uncertainty: ShotUncertaintyResult,
     tightness: Float,
+    visibility: PocketVisibilityRegion? = null,
+    table: TableSpec,
     ballRadiusPx: Float,
     pxPerMeter: Float,
     playLeft: Float,
@@ -1138,12 +1282,7 @@ private fun DrawScope.drawLandingCloudOverlay(
     val ringDash = max(5f, ballRadiusPx * 0.45f)
     val ringGap = max(4f, ballRadiusPx * 0.30f)
 
-    clipRect(
-        left = playLeft,
-        top = playTop,
-        right = playLeft + playWidth,
-        bottom = playTop + playHeight,
-    ) {
+    fun drawThreeLevelZones() {
         // Level 3 Outer Heat Zone: outer 95% landing spread (tightness-scaled boundary)
         drawCircle(
             color = Color(0x2CF87171),
@@ -1185,26 +1324,101 @@ private fun DrawScope.drawLandingCloudOverlay(
             center = meanCenter,
             style = Stroke(width = max(1.6f, pxPerMeter * 0.0048f)),
         )
+    }
 
-        // Individual sigma-point landing cloud dots
+    clipRect(
+        left = playLeft,
+        top = playTop,
+        right = playLeft + playWidth,
+        bottom = playTop + playHeight,
+    ) {
+        if (visibility == null) {
+            drawThreeLevelZones()
+        } else if (!visibility.isPocketClear) {
+            // Goal pocket itself is blocked: show only warning spread boundary (no green/amber leave zone)
+            drawCircle(
+                color = Color(0x24F87171),
+                radius = outerRadiusPx,
+                center = meanCenter,
+            )
+            drawCircle(
+                color = Color(0xAAF87171),
+                radius = outerRadiusPx,
+                center = meanCenter,
+                style = Stroke(
+                    width = max(1.4f, pxPerMeter * 0.0044f),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(ringDash, ringGap), 0f),
+                ),
+            )
+        } else {
+            val cutout = buildOcclusionCutoutPath(
+                visibility = visibility,
+                table = table,
+                toCanvasOffset = toCanvasOffset,
+                pxPerMeter = pxPerMeter,
+            )
+            clipPath(path = cutout, clipOp = ClipOp.Difference) {
+                drawThreeLevelZones()
+            }
+
+            // Show subtle shadow-cone boundary rays spreading past blocking balls intersecting the landing zone
+            val landingDisk = Path().apply {
+                addOval(
+                    Rect(
+                        meanCenter.x - outerRadiusPx,
+                        meanCenter.y - outerRadiusPx,
+                        meanCenter.x + outerRadiusPx,
+                        meanCenter.y + outerRadiusPx,
+                    ),
+                )
+            }
+            val rayDash = PathEffect.dashPathEffect(floatArrayOf(ringDash * 0.85f, ringGap * 0.85f), 0f)
+            clipPath(landingDisk) {
+                for (wedge in visibility.shadowWedges) {
+                    val lt = toCanvasOffset(wedge.leftTangentMeters)
+                    val lf = toCanvasOffset(wedge.leftFarMeters)
+                    val rt = toCanvasOffset(wedge.rightTangentMeters)
+                    val rf = toCanvasOffset(wedge.rightFarMeters)
+                    drawLine(
+                        color = Color(0x6EF87171),
+                        start = lt,
+                        end = lf,
+                        strokeWidth = max(1.1f, pxPerMeter * 0.0032f),
+                        pathEffect = rayDash,
+                    )
+                    drawLine(
+                        color = Color(0x6EF87171),
+                        start = rt,
+                        end = rf,
+                        strokeWidth = max(1.1f, pxPerMeter * 0.0032f),
+                        pathEffect = rayDash,
+                    )
+                }
+            }
+        }
+
+        // Individual sigma-point landing cloud dots (warning coral if snookered/occluded)
         val dotRadius = max(2.2f, ballRadiusPx * 0.17f)
         for (pt in uncertainty.landingCloud) {
             val ptOffset = toCanvasOffset(pt)
+            val isOccluded = visibility != null && HeatZoneGenerator.isPointOccludedForPocket(pt, visibility)
             drawCircle(
-                color = Color(0xAA0C4A6E),
+                color = if (isOccluded) Color(0xCC7F1D1D) else Color(0xAA0C4A6E),
                 radius = dotRadius + 0.8f,
                 center = ptOffset,
             )
             drawCircle(
-                color = LandingCloudDotColor,
+                color = if (isOccluded) Color(0xFFF87171) else LandingCloudDotColor,
                 radius = dotRadius,
                 center = ptOffset,
             )
         }
 
         // Mean landing center marker
+        val meanOccluded = visibility != null &&
+            HeatZoneGenerator.isPointOccludedForPocket(uncertainty.meanLandingPosition, visibility)
         drawCircle(
-            color = Color(0xFF38BDF8),
+            color = if (meanOccluded) Color(0xFFF87171) else Color(0xFF38BDF8),
             radius = max(3f, ballRadiusPx * 0.25f),
             center = meanCenter,
             style = Stroke(width = max(1.5f, pxPerMeter * 0.0045f)),

@@ -211,4 +211,98 @@ class TableCollisionAndPlaybackTest {
             }
         }
     }
+
+    @Test
+    fun occlusionShadowConeRemovesHeatZoneBehindBlockingBall() {
+        val target = Ball(number = 7, position = Vec2(2.05, 0.92))
+        // Place a non-playable ball directly along the approach ray from table center toward #7 -> FOOT_RIGHT
+        val pocket = table.pockets.first { it.id == PocketId.FOOT_RIGHT }
+        val objDir = (pocket.center - target.position).normalized()
+        val ghostCenter = target.position - objDir * (2.0 * r)
+        val approachDir = (Vec2(0.85, 0.50) - ghostCenter).normalized()
+        val blocker = Ball(number = 12, position = ghostCenter + approachDir * 0.45)
+
+        val layout = TableLayout(
+            table = table,
+            balls = listOf(Ball(0, Vec2(0.35, 0.60)), target, blocker),
+        )
+
+        val visibility = HeatZoneGenerator.computePocketVisibility(layout, target, pocket)
+        assertTrue(visibility.isPocketClear, "Pocket corridor from #7 to FOOT_RIGHT should remain clear")
+
+        // Point directly behind the blocker along the spreading shadow cone
+        val snookeredPoint = ghostCenter + approachDir * 0.90
+        assertTrue(
+            HeatZoneGenerator.isPointOccludedForPocket(snookeredPoint, visibility),
+            "Point directly behind blocker must be occluded inside its spreading shadow wedge",
+        )
+
+        // Point clearly off to the side outside the shadow cone
+        val perp = Vec2(-approachDir.y, approachDir.x)
+        val openPoint = Vec2(1.25, 0.90).takeIf {
+            !HeatZoneGenerator.isPointOccludedForPocket(it, visibility)
+        } ?: (ghostCenter + approachDir * 0.60 + perp * 0.35)
+        assertFalse(
+            HeatZoneGenerator.isPointOccludedForPocket(openPoint, visibility),
+            "Unobstructed point outside the blocker cone should not be occluded",
+        )
+
+        val heatZone = HeatZoneGenerator.computeForNextBalls(
+            layout = layout,
+            targetBallNumbers = listOf(7),
+            cols = 32,
+            rows = 16,
+            preferredPocketId = PocketId.FOOT_RIGHT,
+        )
+        assertEquals(
+            0.0,
+            heatZone.valueAt(snookeredPoint),
+            1e-9,
+            "Heat zone cell directly behind blocking ball must be removed (0.0)",
+        )
+    }
+
+    @Test
+    fun friendlyBallBlockingGoalPocketRemovesHeatZoneForThatPocket() {
+        val target = Ball(number = 7, position = Vec2(1.75, 0.80))
+        val pocket = table.pockets.first { it.id == PocketId.FOOT_RIGHT }
+        val toPocketDir = (pocket.center - target.position).normalized()
+        // Friendly ball sits squarely between #7 and its goal pocket FOOT_RIGHT
+        val friendlyBlocker = Ball(number = 2, position = target.position + toPocketDir * 0.30)
+
+        val layout = TableLayout(
+            table = table,
+            balls = listOf(Ball(0, Vec2(0.60, 0.55)), target, friendlyBlocker),
+        )
+        val visibility = HeatZoneGenerator.computePocketVisibility(layout, target, pocket)
+        assertFalse(visibility.isPocketClear, "Friendly ball blocking target-to-pocket corridor must invalidate pocket visibility")
+
+        val heatZone = HeatZoneGenerator.computeForNextBalls(
+            layout = layout,
+            targetBallNumbers = listOf(7),
+            cols = 16,
+            rows = 8,
+            preferredPocketId = PocketId.FOOT_RIGHT,
+        )
+        assertTrue(
+            heatZone.cells.all { it.value == 0.0 },
+            "No heat zone should appear for a goal pocket blocked by a friendly ball",
+        )
+    }
+
+    @Test
+    fun backCutSideBehindTargetBallIsOccluded() {
+        val target = Ball(number = 9, position = Vec2(1.85, 0.75))
+        val pocket = table.pockets.first { it.id == PocketId.FOOT_RIGHT }
+        val toPocketDir = (pocket.center - target.position).normalized()
+        val layout = TableLayout(table = table, balls = listOf(Ball(0, Vec2(0.60, 0.55)), target))
+        val visibility = HeatZoneGenerator.computePocketVisibility(layout, target, pocket)
+
+        // Place cue on the pocket side of #9 (impossible >90 deg back-cut)
+        val pocketSidePoint = target.position + toPocketDir * 0.28
+        assertTrue(
+            HeatZoneGenerator.isPointOccludedForPocket(pocketSidePoint, visibility),
+            "Positions on the pocket side behind the object ball (>78 deg cut) must be excluded",
+        )
+    }
 }
