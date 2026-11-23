@@ -39,12 +39,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -671,6 +675,107 @@ fun SimpleProTogglePill(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * In-app brand badge matching the Minimal Vector launcher icon (crossed cues + 3-dot Pro-Cup cue ball).
+ */
+@Composable
+fun RunoutAppLogo(
+    modifier: Modifier = Modifier.size(56.dp),
+) {
+    Canvas(modifier = modifier) {
+        val s = size.minDimension
+        val corner = s * 0.225f
+        drawRoundRect(
+            color = RunoutColors.Background,
+            size = size,
+            cornerRadius = CornerRadius(corner, corner),
+        )
+        drawRoundRect(
+            color = Color(0xFF1E293B),
+            size = size,
+            cornerRadius = CornerRadius(corner, corner),
+            style = Stroke(width = (s * 0.025f).coerceAtLeast(1f)),
+        )
+
+        val cx = size.width * 0.5f
+        val cy = size.height * 0.5f
+        val unit = s / 108f
+
+        fun DrawScope.drawLogoCue(rotationDeg: Float, flipY: Boolean) {
+            withTransform({
+                translate(left = cx, top = cy)
+                rotate(degrees = rotationDeg, pivot = Offset.Zero)
+                if (flipY) scale(scaleX = 1f, scaleY = -1f, pivot = Offset.Zero)
+                scale(scaleX = unit * 1.24f, scaleY = unit * 1.24f, pivot = Offset.Zero)
+            }) {
+                val cuePath = Path().apply {
+                    moveTo(-34.2f, -2.67f)
+                    lineTo(34.18f, -1.22f)
+                    quadraticTo(36.1f, -0.75f, 36.1f, 0f)
+                    quadraticTo(36.1f, 0.75f, 34.18f, 1.22f)
+                    lineTo(-34.2f, 2.67f)
+                    quadraticTo(-36.1f, 1.8f, -36.1f, 0f)
+                    quadraticTo(-36.1f, -1.8f, -34.2f, -2.67f)
+                    close()
+                }
+                clipPath(cuePath) {
+                    drawRect(Color(0xFF334155), Offset(-36.5f, -3f), Size(15.83f, 6f))
+                    drawRect(Color(0xFF38BDF8), Offset(-20.67f, -3f), Size(1.47f, 6f))
+                    drawRect(Color(0xFF475569), Offset(-19.20f, -3f), Size(13.70f, 6f))
+                    drawRect(Color(0xFFF1D7B4), Offset(-5.50f, -3f), Size(36.30f, 6f))
+                    drawRect(Color(0xFFF8FAFC), Offset(30.80f, -3f), Size(2.53f, 6f))
+                    drawRect(Color(0xFF38BDF8), Offset(33.33f, -3f), Size(3.2f, 6f))
+                    drawRect(Color(0x2A000000), Offset(-36.5f, 0.2f), Size(73f, 3f))
+                }
+            }
+        }
+
+        drawLogoCue(rotationDeg = -135f, flipY = true)
+        drawLogoCue(rotationDeg = -45f, flipY = false)
+
+        val ballScale = unit * 1.24f
+        // Navy knockout border + cyan ring
+        drawCircle(
+            color = RunoutColors.Background,
+            radius = 17.72f * ballScale,
+            center = Offset(cx, cy),
+        )
+        drawCircle(
+            color = Color(0x4C38BDF8),
+            radius = 18.56f * ballScale,
+            center = Offset(cx, cy),
+            style = Stroke(width = 0.55f * ballScale),
+        )
+
+        val ballR = 16.24f * ballScale
+        val ballClip = Path().apply {
+            addOval(Rect(cx - ballR, cy - ballR, cx + ballR, cy + ballR))
+        }
+        clipPath(ballClip) {
+            drawCircle(
+                color = Color(0xFFF8FAFC),
+                radius = ballR,
+                center = Offset(cx, cy),
+            )
+            // Subtle lower-right cel shadow crescent
+            drawCircle(
+                color = Color(0xFFCBD5E1),
+                radius = ballR * 1.15f,
+                center = Offset(cx + ballR * 0.42f, cy + ballR * 0.45f),
+            )
+            drawCircle(
+                color = Color(0xFFF8FAFC),
+                radius = ballR,
+                center = Offset(cx - ballR * 0.22f, cy - ballR * 0.26f),
+            )
+            // 3 Classic Pro-Cup crimson dots
+            drawCircle(Color(0xFFEF4444), radius = 1.90f * ballScale, center = Offset(cx + 5.70f * ballScale, cy - 3.16f * ballScale))
+            drawCircle(Color(0xFFEF4444), radius = 1.79f * ballScale, center = Offset(cx - 5.91f * ballScale, cy + 4.22f * ballScale))
+            drawCircle(Color(0xFFEF4444), radius = 1.58f * ballScale, center = Offset(cx + 2.53f * ballScale, cy + 8.65f * ballScale))
         }
     }
 }

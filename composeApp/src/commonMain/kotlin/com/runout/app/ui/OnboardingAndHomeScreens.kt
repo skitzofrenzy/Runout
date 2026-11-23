@@ -147,19 +147,28 @@ fun OnboardingFlowScreen(
             ) {
                 when (step) {
                     0 -> {
-                        Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element)) {
-                            Text(
-                                text = "Your offline pool coach & shot planner.",
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onBackground,
-                            )
-                            Text(
-                                text = "See the highest-percentage shot, where the cue ball lands next, and clear explanations — right at the table.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Margin),
+                        ) {
+                            RunoutAppLogo(modifier = Modifier.size(60.dp))
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text(
+                                    text = "Your offline pool coach & shot planner.",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                )
+                            }
                         }
+                        Text(
+                            text = "See the highest-percentage shot, where the cue ball lands next, and clear explanations — right at the table.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
 
                         Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Card)) {
                             OnboardingValueCard(

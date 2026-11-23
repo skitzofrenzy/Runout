@@ -1,0 +1,42 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Upper-left pointing cue segments outside center ball knockout -->
+    <group
+        android:pivotX="0"
+        android:pivotY="0"
+        android:rotation="-135"
+        android:translateX="54"
+        android:translateY="54">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M-34.2,-2.67 L-17.80,-2.33 L-17.80,2.33 L-34.2,2.67 Q-36.1,1.8 -36.1,0 Q-36.1,-1.8 -34.2,-2.67 Z" />
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M17.80,-1.59 L34.18,-1.22 Q36.1,-0.75 36.1,0 Q36.1,0.75 34.18,1.22 L17.80,1.59 Z" />
+    </group>
+
+    <!-- Upper-right pointing cue segments outside center ball knockout -->
+    <group
+        android:pivotX="0"
+        android:pivotY="0"
+        android:rotation="-45"
+        android:translateX="54"
+        android:translateY="54">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M-34.2,-2.67 L-17.80,-2.33 L-17.80,2.33 L-34.2,2.67 Q-36.1,1.8 -36.1,0 Q-36.1,-1.8 -34.2,-2.67 Z" />
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M17.80,-1.59 L34.18,-1.22 Q36.1,-0.75 36.1,0 Q36.1,0.75 34.18,1.22 L17.80,1.59 Z" />
+    </group>
+
+    <!-- Foreground cue ball with 3 Pro-Cup dots punched in negative space via evenOdd -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M54,37.76 A16.24,16.24 0 1,0 54,70.24 A16.24,16.24 0 1,0 54,37.76 Z M59.70,48.94 A1.90,1.90 0 1,0 59.70,52.74 A1.90,1.90 0 1,0 59.70,48.94 Z M48.09,56.43 A1.79,1.79 0 1,0 48.09,60.01 A1.79,1.79 0 1,0 48.09,56.43 Z M56.53,61.07 A1.58,1.58 0 1,0 56.53,64.23 A1.58,1.58 0 1,0 56.53,61.07 Z" />
+</vector>
