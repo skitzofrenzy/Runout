@@ -1,6 +1,6 @@
 # Handover
 
-**Last updated:** 2026-11-20
+**Last updated:** 2026-11-23
 
 Where the project stands, what has been decided and why, and what to do next. Update this file whenever the state of the project changes.
 
@@ -36,6 +36,8 @@ All six roadmap milestones — 0 (Research & prototype), 1 (MVP), 2 (Photo detec
   - `PhotoCaptureEvaluator.processRawArgbFrame` and `SampleCapturedPhotos.renderPresetAsRawArgbFrame` wire raw `640×360` ARGB pixel decoding into `PhotoCaptureAndConfirmScreen` via the **Online Photo / Raw Pixel Frame Decoder** card (cloth colour selector, live HSV/corner/blob/SI-error readout, and **"Use Pixel-Detected Layout"** confirmation loader), while local `.png`/`.jpg` online photo and video frame diagnostics use the gitignored `ml/datasets/` folder (see [computer vision](research/computer-vision.md)).
 - **Planning readiness & confirmation guardrails (`:engine` + `:composeApp`):**
   - `PlanningReadinessValidator` (`com.runout.engine.planner`) and `EightBallGroup.UNSET` pause shot and run-out planning whenever the cue ball (`#0`) or the game's required end ball (`#8` for 8-Ball, `#9` for 9-Ball, `#10` for 10-Ball) is missing, or when an 8-Ball layout has not had a group explicitly chosen by the user (`Solids`/`Stripes`/`Open Table`, or `Yellows`/`Reds`/`Open Table` for `UK Blackball`). Both `PhotoCaptureAndConfirmScreen` and `App` (`Table & Planner`) surface clear confirmation prompts with one-tap group selection, missing-ball placement (`SampleLayouts.addMissingBall`), and game-type switching before planning resumes.
+- **UX/UI Design System (`docs/design_guide.md`):**
+  - Complete mobile UX architecture covering first-run skill-aware onboarding (`BEGINNER` / `INTERMEDIATE` / `ADVANCED`), `Home` landing dashboard with session continuity (`Continue Last Table` vs. `Reset`), 4-destination Bottom Navigation + Side Menu Drawer, 3-step real Camera/Gallery Photo Wizard, `Simple` vs. `Pro` progressive disclosure rules, strict component guidelines (tap tooltips, modal bottom sheets, collapsed accordions, dedicated full-screen views), 8 dp spacing & 48 dp touch tokens, divider rules, edge-to-edge safe insets, and a 3-phase Compose UI refactor plan.
 
 ## What's here
 
@@ -43,6 +45,7 @@ All six roadmap milestones — 0 (Research & prototype), 1 (MVP), 2 (Photo detec
 |---|---|
 | [README.md](../README.md) | Public project page: features, roadmap summary, planned stack |
 | [docs/README.md](README.md) | Docs index and confirmed conventions (SI units, table coordinates) |
+| [docs/design_guide.md](design_guide.md) | Mobile UX/UI architecture, onboarding, navigation, `Simple` vs. `Pro` progressive disclosure, visual tokens, and screen blueprints |
 | [docs/roadmap.md](roadmap.md) | Milestones 0–5, what each delivers, what is not planned |
 | [docs/adr/0001-cross-platform-kmp-compose.md](adr/0001-cross-platform-kmp-compose.md) | Architecture decision record: KMP + Compose Multiplatform for Android and iOS |
 | [docs/adr/0002-event-spin-physics-and-beam-planner.md](adr/0002-event-spin-physics-and-beam-planner.md) | Architecture decision record: Spin physics, sigma-point error model, and expectimax beam planner |
@@ -96,11 +99,15 @@ All six roadmap milestones — 0 (Research & prototype), 1 (MVP), 2 (Photo detec
 - Where the real-table training photos come from, and under what MIT-compatible licence.
 - Whether on-device Kotlin/Native profiling on mid-range iOS/Android hardware shows any bottleneck when live video tracking, ML detection, and `deepAnalysis` run together.
 
-## Next steps: Post-Milestone 5 hardware & runtime packaging
+## Next steps: Post-Milestone 5 UX refactor, hardware & runtime packaging
 
-1. **Persistence wiring:** wire `Room KMP` storage for saved `PlayerProfile`, `BallSetProfile`, `SavedTableProfile`, and `PracticeLogEntry` histories across app restarts.
-2. **On-device ML & camera/audio/MEMS runtime:** bundle Apache-2.0 `YOLOX` / `EfficientDet-Lite` ball-detector weights (`LiteRT` on Android, `CoreML`/`LiteRT` on iOS) alongside live `OpenCV` table corner rectification, `CameraX`/`AVFoundation`, `SensorManager`/`CMMotionManager`, and `AudioRecord`/`AVAudioEngine` live PCM envelope streaming.
-3. **iOS host build:** generate the `iosApp/` Xcode project on macOS and verify device builds alongside `./gradlew :engine:jvmTest`, `lint`, and `:composeApp:assembleDebug`.
+1. **Phased UX/UI overhaul & real Camera/Gallery capture (per [design guide](design_guide.md)):**
+   - *Phase A:* Edge-to-edge `Scaffold` + `TopAppBar`, 4-item Bottom `NavigationBar` + Side Menu drawer, `Home` dashboard with `Continue Last Table` vs. `Reset`, and Android `TakePicture` / `PickVisualMedia` camera & gallery photo import (plus iOS contract parity).
+   - *Phase B:* `Simple` | `Pro` mode toggle wired to `PlayerProfile.experienceLevel`, Hero Table above the fold, Bottom Sheets (`Game & Table`, `Edit Balls`, `Shot Options`), tap `ⓘ` glossary tooltips, and collapsed accordions.
+   - *Phase C:* 3-step skill-aware Onboarding, dedicated full-screen 2D/3D Walkthrough player, collapsed `Rules & FAQ` accordions, and drawer-routed Calibration & Practice Tools.
+2. **Persistence wiring:** wire `Room KMP` storage for saved `PlayerProfile`, `BallSetProfile`, `SavedTableProfile`, and `PracticeLogEntry` histories across app restarts.
+3. **On-device ML & camera/audio/MEMS runtime:** bundle Apache-2.0 `YOLOX` / `EfficientDet-Lite` ball-detector weights (`LiteRT` on Android, `CoreML`/`LiteRT` on iOS) alongside live `OpenCV` table corner rectification, `CameraX`/`AVFoundation`, `SensorManager`/`CMMotionManager`, and `AudioRecord`/`AVAudioEngine` live PCM envelope streaming.
+4. **iOS host build:** generate the `iosApp/` Xcode project on macOS and verify device builds alongside `./gradlew :engine:jvmTest`, `lint`, and `:composeApp:assembleDebug`.
 
 All six roadmap milestones are complete in pure KMP `:engine` and `:composeApp` (see [roadmap](roadmap.md)).
 

@@ -73,6 +73,7 @@ See [ADR-0001](docs/adr/0001-cross-platform-kmp-compose.md) for why Kotlin Multi
 
 - [Docs index](docs/README.md)
 - [Handover](docs/handover.md): current state, decisions and next steps
+- [Design guide](docs/design_guide.md): UX/UI flows, `Simple` vs. `Pro` progressive disclosure, and mobile design system
 - [Roadmap](docs/roadmap.md)
 - Research: [feasibility](docs/research/feasibility.md), [computer vision](docs/research/computer-vision.md), [physics](docs/research/physics.md), [strategy engine](docs/research/strategy-engine.md), [calibration](docs/research/calibration.md), [rules and content](docs/research/rules-and-content.md), [references](docs/research/references.md)
 

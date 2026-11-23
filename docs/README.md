@@ -5,6 +5,7 @@ Design notes and research for Runout. Nothing here is final: the notes change as
 ## Start here
 
 - [Handover](handover.md): where the project stands, what has been decided and why, and what to do next.
+- [Design guide](design_guide.md): UX/UI architecture, onboarding, navigation, progressive disclosure (`Simple` vs. `Pro`), visual tokens, and screen blueprints.
 - [Roadmap](roadmap.md): milestones, what each one delivers, and what is not planned.
 - [ADR-0001: Cross-platform KMP and Compose Multiplatform](adr/0001-cross-platform-kmp-compose.md): why Runout uses Kotlin Multiplatform and Compose Multiplatform for Android and iOS.
 
