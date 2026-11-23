@@ -5,6 +5,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -36,9 +37,11 @@ import com.runout.engine.math.Vec2
 import com.runout.engine.model.Ball
 import com.runout.engine.model.BallPaletteColor
 import com.runout.engine.model.BallSetProfile
+import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.CueBallSpinPreset
+import com.runout.engine.physics.DisplacedBallPath
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.physics.TrajectoryPath
 import com.runout.engine.planner.HeatZoneMap
@@ -71,6 +74,7 @@ private val LandingCloudDotColor = Color(0xD9BAE6FD)
 private val HeatZoneHighColor = Color(0x4D10B981)
 private val HeatZoneMediumColor = Color(0x42F59E0B)
 private val HeatZoneLowColor = Color(0x38F87171)
+private val DisturbedScatterColor = Color(0xFFF59E0B)
 
 private data class TableCanvasGeometry(
     val railPaddingPx: Float,
@@ -163,10 +167,16 @@ fun PoolTableCanvas(
     modifier: Modifier = Modifier,
     ballSet: BallSetProfile = BallSetProfile.standardPool(),
     onMoveBall: ((ballNumber: Int, newPosition: Vec2) -> Unit)? = null,
+    onDragStateChanged: ((isDragging: Boolean) -> Unit)? = null,
     visibleSpins: Set<CueBallSpinPreset> = CueBallSpinPreset.entries.toSet(),
     activeRunoutPlan: RunoutPlan? = null,
+    focusedStepIndex: Int? = null,
+    isDraggingBall: Boolean = false,
+    availablePockets: List<PocketId> = emptyList(),
+    onSelectPocket: ((PocketId) -> Unit)? = null,
     showHeatZone: Boolean = false,
     showLandingCloud: Boolean = true,
+    fitContainer: Boolean = false,
 ) {
     val table = layout.table
     val tableAspectRatio = (table.lengthMeters / table.widthMeters).toFloat()
@@ -176,6 +186,9 @@ fun PoolTableCanvas(
 
     val latestLayout by rememberUpdatedState(layout)
     val latestOnMoveBall by rememberUpdatedState(onMoveBall)
+    val latestOnDragStateChanged by rememberUpdatedState(onDragStateChanged)
+    val latestAvailablePockets by rememberUpdatedState(availablePockets)
+    val latestOnSelectPocket by rememberUpdatedState(onSelectPocket)
 
     val dragModifier = if (onMoveBall != null) {
         Modifier.pointerInput(true) {
@@ -205,6 +218,7 @@ fun PoolTableCanvas(
                     if (hitBall != null) {
                         draggedBallNumber = hitBall.number
                         dragPosPx = geom.toCanvasOffset(hitBall.position)
+                        latestOnDragStateChanged?.invoke(true)
                     } else {
                         draggedBallNumber = null
                     }
@@ -221,19 +235,71 @@ fun PoolTableCanvas(
                     )
                     latestOnMoveBall?.invoke(ballNumber, geom.toTableMeters(dragPosPx))
                 },
-                onDragEnd = { draggedBallNumber = null },
-                onDragCancel = { draggedBallNumber = null },
+                onDragEnd = {
+                    if (draggedBallNumber != null) {
+                        draggedBallNumber = null
+                        latestOnDragStateChanged?.invoke(false)
+                    }
+                },
+                onDragCancel = {
+                    if (draggedBallNumber != null) {
+                        draggedBallNumber = null
+                        latestOnDragStateChanged?.invoke(false)
+                    }
+                },
             )
         }
     } else {
         Modifier
     }
 
-    Canvas(
-        modifier = modifier
+    val pocketTapModifier = if (onSelectPocket != null) {
+        Modifier.pointerInput(true) {
+            detectTapGestures { tapOffset ->
+                val validPockets = latestAvailablePockets
+                if (validPockets.isEmpty()) return@detectTapGestures
+                val activeLayout = latestLayout
+                val geom = computeTableCanvasGeometry(
+                    canvasWidth = size.width.toFloat(),
+                    canvasHeight = size.height.toFloat(),
+                    table = activeLayout.table,
+                )
+                val validSet = validPockets.toSet()
+                val tappedPocket = activeLayout.table.pockets
+                    .filter { it.id in validSet }
+                    .map { pocket ->
+                        val center = geom.toCanvasOffset(pocket.center)
+                        val dist = hypot(tapOffset.x - center.x, tapOffset.y - center.y)
+                        val hitRadius = max(
+                            44f,
+                            (pocket.acceptanceRadiusMeters * geom.pxPerMeter * 1.9).toFloat(),
+                        )
+                        Triple(pocket, dist, hitRadius)
+                    }
+                    .filter { (_, dist, hitRadius) -> dist <= hitRadius }
+                    .minByOrNull { (_, dist, _) -> dist }
+                    ?.first
+                if (tappedPocket != null) {
+                    latestOnSelectPocket?.invoke(tappedPocket.id)
+                }
+            }
+        }
+    } else {
+        Modifier
+    }
+
+    val sizeModifier = if (fitContainer) {
+        modifier.fillMaxSize()
+    } else {
+        modifier
             .fillMaxWidth()
             .aspectRatio(tableAspectRatio)
-            .then(dragModifier),
+    }
+
+    Canvas(
+        modifier = sizeModifier
+            .then(dragModifier)
+            .then(pocketTapModifier),
     ) {
         val geom = computeTableCanvasGeometry(
             canvasWidth = size.width,
@@ -250,18 +316,22 @@ fun PoolTableCanvas(
         fun toCanvasOffset(siPos: Vec2): Offset = geom.toCanvasOffset(siPos)
 
         // 1. Wooden rails and cushion border
+        val railOuterLeft = playLeft - railPaddingPx
+        val railOuterTop = playTop - railPaddingPx
+        val railOuterWidth = playWidth + 2f * railPaddingPx
+        val railOuterHeight = playHeight + 2f * railPaddingPx
         val railCornerRadius = CornerRadius(railPaddingPx * 0.7f, railPaddingPx * 0.7f)
         drawRoundRect(
             color = RailWoodOuterColor,
-            topLeft = Offset.Zero,
-            size = size,
+            topLeft = Offset(railOuterLeft, railOuterTop),
+            size = Size(railOuterWidth, railOuterHeight),
             cornerRadius = railCornerRadius,
         )
         val innerWoodInset = railPaddingPx * 0.18f
         drawRoundRect(
             color = RailWoodInnerColor,
-            topLeft = Offset(innerWoodInset, innerWoodInset),
-            size = Size(size.width - 2f * innerWoodInset, size.height - 2f * innerWoodInset),
+            topLeft = Offset(railOuterLeft + innerWoodInset, railOuterTop + innerWoodInset),
+            size = Size(railOuterWidth - 2f * innerWoodInset, railOuterHeight - 2f * innerWoodInset),
             cornerRadius = CornerRadius(railPaddingPx * 0.55f, railPaddingPx * 0.55f),
         )
 
@@ -335,14 +405,23 @@ fun PoolTableCanvas(
 
         // 5. Six pockets (layout.table.pockets)
         val planSteps = activeRunoutPlan?.steps.orEmpty()
-        val firstPlanStep = planSteps.firstOrNull()
-        val targetPocketId = firstPlanStep?.pocketId ?: selectedShot?.pocket?.id
+        val clampedStepIdx = focusedStepIndex
+            ?.takeIf { planSteps.isNotEmpty() }
+            ?.coerceIn(0, planSteps.lastIndex)
+        val focusedStep = if (clampedStepIdx != null) planSteps[clampedStepIdx] else planSteps.firstOrNull()
+        val targetPocketId = if (!isDraggingBall) (focusedStep?.pocketId ?: selectedShot?.pocket?.id) else null
+        val selectablePocketsSet = if (!isDraggingBall) availablePockets.toSet() else emptySet()
         for (pocket in table.pockets) {
             val pocketCenter = toCanvasOffset(pocket.center)
             val pocketRadiusPx = (pocket.acceptanceRadiusMeters * pxPerMeter).toFloat()
             val isTargetPocket = pocket.id == targetPocketId
+            val isSelectablePocket = pocket.id in selectablePocketsSet
             drawCircle(
-                color = if (isTargetPocket) PotLineColor.copy(alpha = 0.45f) else PocketRimColor,
+                color = when {
+                    isTargetPocket -> PotLineColor.copy(alpha = 0.45f)
+                    isSelectablePocket -> PotLineColor.copy(alpha = 0.18f)
+                    else -> PocketRimColor
+                },
                 radius = pocketRadiusPx * 1.12f,
                 center = pocketCenter,
             )
@@ -354,38 +433,52 @@ fun PoolTableCanvas(
             if (isTargetPocket) {
                 drawCircle(
                     color = PotLineColor,
-                    radius = pocketRadiusPx * 1.16f,
+                    radius = pocketRadiusPx * 1.18f,
                     center = pocketCenter,
-                    style = Stroke(width = max(2f, pxPerMeter * 0.006f)),
+                    style = Stroke(width = max(2.2f, pxPerMeter * 0.0065f)),
+                )
+            } else if (isSelectablePocket) {
+                drawCircle(
+                    color = PotLineColor.copy(alpha = 0.55f),
+                    radius = pocketRadiusPx * 1.14f,
+                    center = pocketCenter,
+                    style = Stroke(width = max(1.4f, pxPerMeter * 0.0042f)),
                 )
             }
         }
 
-        // 6. Strategy plan / selected shot overlays
+        // 6. Strategy plan / selected shot overlays (suppressed while actively dragging for 60fps feedback)
         val ballRadiusPx = (table.ballRadiusMeters * pxPerMeter).toFloat()
-        if (activeRunoutPlan != null && planSteps.isNotEmpty()) {
-            drawRunoutPlanOverlay(
-                layout = layout,
-                plan = activeRunoutPlan,
-                showLandingCloud = showLandingCloud,
-                ballRadiusPx = ballRadiusPx,
-                pxPerMeter = pxPerMeter,
-                textMeasurer = textMeasurer,
-                toCanvasOffset = ::toCanvasOffset,
-            )
-        } else if (selectedShot != null) {
-            drawSelectedShotOverlay(
-                shot = selectedShot,
-                visibleSpins = visibleSpins,
-                ballRadiusMeters = table.ballRadiusMeters,
-                pxPerMeter = pxPerMeter,
-                toCanvasOffset = ::toCanvasOffset,
-            )
+        if (!isDraggingBall) {
+            if (activeRunoutPlan != null && planSteps.isNotEmpty()) {
+                drawRunoutPlanOverlay(
+                    layout = layout,
+                    plan = activeRunoutPlan,
+                    focusedStepIndex = clampedStepIdx,
+                    showLandingCloud = showLandingCloud,
+                    ballRadiusPx = ballRadiusPx,
+                    pxPerMeter = pxPerMeter,
+                    textMeasurer = textMeasurer,
+                    toCanvasOffset = ::toCanvasOffset,
+                )
+            } else if (selectedShot != null) {
+                drawSelectedShotOverlay(
+                    shot = selectedShot,
+                    visibleSpins = visibleSpins,
+                    ballRadiusMeters = table.ballRadiusMeters,
+                    pxPerMeter = pxPerMeter,
+                    toCanvasOffset = ::toCanvasOffset,
+                )
+            }
         }
 
         // 7. Balls on the playing surface
         val fontSizeSp = with(density) { (ballRadiusPx * 0.82f).toSp() }
-        val targetBallNumber = firstPlanStep?.targetBall?.number ?: selectedShot?.targetBall?.number
+        val targetBallNumber = if (!isDraggingBall) {
+            focusedStep?.targetBall?.number ?: selectedShot?.targetBall?.number
+        } else {
+            null
+        }
         for (ball in layout.balls) {
             val isTargetBall = ball.number == targetBallNumber
             drawPoolBall(
@@ -400,7 +493,7 @@ fun PoolTableCanvas(
         }
 
         // 8. Problem-ball dashed warning halos (drawn over balls so warnings remain crisp)
-        if (activeRunoutPlan != null && planSteps.isNotEmpty() && activeRunoutPlan.problemBalls.isNotEmpty()) {
+        if (!isDraggingBall && activeRunoutPlan != null && planSteps.isNotEmpty() && activeRunoutPlan.problemBalls.isNotEmpty()) {
             drawProblemBallHalos(
                 layout = layout,
                 problemBalls = activeRunoutPlan.problemBalls,
@@ -722,6 +815,7 @@ private fun DrawScope.drawHeatZoneOverlay(
 private fun DrawScope.drawRunoutPlanOverlay(
     layout: TableLayout,
     plan: RunoutPlan,
+    focusedStepIndex: Int? = null,
     showLandingCloud: Boolean,
     ballRadiusPx: Float,
     pxPerMeter: Float,
@@ -729,16 +823,19 @@ private fun DrawScope.drawRunoutPlanOverlay(
     toCanvasOffset: (Vec2) -> Offset,
 ) {
     val steps = plan.steps
-    val firstStep = steps.firstOrNull() ?: return
+    if (steps.isEmpty()) return
+
+    val activeIdx = focusedStepIndex?.coerceIn(0, steps.lastIndex) ?: 0
+    val primaryStep = steps[activeIdx]
 
     val cuePos = layout.cueBall()?.position
-    val firstGhostCenter = toCanvasOffset(firstStep.compensatedAim.compensatedGhostBallCenter)
-    val firstObjectPos = toCanvasOffset(firstStep.targetBall.position)
-    val firstPocketPos = toCanvasOffset(firstStep.pocketCenter)
+    val firstGhostCenter = toCanvasOffset(primaryStep.compensatedAim.compensatedGhostBallCenter)
+    val firstObjectPos = toCanvasOffset(primaryStep.targetBall.position)
+    val firstPocketPos = toCanvasOffset(primaryStep.pocketCenter)
     val dashLen = max(6f, pxPerMeter * 0.028f)
     val gapLen = max(4f, pxPerMeter * 0.018f)
 
-    // Step 1 object-ball pot line
+    // Active step object-ball pot line
     drawLine(
         color = PotLineColor,
         start = firstObjectPos,
@@ -747,7 +844,7 @@ private fun DrawScope.drawRunoutPlanOverlay(
         cap = StrokeCap.Round,
     )
 
-    // Step 1 spin-compensated aim line
+    // Active step spin-compensated aim line
     if (cuePos != null) {
         drawLine(
             color = AimLineColor,
@@ -766,26 +863,40 @@ private fun DrawScope.drawRunoutPlanOverlay(
         pxPerMeter = pxPerMeter,
     )
 
-    // Step 1 nominal post-impact cue-ball trajectory
+    // Active step nominal post-impact cue-ball trajectory
     drawSpinTrajectory(
-        trajectory = firstStep.uncertainty.nominalTrajectory,
+        trajectory = primaryStep.uncertainty.nominalTrajectory,
         isRecommended = true,
         ballRadiusPx = ballRadiusPx,
         pxPerMeter = pxPerMeter,
         toCanvasOffset = toCanvasOffset,
     )
 
-    // Step 1 cue-ball landing cloud & 95% spread confidence ring
+    // Active step cue-ball landing cloud & 95% spread confidence ring
     if (showLandingCloud) {
         drawLandingCloudOverlay(
-            uncertainty = firstStep.uncertainty,
+            uncertainty = primaryStep.uncertainty,
             ballRadiusPx = ballRadiusPx,
             pxPerMeter = pxPerMeter,
             toCanvasOffset = toCanvasOffset,
         )
     }
 
-    // Multi-step sequence indicators for Step 2, Step 3, ...
+    // Scatter paths for any cluster balls bumped during this shot
+    if (primaryStep.disturbedBalls.isNotEmpty()) {
+        drawDisturbedBallsOverlay(
+            disturbedBalls = primaryStep.disturbedBalls,
+            ballRadiusPx = ballRadiusPx,
+            pxPerMeter = pxPerMeter,
+            alpha = 0.92f,
+            toCanvasOffset = toCanvasOffset,
+        )
+    }
+
+    // In focused single-step playback mode, show only the active step cleanly.
+    if (focusedStepIndex != null) return
+
+    // Multi-step overview sequence indicators for Step 2, Step 3, ...
     val stepDash = max(5f, pxPerMeter * 0.020f)
     val stepGap = max(4f, pxPerMeter * 0.016f)
     val stepEffect = PathEffect.dashPathEffect(floatArrayOf(stepDash, stepGap), 0f)
@@ -825,6 +936,16 @@ private fun DrawScope.drawRunoutPlanOverlay(
             pathEffect = stepEffect,
         )
 
+        if (step.disturbedBalls.isNotEmpty()) {
+            drawDisturbedBallsOverlay(
+                disturbedBalls = step.disturbedBalls,
+                ballRadiusPx = ballRadiusPx * 0.9f,
+                pxPerMeter = pxPerMeter,
+                alpha = 0.65f,
+                toCanvasOffset = toCanvasOffset,
+            )
+        }
+
         // Step sequence badge next to the object ball
         drawStepNumberBadge(
             step = step,
@@ -832,6 +953,49 @@ private fun DrawScope.drawRunoutPlanOverlay(
             ballRadiusPx = ballRadiusPx,
             badgeColor = stepColor,
             textMeasurer = textMeasurer,
+        )
+    }
+}
+
+private fun DrawScope.drawDisturbedBallsOverlay(
+    disturbedBalls: List<DisplacedBallPath>,
+    ballRadiusPx: Float,
+    pxPerMeter: Float,
+    alpha: Float,
+    toCanvasOffset: (Vec2) -> Offset,
+) {
+    val dash = max(5f, pxPerMeter * 0.018f)
+    val gap = max(4f, pxPerMeter * 0.014f)
+    val scatterEffect = PathEffect.dashPathEffect(floatArrayOf(dash, gap), 0f)
+    val strokeW = max(1.8f, pxPerMeter * 0.0052f)
+    val color = DisturbedScatterColor.copy(alpha = alpha)
+
+    for (path in disturbedBalls) {
+        if (path.points.size < 2) continue
+        val pathObj = Path().apply {
+            val first = toCanvasOffset(path.points.first())
+            moveTo(first.x, first.y)
+            for (i in 1 until path.points.size) {
+                val pt = toCanvasOffset(path.points[i])
+                lineTo(pt.x, pt.y)
+            }
+        }
+        drawPath(
+            path = pathObj,
+            color = color,
+            style = Stroke(width = strokeW, cap = StrokeCap.Round, pathEffect = scatterEffect),
+        )
+        val endOffset = toCanvasOffset(path.points.last())
+        drawCircle(
+            color = color.copy(alpha = alpha * 0.20f),
+            radius = ballRadiusPx * 0.85f,
+            center = endOffset,
+        )
+        drawCircle(
+            color = color,
+            radius = ballRadiusPx * 0.85f,
+            center = endOffset,
+            style = Stroke(width = max(1.4f, strokeW * 0.85f)),
         )
     }
 }

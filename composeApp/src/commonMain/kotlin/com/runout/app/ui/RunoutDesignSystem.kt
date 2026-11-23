@@ -129,6 +129,10 @@ enum class RunoutIcon {
     SPEED,
     TIMER,
     TABLE,
+    FULLSCREEN,
+    EXIT_FULLSCREEN,
+    PREV,
+    NEXT,
 }
 
 @Composable
@@ -356,6 +360,68 @@ fun RunoutVectorIcon(
                     style = strokeStyle,
                 )
                 drawLine(tint, Offset(w * 0.50f, h * 0.24f), Offset(w * 0.50f, h * 0.76f), strokeWidth = stroke * 0.7f)
+            }
+
+            RunoutIcon.FULLSCREEN -> {
+                val brackets = Path().apply {
+                    // Top-left
+                    moveTo(w * 0.20f, h * 0.38f)
+                    lineTo(w * 0.20f, h * 0.20f)
+                    lineTo(w * 0.38f, h * 0.20f)
+                    // Top-right
+                    moveTo(w * 0.62f, h * 0.20f)
+                    lineTo(w * 0.80f, h * 0.20f)
+                    lineTo(w * 0.80f, h * 0.38f)
+                    // Bottom-right
+                    moveTo(w * 0.80f, h * 0.62f)
+                    lineTo(w * 0.80f, h * 0.80f)
+                    lineTo(w * 0.62f, h * 0.80f)
+                    // Bottom-left
+                    moveTo(w * 0.38f, h * 0.80f)
+                    lineTo(w * 0.20f, h * 0.80f)
+                    lineTo(w * 0.20f, h * 0.62f)
+                }
+                drawPath(brackets, color = tint, style = strokeStyle)
+            }
+
+            RunoutIcon.EXIT_FULLSCREEN -> {
+                val brackets = Path().apply {
+                    // Top-left inward
+                    moveTo(w * 0.18f, h * 0.38f)
+                    lineTo(w * 0.38f, h * 0.38f)
+                    lineTo(w * 0.38f, h * 0.18f)
+                    // Top-right inward
+                    moveTo(w * 0.62f, h * 0.18f)
+                    lineTo(w * 0.62f, h * 0.38f)
+                    lineTo(w * 0.82f, h * 0.38f)
+                    // Bottom-right inward
+                    moveTo(w * 0.82f, h * 0.62f)
+                    lineTo(w * 0.62f, h * 0.62f)
+                    lineTo(w * 0.62f, h * 0.82f)
+                    // Bottom-left inward
+                    moveTo(w * 0.38f, h * 0.82f)
+                    lineTo(w * 0.38f, h * 0.62f)
+                    lineTo(w * 0.18f, h * 0.62f)
+                }
+                drawPath(brackets, color = tint, style = strokeStyle)
+            }
+
+            RunoutIcon.PREV -> {
+                val chevron = Path().apply {
+                    moveTo(w * 0.64f, h * 0.22f)
+                    lineTo(w * 0.32f, h * 0.50f)
+                    lineTo(w * 0.64f, h * 0.78f)
+                }
+                drawPath(chevron, color = tint, style = strokeStyle)
+            }
+
+            RunoutIcon.NEXT -> {
+                val chevron = Path().apply {
+                    moveTo(w * 0.36f, h * 0.22f)
+                    lineTo(w * 0.68f, h * 0.50f)
+                    lineTo(w * 0.36f, h * 0.78f)
+                }
+                drawPath(chevron, color = tint, style = strokeStyle)
             }
         }
     }

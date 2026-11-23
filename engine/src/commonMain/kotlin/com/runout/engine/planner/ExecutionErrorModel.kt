@@ -9,7 +9,9 @@ import com.runout.engine.model.TableLayout
 import com.runout.engine.physics.CueBallTrajectory
 import com.runout.engine.physics.GhostBallAim
 import com.runout.engine.physics.MotionPhysics
+import com.runout.engine.physics.PostShotTableSimulation
 import com.runout.engine.physics.SpinPhysics
+import com.runout.engine.physics.TableCollisionSimulator
 import com.runout.engine.physics.TipOffset
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -29,6 +31,7 @@ data class ShotUncertaintyResult(
     val landingCloud: List<Vec2>,
     val meanLandingPosition: Vec2,
     val landingSpreadRadiusMeters: Double,
+    val postShotSimulation: PostShotTableSimulation? = null,
 )
 
 /**
@@ -109,6 +112,14 @@ object ExecutionErrorModel {
         val contactDist = cueBallRadius + targetBall.radiusMeters
         val contactGain = (1.0 + aim.cueToGhostDistanceMeters / (2.0 * targetBall.radiusMeters).coerceAtLeast(0.05)) * 0.18
         val cosCut = cos(aim.cutAngleRadians).coerceAtLeast(0.22)
+        val obstacleBalls = layout.balls.filter { !it.isCueBall && it.number != targetBall.number }
+        val nominalSimulation = TableCollisionSimulator.simulatePostImpact(
+            layout = layout,
+            targetBall = targetBall,
+            aim = aim,
+            cueSpeedMps = cueSpeedMps,
+            tip = tip,
+        )
 
         val landingCloud = ArrayList<Vec2>(stencil.size)
         var nominalTrajectory: CueBallTrajectory? = null
@@ -145,13 +156,18 @@ object ExecutionErrorModel {
                 )
             }
 
-            val trajectory = SpinPhysics.traceCueBallPathWithSpin(
-                aim = perturbedAim,
-                cueSpeedMps = perturbedSpeed,
-                tip = perturbedTip,
-                table = table,
-                ballRadiusMeters = cueBallRadius,
-            )
+            val trajectory = if (index == 0) {
+                nominalSimulation.cueBallTrajectory
+            } else {
+                SpinPhysics.traceCueBallPathWithSpin(
+                    aim = perturbedAim,
+                    cueSpeedMps = perturbedSpeed,
+                    tip = perturbedTip,
+                    table = table,
+                    ballRadiusMeters = cueBallRadius,
+                    obstacleBalls = obstacleBalls,
+                )
+            }
             if (index == 0) {
                 nominalTrajectory = trajectory
             }
@@ -226,6 +242,7 @@ object ExecutionErrorModel {
             landingCloud = landingCloud,
             meanLandingPosition = meanLanding,
             landingSpreadRadiusMeters = spreadRadius,
+            postShotSimulation = nominalSimulation,
         )
     }
 }

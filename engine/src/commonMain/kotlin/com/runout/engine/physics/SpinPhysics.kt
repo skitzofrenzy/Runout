@@ -14,6 +14,7 @@ import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 typealias GhostBallAim = AimGeometry
 typealias CueBallTrajectory = TrajectoryPath
@@ -237,39 +238,32 @@ object SpinPhysics {
     }
 
     /**
-     * Traces post-impact cue-ball motion across cloth and up to [maxBounces] cushion rebounds using
-     * continuous vertical spin (`TipOffset.clampedVerticalRatio`) and a Han (2005)-inspired
-     * side-spin cushion rebound model.
+     * Immediate post-impact cue-ball velocity (m/s) and initial deflection from the aim line (rad).
      */
-    fun traceCueBallPathWithSpin(
+    internal data class PostImpactCueState(
+        val initialVelocity: Vec2,
+        val extraSlideDistanceMeters: Double,
+        val effectiveInitialSpeedMps: Double,
+        val initialDeflectionAngleRad: Double,
+    )
+
+    internal fun computePostImpactCueState(
         aim: GhostBallAim,
         cueSpeedMps: Double,
         tip: TipOffset,
         table: TableSpec,
-        ballRadiusMeters: Double = TableSpec.POOL_BALL_RADIUS_METERS,
-        maxBounces: Int = 3,
-    ): CueBallTrajectory {
-        val preset = tip.toSpinPreset()
-        val start = aim.ghostBallCenter
+    ): PostImpactCueState {
+        if (cueSpeedMps <= 1e-6) {
+            return PostImpactCueState(Vec2.ZERO, 0.0, 0.0, 0.0)
+        }
         val absPhi = abs(aim.cutAngleRadians)
         val sinPhi = sin(absPhi)
         val cosPhi = cos(absPhi)
-
-        if (cueSpeedMps <= 1e-6) {
-            return CueBallTrajectory(
-                spin = preset,
-                points = listOf(start),
-                initialDeflectionAngleRad = 0.0,
-                hitsScratchPocket = detectScratchOnSegment(start, start, table.pockets)?.id,
-            )
-        }
-
         val tangentDir = if (aim.cutAngleRadians >= 0.0) {
             aim.objectBallDirection.rotate(-PI / 2.0)
         } else {
             aim.objectBallDirection.rotate(PI / 2.0)
         }
-
         val vertical = tip.clampedVerticalRatio
         // Map normalized vertical tip offset smoothly to dimensionless spin factor k in [-1.85, 1.35]:
         // STUN (0.0) -> 0.0, FOLLOW (+0.35) -> +1.0, DRAW (-0.38) -> -1.5.
@@ -294,12 +288,7 @@ object SpinPhysics {
 
         val baseSpeed = postSlideVelocity.length()
         if (baseSpeed <= 1e-6) {
-            return CueBallTrajectory(
-                spin = preset,
-                points = listOf(start),
-                initialDeflectionAngleRad = 0.0,
-                hitsScratchPocket = detectScratchOnSegment(start, start, table.pockets)?.id,
-            )
+            return PostImpactCueState(Vec2.ZERO, 0.0, 0.0, 0.0)
         }
 
         val initialDir = postSlideVelocity / baseSpeed
@@ -318,15 +307,56 @@ object SpinPhysics {
         } else {
             0.0
         }
+
         val initialRollingDist = MotionPhysics.rollingStoppingDistanceMeters(baseSpeed, muR, g) + extraSlideDist
         val effectiveInitialSpeed = MotionPhysics.initialRollingSpeedForDistance(initialRollingDist, muR, g)
 
+        return PostImpactCueState(
+            initialVelocity = initialDir * effectiveInitialSpeed,
+            extraSlideDistanceMeters = extraSlideDist,
+            effectiveInitialSpeedMps = effectiveInitialSpeed,
+            initialDeflectionAngleRad = initialDeflectionRad,
+        )
+    }
+
+    /**
+     * Traces post-impact cue-ball motion across cloth and up to [maxBounces] cushion rebounds using
+     * continuous vertical spin (`TipOffset.clampedVerticalRatio`) and a Han (2005)-inspired
+     * side-spin cushion rebound model, optionally deflecting off [obstacleBalls].
+     */
+    fun traceCueBallPathWithSpin(
+        aim: GhostBallAim,
+        cueSpeedMps: Double,
+        tip: TipOffset,
+        table: TableSpec,
+        ballRadiusMeters: Double = TableSpec.POOL_BALL_RADIUS_METERS,
+        maxBounces: Int = 3,
+        obstacleBalls: List<Ball> = emptyList(),
+    ): CueBallTrajectory {
+        val preset = tip.toSpinPreset()
+        val start = aim.ghostBallCenter
+        val postState = computePostImpactCueState(aim, cueSpeedMps, tip, table)
+
+        if (postState.effectiveInitialSpeedMps <= 1e-6) {
+            return CueBallTrajectory(
+                spin = preset,
+                points = listOf(start),
+                initialDeflectionAngleRad = 0.0,
+                hitsScratchPocket = detectScratchOnSegment(start, start, table.pockets)?.id,
+            )
+        }
+
+        val muR = table.cloth.rollingResistanceMuR.coerceAtLeast(1e-4)
+        val g = MotionPhysics.GRAVITY_M_S2
         val points = mutableListOf(start)
         var currentPos = start
-        var currentVel = initialDir * effectiveInitialSpeed
+        var currentVel = postState.initialVelocity
         val safeMaxBounces = maxBounces.coerceAtLeast(0)
+        val maxIterations = safeMaxBounces + 6
+        var railBounces = 0
+        var lastHitBallNumber: Int? = null
 
-        for (bounceIndex in 0..safeMaxBounces) {
+        for (iter in 0..maxIterations) {
             val speed = currentVel.length()
             if (speed <= 1e-6) break
 
@@ -334,11 +364,52 @@ object SpinPhysics {
             val stoppingDist = MotionPhysics.rollingStoppingDistanceMeters(speed, muR, g)
             if (stoppingDist <= 1e-6) break
 
-            val hit = intersectRails(currentPos, dir, table, ballRadiusMeters)
-            val travel = min(stoppingDist, hit.distance)
+            val railHit = intersectRails(currentPos, dir, table, ballRadiusMeters)
+            val ballHit = if (obstacleBalls.isNotEmpty()) {
+                findFirstObstacleHit(
+                    origin = currentPos,
+                    dir = dir,
+                    maxDistance = min(stoppingDist, railHit.distance),
+                    cueRadius = ballRadiusMeters,
+                    obstacles = obstacleBalls,
+                    ignoreBallNumber = lastHitBallNumber,
+                )
+            } else {
+                null
+            }
+
+            if (ballHit != null) {
+                val segEnd = currentPos + dir * ballHit.distance
+                val scratch = detectScratchOnSegment(currentPos, segEnd, table.pockets)
+                if (scratch != null) {
+                    points += scratch.center
+                    return CueBallTrajectory(
+                        spin = preset,
+                        points = points,
+                        initialDeflectionAngleRad = postState.initialDeflectionAngleRad,
+                        hitsScratchPocket = scratch.id,
+                    )
+                }
+                points += segEnd
+                val remainingDist = (stoppingDist - ballHit.distance).coerceAtLeast(0.0)
+                if (remainingDist <= 1e-6) break
+                val preHitSpeed = MotionPhysics.initialRollingSpeedForDistance(remainingDist, muR, g)
+                val preHitVel = dir * preHitSpeed
+                val normal = (ballHit.ball.position - segEnd).let { delta ->
+                    if (delta.lengthSquared() < 1e-12) dir else delta.normalized()
+                }
+                val vn = preHitVel.dot(normal).coerceAtLeast(0.0)
+                currentVel = preHitVel - normal * (vn * 0.965)
+                currentPos = segEnd
+                lastHitBallNumber = ballHit.ball.number
+                continue
+            }
+
+            lastHitBallNumber = null
+            val travel = min(stoppingDist, railHit.distance)
             val segEnd = currentPos + dir * travel
-            val extendedEnd = if (stoppingDist >= hit.distance) {
-                currentPos + dir * (hit.distance + ballRadiusMeters)
+            val extendedEnd = if (stoppingDist >= railHit.distance) {
+                currentPos + dir * (railHit.distance + ballRadiusMeters)
             } else {
                 segEnd
             }
@@ -349,20 +420,20 @@ object SpinPhysics {
                 return CueBallTrajectory(
                     spin = preset,
                     points = points,
-                    initialDeflectionAngleRad = initialDeflectionRad,
+                    initialDeflectionAngleRad = postState.initialDeflectionAngleRad,
                     hitsScratchPocket = scratch.id,
                 )
             }
 
             points += segEnd
-            if (stoppingDist <= hit.distance + 1e-6 || bounceIndex == safeMaxBounces) {
+            if (stoppingDist <= railHit.distance + 1e-6 || railBounces >= safeMaxBounces) {
                 break
             }
 
-            val remainingDist = (stoppingDist - hit.distance).coerceAtLeast(0.0)
+            val remainingDist = (stoppingDist - railHit.distance).coerceAtLeast(0.0)
             val impactSpeed = MotionPhysics.initialRollingSpeedForDistance(remainingDist, muR, g)
             val impactVel = dir * impactSpeed
-            val normal = inwardNormalForHit(hit, table, segEnd)
+            val normal = inwardNormalForHit(railHit, table, segEnd)
             val vNormalMag = abs(impactVel.dot(normal))
             if (vNormalMag <= 1e-6) break
 
@@ -372,7 +443,7 @@ object SpinPhysics {
             val ecEffective = (table.cloth.cushionRestitutionEc - 0.035 * vNormalMag).coerceIn(0.55, 0.90)
             val vNormalOut = vNormalMag * ecEffective
 
-            val sideSpinRatio = tip.clampedSideRatio * (0.72.pow(bounceIndex))
+            val sideSpinRatio = tip.clampedSideRatio * (0.72.pow(railBounces))
             val vTanIn = impactVel.dot(tangent)
             val vTanOut = vTanIn * 0.82 + sideSpinRatio * vNormalMag * 0.55
 
@@ -381,14 +452,51 @@ object SpinPhysics {
                 x = segEnd.x.coerceIn(ballRadiusMeters, (table.lengthMeters - ballRadiusMeters).coerceAtLeast(ballRadiusMeters)),
                 y = segEnd.y.coerceIn(ballRadiusMeters, (table.widthMeters - ballRadiusMeters).coerceAtLeast(ballRadiusMeters)),
             )
+            railBounces++
         }
 
         return CueBallTrajectory(
             spin = preset,
             points = points,
-            initialDeflectionAngleRad = initialDeflectionRad,
+            initialDeflectionAngleRad = postState.initialDeflectionAngleRad,
             hitsScratchPocket = null,
         )
+    }
+
+    private data class ObstacleHit(
+        val ball: Ball,
+        val distance: Double,
+    )
+
+    private fun findFirstObstacleHit(
+        origin: Vec2,
+        dir: Vec2,
+        maxDistance: Double,
+        cueRadius: Double,
+        obstacles: List<Ball>,
+        ignoreBallNumber: Int?,
+    ): ObstacleHit? {
+        if (maxDistance <= 1e-5) return null
+        var best: ObstacleHit? = null
+        var bestDist = maxDistance
+        for (ball in obstacles) {
+            if (ball.number == ignoreBallNumber) continue
+            val sumR = cueRadius + ball.radiusMeters - 1e-4
+            if (sumR <= 0.0) continue
+            val toObs = ball.position - origin
+            val proj = toObs.dot(dir)
+            if (proj <= 0.0) continue
+            val perpSq = toObs.lengthSquared() - proj * proj
+            val sumRSq = sumR * sumR
+            if (perpSq >= sumRSq) continue
+            val backDist = sqrt((sumRSq - perpSq).coerceAtLeast(0.0))
+            val hitDist = (proj - backDist).coerceAtLeast(0.0)
+            if (hitDist in 1e-4..bestDist) {
+                bestDist = hitDist
+                best = ObstacleHit(ball, hitDist)
+            }
+        }
+        return best
     }
 
     private data class RailHit(

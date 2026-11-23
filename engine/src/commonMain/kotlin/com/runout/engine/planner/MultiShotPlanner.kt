@@ -10,7 +10,9 @@ import com.runout.engine.model.PocketId
 import com.runout.engine.model.PocketSpec
 import com.runout.engine.model.TableLayout
 import com.runout.engine.physics.AimGeometry
+import com.runout.engine.physics.DisplacedBallPath
 import com.runout.engine.physics.GhostBallAiming
+import com.runout.engine.physics.PostShotTableSimulation
 import com.runout.engine.physics.SpinCompensatedAim
 import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
@@ -34,6 +36,8 @@ data class PlannedShotStep(
     val uncertainty: ShotUncertaintyResult,
     val breakoutOpportunity: BreakoutOpportunity? = null,
     val stepScore: Double,
+    val resultingLayout: TableLayout? = null,
+    val disturbedBalls: List<DisplacedBallPath> = emptyList(),
 )
 
 /**
@@ -101,6 +105,8 @@ object MultiShotPlanner {
         deepAnalysis: Boolean = false,
         customFirstShotTip: TipOffset? = null,
         customFirstShotSpeedScale: Int? = null,
+        customFirstShotTargetBallNumber: Int? = null,
+        customFirstShotPocketId: PocketId? = null,
     ): List<RunoutPlan> {
         if (layout.cueBall() == null) return emptyList()
         val objectBallCount = layout.balls.count { it.number != 0 }
@@ -117,6 +123,8 @@ object MultiShotPlanner {
                 PlayerProfile.MIN_SPEED_SCALE,
                 PlayerProfile.MAX_SPEED_SCALE,
             ),
+            customTargetBallNumber = customFirstShotTargetBallNumber,
+            customPocketId = customFirstShotPocketId,
         )
 
         val root = SearchNode(
@@ -176,6 +184,16 @@ object MultiShotPlanner {
         }
     }
 
+    /**
+     * Returns all pockets on [layout] into which [targetBall] currently has an unobstructed playable cut.
+     */
+    fun playablePocketsForTarget(layout: TableLayout, targetBall: Ball): List<PocketId> {
+        val cue = layout.cueBall() ?: return emptyList()
+        return layout.table.pockets
+            .filter { pocket -> playableAim(layout, cue, targetBall, pocket) != null }
+            .map { it.id }
+    }
+
     fun evaluateAgainstGreedyBaseline(
         racks: List<Pair<TableLayout, GameRulesState>>,
         playerProfile: PlayerProfile = PlayerProfile(),
@@ -229,19 +247,29 @@ object MultiShotPlanner {
         val profile: PlayerProfile,
         val customTip: TipOffset?,
         val customSpeedScale: Int?,
+        val customTargetBallNumber: Int? = null,
+        val customPocketId: PocketId? = null,
     ) {
         private val problemCache = HashMap<String, List<ProblemBallReport>>()
         private val heatCache = HashMap<String, HeatZoneMap>()
 
+        private fun layoutSignature(layout: TableLayout): String =
+            layout.balls
+                .filter { !it.isCueBall }
+                .sortedBy { it.number }
+                .joinToString(",") { b ->
+                    val gx = (b.position.x * 20.0).roundToInt()
+                    val gy = (b.position.y * 20.0).roundToInt()
+                    "${b.number}@${gx}_$gy"
+                }
+
         fun problemBalls(layout: TableLayout, rules: GameRulesState): List<ProblemBallReport> {
-            val key = layout.balls.filter { !it.isCueBall }.map { it.number }.sorted().joinToString(",") +
-                "|" + rules.gameType + "|" + rules.eightBallGroup
+            val key = layoutSignature(layout) + "|" + rules.gameType + "|" + rules.eightBallGroup
             return problemCache.getOrPut(key) { ProblemBallAnalyzer.analyzeProblemBalls(layout, rules) }
         }
 
         fun heatMap(layout: TableLayout, targetNumbers: List<Int>): HeatZoneMap {
-            val key = layout.balls.filter { !it.isCueBall }.map { it.number }.sorted().joinToString(",") +
-                "|" + targetNumbers.joinToString(",")
+            val key = layoutSignature(layout) + "|" + targetNumbers.joinToString(",")
             return heatCache.getOrPut(key) {
                 HeatZoneGenerator.computeForNextBalls(
                     layout = layout,
@@ -266,7 +294,13 @@ object MultiShotPlanner {
     private fun expand(node: SearchNode, ply: Int, context: SearchContext): List<SearchNode> {
         val cue = node.layout.cueBall() ?: return emptyList()
         val table = node.layout.table
-        val targets = node.rules.legalTargetBalls(node.layout)
+        val targets = node.rules.legalTargetBalls(node.layout).let { legal ->
+            if (ply == 1 && context.customTargetBallNumber != null) {
+                legal.filter { it.number == context.customTargetBallNumber }
+            } else {
+                legal
+            }
+        }
         if (targets.isEmpty()) return emptyList()
 
         val problemBalls = context.problemBalls(node.layout, node.rules)
@@ -278,10 +312,15 @@ object MultiShotPlanner {
             ply == 1 -> TipOffset.standardCandidates()
             else -> DEEP_PLY_TIPS
         }
+        val pockets = if (ply == 1 && context.customPocketId != null) {
+            table.pockets.filter { it.id == context.customPocketId }
+        } else {
+            table.pockets
+        }
 
         val children = mutableListOf<SearchNode>()
         for (target in targets) {
-            for (pocket in table.pockets) {
+            for (pocket in pockets) {
                 val aim = playableAim(node.layout, cue, target, pocket) ?: continue
                 var bestChild: SearchNode? = null
                 for (scale in speeds) {
@@ -338,7 +377,14 @@ object MultiShotPlanner {
             else -> BREAKOUT_BONUS_WITHOUT_INSURANCE
         }
 
-        val advanced = advance(node.layout, node.rules, cue, target, uncertainty.meanLandingPosition)
+        val advanced = advance(
+            layout = node.layout,
+            rules = node.rules,
+            cue = cue,
+            target = target,
+            landingPosition = uncertainty.meanLandingPosition,
+            simulation = uncertainty.postShotSimulation,
+        )
         val landing = advanced.layout.cueBall()?.position ?: uncertainty.meanLandingPosition
         val terminal = advanced.nextTargets.isEmpty()
         val leaveFactor = if (terminal) {
@@ -368,6 +414,8 @@ object MultiShotPlanner {
             uncertainty = uncertainty,
             breakoutOpportunity = breakout,
             stepScore = stepProbability * (1.0 + breakoutBonus),
+            resultingLayout = advanced.layout,
+            disturbedBalls = uncertainty.postShotSimulation?.disturbedBalls.orEmpty(),
         )
 
         return SearchNode(
@@ -458,15 +506,26 @@ object MultiShotPlanner {
         cue: Ball,
         target: Ball,
         landingPosition: Vec2,
+        simulation: PostShotTableSimulation? = null,
     ): AdvancedState {
-        val table = layout.table
-        val landing = Vec2(
+        val baseLayout = simulation?.resultingLayout ?: TableLayout(
+            table = layout.table,
+            balls = layout.balls.filter { it.number != target.number },
+        )
+        val table = baseLayout.table
+        val clampedMean = Vec2(
             landingPosition.x.coerceIn(cue.radiusMeters, (table.lengthMeters - cue.radiusMeters).coerceAtLeast(cue.radiusMeters)),
             landingPosition.y.coerceIn(cue.radiusMeters, (table.widthMeters - cue.radiusMeters).coerceAtLeast(cue.radiusMeters)),
         )
-        val nextBalls = layout.balls
-            .filter { it.number != target.number }
-            .map { if (it.isCueBall) it.copy(position = landing) else it }
+        val meanOverlapsObject = baseLayout.balls.any {
+            !it.isCueBall && it.position.distanceTo(clampedMean) < LANDING_CLEARANCE_FACTOR * cue.radiusMeters
+        }
+        val finalCuePos = if (!meanOverlapsObject) {
+            clampedMean
+        } else {
+            baseLayout.cueBall()?.position ?: clampedMean
+        }
+        val nextBalls = baseLayout.balls.map { if (it.isCueBall) it.copy(position = finalCuePos) else it }
         val nextLayout = TableLayout(table, nextBalls)
         val nextRules = rulesAfterPotting(rules, target)
         val nextTargets = if (isGameOver(rules, target)) emptyList() else nextRules.legalTargetBalls(nextLayout)
@@ -504,7 +563,7 @@ object MultiShotPlanner {
         playerProfile: PlayerProfile,
     ): HeatZoneMap? {
         val first = steps.firstOrNull() ?: return null
-        val afterFirst = TableLayout(
+        val afterFirst = first.resultingLayout ?: TableLayout(
             initialLayout.table,
             initialLayout.balls.filter { it.number != first.targetBall.number },
         )

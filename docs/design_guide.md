@@ -368,6 +368,11 @@ SIMPLE MODE (Above the fold = Table + #1 Shot!)   PRO MODE (Same Hero Table + Ri
 +---------------------------------------+         +---------------------------------------+
 ```
 
+- **Debounced Ball Dragging (`PoolTableCanvas`):** Moving balls suppresses trajectory overlays while dragging (`60 fps`) and defers multi-shot planning `150 ms` after finger release on `Dispatchers.Default`.
+- **Step-by-Step Playback Bar (`StepPlaybackControlBar`):** `[< Prev] Shot X/Y [Next >]`, `[Step | All]`, and `Edit Here` step forward through evolved post-collision tables (including scattered cluster ball trajectories) without mutating the starting rack until applied.
+- **Interactive Pocket Switching (`PocketSelectorStrip` + canvas tap):** Tap any highlighted pocket directly on the table or use the `Auto Pocket` / pocket strip to test alternate routes for Shot 1.
+- **Fullscreen Landscape Table (`FullscreenTableScreen`):** Entered via the TopAppBar/strip `Fullscreen` action or wide-landscape rotation (`maxWidth > maxHeight && maxWidth >= 560.dp`); maximizes the `2:1` table alongside the top pocket HUD, floating `[< Prev] / [Next >]` playback bar, and `92 dp` vertical right action rail (`Exit`, `Mode`, `Balls`, `Spin`, `Game`, `Options`, `Scan`).
+
 ### C. `Learn` & `Rules`
 - **`Learn`:** Top secondary `TabRow` with **`Walkthroughs`**, **`Tutorials`**, **`Drills`**. Tapping any card pushes a **Dedicated Full-Screen Player** (hidden bottom nav) featuring clean `Phase 1 (Text + Diagrams)` / `Phase 2 (3D Orbit + Frame Scrubber)` toggle and **`Try on Table Planner`** button.
 - **`Rules`:** `OutlinedTextField` search bar + single horizontal Game filter chip strip (`All`, `8-Ball`, `Blackball`, `9-Ball`, `10-Ball`, `Snooker`). Each rule renders as a **collapsed accordion card** (Title + Game pill + 1-line summary + chevron) that expands in-place to show Full Rule, Concrete On-Table Example, and Official Citation (`WPA`/`WPBSA`).

@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -56,6 +57,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -79,15 +81,18 @@ import com.runout.app.ui.CollapsibleSectionCard
 import com.runout.app.ui.CueTipSelectorCanvas
 import com.runout.app.ui.EditBallsSheet
 import com.runout.app.ui.ExtrasAndToolsScreen
+import com.runout.app.ui.FullscreenTableScreen
 import com.runout.app.ui.GameAndTableSetupSheet
 import com.runout.app.ui.GlossaryInfoButton
 import com.runout.app.ui.HomeLandingScreen
 import com.runout.app.ui.LearnHubScreen
 import com.runout.app.ui.LearnSubTab
+import com.runout.app.ui.LockLandscapeEffect
 import com.runout.app.ui.OnboardingFlowScreen
 import com.runout.app.ui.PhotoCaptureAndConfirmScreen
 import com.runout.app.ui.PlayerProfileScreen
 import com.runout.app.ui.PlanningHorizonOption
+import com.runout.app.ui.PocketSelectorStrip
 import com.runout.app.ui.PoolTableCanvas
 import com.runout.app.ui.QuickSpinSheet
 import com.runout.app.ui.RulesAndFaqScreen
@@ -101,10 +106,12 @@ import com.runout.app.ui.SampleLayouts
 import com.runout.app.ui.SampleScenario
 import com.runout.app.ui.ShotOptionsSheet
 import com.runout.app.ui.SimpleProTogglePill
+import com.runout.app.ui.StepPlaybackControlBar
 import com.runout.app.ui.ToolFocusDestination
 import com.runout.app.ui.TutorialDetailPlayerScreen
 import com.runout.app.ui.WalkthroughDetailPlayerScreen
 import com.runout.app.ui.ballBaseColor
+import com.runout.app.ui.resolveDisplayedLayoutForStep
 import com.runout.app.ui.spinColor
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.AssumedSurfacePreset
@@ -116,6 +123,7 @@ import com.runout.engine.model.ExperienceLevel
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
+import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.CueBallSpinPreset
@@ -133,7 +141,10 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.round
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val METERS_TO_CM: Double = 100.0
 private const val METERS_TO_FEET: Double = 3.28084
@@ -227,6 +238,16 @@ fun App() {
     var selectedPlanIndex by remember { mutableIntStateOf(0) }
     var selectedShotIndex by remember { mutableIntStateOf(0) }
 
+    var isDraggingBall by remember { mutableStateOf(false) }
+    var isPlanning by remember { mutableStateOf(false) }
+    var customPocketOverride by remember { mutableStateOf<PocketId?>(null) }
+    var focusedStepIndex by remember { mutableIntStateOf(0) }
+    var showAllStepsOverlay by remember { mutableStateOf(false) }
+    var isFullscreenTable by remember { mutableStateOf(false) }
+    var dismissAutoLandscape by remember { mutableStateOf(false) }
+    var runoutPlans by remember { mutableStateOf<List<RunoutPlan>>(emptyList()) }
+    var rankedShots by remember { mutableStateOf<List<ShotRecommendation>>(emptyList()) }
+
     val planningReadiness = remember(currentLayout, rulesState, ballSetProfile) {
         PlanningReadinessValidator.evaluate(
             layout = currentLayout,
@@ -235,50 +256,99 @@ fun App() {
         )
     }
 
-    val runoutPlans = remember(
+    val playablePockets = remember(currentLayout, rulesState, planningReadiness.isReady) {
+        if (!planningReadiness.isReady) {
+            emptyList()
+        } else {
+            val legalTargets = rulesState.legalTargetBalls(currentLayout)
+            val validSet = legalTargets
+                .flatMap { ball -> MultiShotPlanner.playablePocketsForTarget(currentLayout, ball) }
+                .toSet()
+            PocketId.entries.filter { it in validSet }
+        }
+    }
+
+    LaunchedEffect(playablePockets, isDraggingBall) {
+        if (!isDraggingBall && customPocketOverride != null && customPocketOverride !in playablePockets) {
+            customPocketOverride = null
+        }
+    }
+
+    LaunchedEffect(
         currentLayout,
         rulesState,
         playerProfile,
         selectedHorizon,
         customTipOffset,
         speedScaleOverride,
+        customPocketOverride,
         planningReadiness.isReady,
+        isDraggingBall,
     ) {
-        if (!planningReadiness.isReady) return@remember emptyList()
-        MultiShotPlanner.planRunout(
-            layout = currentLayout,
-            rulesState = rulesState,
-            playerProfile = playerProfile,
-            horizonShots = selectedHorizon.horizonShots,
-            deepAnalysis = selectedHorizon.deepAnalysis,
-            customFirstShotTip = customTipOffset,
-            customFirstShotSpeedScale = speedScaleOverride,
-        )
-    }
-
-    val rankedShots = remember(
-        currentLayout,
-        rulesState,
-        playerProfile,
-        speedScaleOverride,
-        planningReadiness.isReady,
-    ) {
-        if (!planningReadiness.isReady) return@remember emptyList()
-        OneShotPlanner.rankShots(
-            layout = currentLayout,
-            rulesState = rulesState,
-            playerProfile = playerProfile,
-            cueSpeedScaleOverride = speedScaleOverride,
-        )
+        if (!planningReadiness.isReady) {
+            runoutPlans = emptyList()
+            rankedShots = emptyList()
+            isPlanning = false
+            return@LaunchedEffect
+        }
+        if (isDraggingBall) {
+            // Keep finger dragging at 60 fps and defer heavy multi-shot tree search until release.
+            return@LaunchedEffect
+        }
+        isPlanning = true
+        delay(150L)
+        val layoutSnapshot = currentLayout
+        val rulesSnapshot = rulesState
+        val profileSnapshot = playerProfile
+        val horizonSnapshot = selectedHorizon
+        val tipSnapshot = customTipOffset
+        val speedSnapshot = speedScaleOverride
+        val pocketSnapshot = customPocketOverride
+        val (plans, shots) = withContext(Dispatchers.Default) {
+            val computedPlans = MultiShotPlanner.planRunout(
+                layout = layoutSnapshot,
+                rulesState = rulesSnapshot,
+                playerProfile = profileSnapshot,
+                horizonShots = horizonSnapshot.horizonShots,
+                deepAnalysis = horizonSnapshot.deepAnalysis,
+                customFirstShotTip = tipSnapshot,
+                customFirstShotSpeedScale = speedSnapshot,
+                customFirstShotPocketId = pocketSnapshot,
+            )
+            val computedShots = OneShotPlanner.rankShots(
+                layout = layoutSnapshot,
+                rulesState = rulesSnapshot,
+                playerProfile = profileSnapshot,
+                cueSpeedScaleOverride = speedSnapshot,
+            )
+            computedPlans to computedShots
+        }
+        runoutPlans = plans
+        rankedShots = shots
+        isPlanning = false
     }
 
     val safePlanIndex = selectedPlanIndex.coerceIn(0, (runoutPlans.size - 1).coerceAtLeast(0))
     val activePlan = runoutPlans.getOrNull(safePlanIndex)
     val safeShotIndex = selectedShotIndex.coerceIn(0, (rankedShots.size - 1).coerceAtLeast(0))
     val selectedShot = rankedShots.getOrNull(safeShotIndex)
+    val safeFocusedStepIndex = focusedStepIndex.coerceIn(
+        0,
+        ((activePlan?.steps?.size ?: 1) - 1).coerceAtLeast(0),
+    )
+    val displayedLayout = remember(currentLayout, activePlan, safeFocusedStepIndex) {
+        resolveDisplayedLayoutForStep(
+            baseLayout = currentLayout,
+            plan = activePlan,
+            focusedStepIndex = safeFocusedStepIndex,
+        )
+    }
 
     fun navigateToTab(tab: PrimaryTab) {
         lastPrimaryTab = tab
+        if (tab != PrimaryTab.PLAN) {
+            isFullscreenTable = false
+        }
         activeRoute = ActiveRoute.MainTab(tab)
     }
 
@@ -287,7 +357,46 @@ fun App() {
         if (current is ActiveRoute.MainTab) {
             lastPrimaryTab = current.tab
         }
+        isFullscreenTable = false
         activeRoute = route
+    }
+
+    fun handleMoveBall(ballNumber: Int, newPosition: Vec2) {
+        val baseLayout = if (safeFocusedStepIndex > 0) displayedLayout else currentLayout
+        currentLayout = SampleLayouts.moveBallSafely(baseLayout, ballNumber, newPosition)
+        if (safeFocusedStepIndex > 0) focusedStepIndex = 0
+        if (customPocketOverride != null) customPocketOverride = null
+        hasActiveSession = true
+    }
+
+    fun handlePrevStep() {
+        focusedStepIndex = (safeFocusedStepIndex - 1).coerceAtLeast(0)
+    }
+
+    fun handleNextStep() {
+        val maxIdx = ((activePlan?.steps?.size ?: 1) - 1).coerceAtLeast(0)
+        focusedStepIndex = (safeFocusedStepIndex + 1).coerceAtMost(maxIdx)
+        showAllStepsOverlay = false
+    }
+
+    fun handleToggleAllStepsOverlay() {
+        if (safeFocusedStepIndex > 0) {
+            focusedStepIndex = 0
+            showAllStepsOverlay = true
+        } else {
+            showAllStepsOverlay = !showAllStepsOverlay
+        }
+    }
+
+    fun handleApplyCurrentStepToTable() {
+        if (safeFocusedStepIndex > 0) {
+            currentLayout = displayedLayout
+            focusedStepIndex = 0
+            customPocketOverride = null
+            selectedPlanIndex = 0
+            selectedShotIndex = 0
+            hasActiveSession = true
+        }
     }
 
     fun performResetWithUndo() {
@@ -302,6 +411,8 @@ fun App() {
         selectedPresetIndex = 0
         customTipOffset = null
         speedScaleOverride = null
+        customPocketOverride = null
+        focusedStepIndex = 0
         selectedPlanIndex = 0
         selectedShotIndex = 0
         hasActiveSession = false
@@ -317,6 +428,7 @@ fun App() {
                 rulesState = previousRules
                 selectedPresetIndex = previousPresetIdx
                 hasActiveSession = previousHasSession
+                focusedStepIndex = 0
             }
         }
     }
@@ -364,6 +476,74 @@ fun App() {
         }
 
         val isTopLevel = activeRoute is ActiveRoute.MainTab
+        LockLandscapeEffect(
+            lockLandscape = isFullscreenTable &&
+                activeRoute == ActiveRoute.MainTab(PrimaryTab.PLAN) &&
+                !showOnboarding,
+        )
+
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val isWideLandscape = maxWidth > maxHeight && maxWidth >= 560.dp
+            LaunchedEffect(isWideLandscape) {
+                if (!isWideLandscape) {
+                    dismissAutoLandscape = false
+                }
+            }
+            val showFullscreenLandscape = activeRoute == ActiveRoute.MainTab(PrimaryTab.PLAN) &&
+                (isFullscreenTable || (isWideLandscape && !dismissAutoLandscape))
+
+            if (showFullscreenLandscape) {
+                FullscreenTableScreen(
+                    displayMode = displayMode,
+                    onDisplayModeChange = { displayMode = it },
+                    displayedLayout = displayedLayout,
+                    rulesState = rulesState,
+                    ballSetProfile = ballSetProfile,
+                    planningReadiness = planningReadiness,
+                    activePlan = activePlan,
+                    selectedShot = selectedShot,
+                    focusedStepIndex = safeFocusedStepIndex,
+                    showAllStepsOverlay = showAllStepsOverlay,
+                    isPlanning = isPlanning,
+                    isDraggingBall = isDraggingBall,
+                    visibleSpins = visibleSpins,
+                    showHeatZone = showHeatZone,
+                    showLandingCloud = showLandingCloud,
+                    playablePockets = playablePockets,
+                    customPocketOverride = customPocketOverride,
+                    onSelectPocketOverride = { pocket ->
+                        customPocketOverride = pocket
+                        focusedStepIndex = 0
+                        selectedPlanIndex = 0
+                        selectedShotIndex = 0
+                    },
+                    onMoveBall = ::handleMoveBall,
+                    onDragStateChanged = { isDraggingBall = it },
+                    onPrevStep = ::handlePrevStep,
+                    onNextStep = ::handleNextStep,
+                    onToggleAllStepsOverlay = ::handleToggleAllStepsOverlay,
+                    onApplyCurrentStepToTable = ::handleApplyCurrentStepToTable,
+                    onToggleFullscreen = {
+                        if (isFullscreenTable) {
+                            isFullscreenTable = false
+                        } else {
+                            dismissAutoLandscape = true
+                        }
+                    },
+                    onOpenGameSetupSheet = { showGameSetupSheet = true },
+                    onOpenEditBallsSheet = { showEditBallsSheet = true },
+                    onOpenQuickSpinSheet = { showQuickSpinSheet = true },
+                    onOpenShotOptionsSheet = { showShotOptionsSheet = true },
+                    onOpenPhotoScan = { navigateToSubRoute(ActiveRoute.PhotoScan) },
+                )
+
+                SnackbarHost(
+                    hostState = snackbarHostState,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .safeDrawingPadding(),
+                )
+            } else {
         ModalNavigationDrawer(
             drawerState = drawerState,
             gesturesEnabled = isTopLevel,
@@ -605,6 +785,21 @@ fun App() {
                                         onModeChange = { displayMode = it },
                                     )
                                     IconButton(
+                                        onClick = {
+                                            dismissAutoLandscape = false
+                                            isFullscreenTable = true
+                                        },
+                                        modifier = Modifier.defaultMinSize(
+                                            minWidth = RunoutSpacing.MinTouchTarget,
+                                            minHeight = RunoutSpacing.MinTouchTarget,
+                                        ),
+                                    ) {
+                                        RunoutVectorIcon(
+                                            icon = RunoutIcon.FULLSCREEN,
+                                            tint = MaterialTheme.colorScheme.onSurface,
+                                        )
+                                    }
+                                    IconButton(
                                         onClick = { navigateToSubRoute(ActiveRoute.PhotoScan) },
                                         modifier = Modifier.defaultMinSize(
                                             minWidth = RunoutSpacing.MinTouchTarget,
@@ -633,6 +828,14 @@ fun App() {
                                             expanded = showPlanOverflowMenu,
                                             onDismissRequest = { showPlanOverflowMenu = false },
                                         ) {
+                                            DropdownMenuItem(
+                                                text = { Text("Fullscreen Landscape Table") },
+                                                onClick = {
+                                                    showPlanOverflowMenu = false
+                                                    dismissAutoLandscape = false
+                                                    isFullscreenTable = true
+                                                },
+                                            )
                                             DropdownMenuItem(
                                                 text = { Text("Scan or Import Photo") },
                                                 onClick = {
@@ -738,11 +941,14 @@ fun App() {
 
                             PrimaryTab.PLAN -> RunoutPracticeScreen(
                                 displayMode = displayMode,
-                                currentLayout = currentLayout,
+                                currentLayout = displayedLayout,
+                                totalObjectBallsCount = currentLayout.objectBalls().size,
                                 rulesState = rulesState,
                                 onSelectRules = { nextRules ->
                                     rulesState = nextRules
                                     hasActiveSession = true
+                                    customPocketOverride = null
+                                    focusedStepIndex = 0
                                     selectedPlanIndex = 0
                                     selectedShotIndex = 0
                                 },
@@ -750,16 +956,22 @@ fun App() {
                                 onOpenEditBallsSheet = { showEditBallsSheet = true },
                                 onOpenShotOptionsSheet = { showShotOptionsSheet = true },
                                 onOpenQuickSpinSheet = { showQuickSpinSheet = true },
+                                onEnterFullscreen = {
+                                    dismissAutoLandscape = false
+                                    isFullscreenTable = true
+                                },
                                 playerProfile = playerProfile,
                                 ballSetProfile = ballSetProfile,
                                 onAddMissingBall = { ballNumber ->
                                     currentLayout = SampleLayouts.addMissingBall(currentLayout, ballNumber)
+                                    customPocketOverride = null
+                                    focusedStepIndex = 0
                                     hasActiveSession = true
                                 },
-                                onMoveBall = { ballNumber, newPosition ->
-                                    currentLayout = SampleLayouts.moveBallSafely(currentLayout, ballNumber, newPosition)
-                                    hasActiveSession = true
-                                },
+                                onMoveBall = ::handleMoveBall,
+                                isDraggingBall = isDraggingBall,
+                                onDragStateChanged = { isDraggingBall = it },
+                                isPlanning = isPlanning,
                                 planningReadiness = planningReadiness,
                                 rankedShots = rankedShots,
                                 selectedShotIndex = safeShotIndex,
@@ -774,17 +986,36 @@ fun App() {
                                 customTipOffset = customTipOffset,
                                 onUpdateCustomTip = { nextTip ->
                                     customTipOffset = nextTip
+                                    focusedStepIndex = 0
                                     selectedPlanIndex = 0
                                 },
                                 runoutPlans = runoutPlans,
                                 selectedPlanIndex = safePlanIndex,
-                                onSelectPlan = { selectedPlanIndex = it },
+                                onSelectPlan = {
+                                    selectedPlanIndex = it
+                                    focusedStepIndex = 0
+                                },
                                 activePlan = activePlan,
+                                focusedStepIndex = safeFocusedStepIndex,
+                                showAllStepsOverlay = showAllStepsOverlay,
+                                onPrevStep = ::handlePrevStep,
+                                onNextStep = ::handleNextStep,
+                                onToggleAllStepsOverlay = ::handleToggleAllStepsOverlay,
+                                onApplyCurrentStepToTable = ::handleApplyCurrentStepToTable,
+                                playablePockets = playablePockets,
+                                customPocketOverride = customPocketOverride,
+                                onSelectPocketOverride = { pocket ->
+                                    customPocketOverride = pocket
+                                    focusedStepIndex = 0
+                                    selectedPlanIndex = 0
+                                    selectedShotIndex = 0
+                                },
                                 onUpdateClothParams = { updatedCloth ->
                                     activeTableProfileId = null
                                     currentLayout = currentLayout.copy(
                                         table = currentLayout.table.withClothParams(updatedCloth),
                                     )
+                                    focusedStepIndex = 0
                                     hasActiveSession = true
                                 },
                             )
@@ -801,6 +1032,8 @@ fun App() {
                                     rulesState = rules
                                     selectedPresetIndex = -1
                                     customTipOffset = null
+                                    customPocketOverride = null
+                                    focusedStepIndex = 0
                                     hasActiveSession = true
                                     selectedPlanIndex = 0
                                     selectedShotIndex = 0
@@ -827,6 +1060,8 @@ fun App() {
                                 ballSetProfile = scannedBallSet
                                 selectedPresetIndex = -1
                                 customTipOffset = null
+                                customPocketOverride = null
+                                focusedStepIndex = 0
                                 hasActiveSession = true
                                 selectedPlanIndex = 0
                                 selectedShotIndex = 0
@@ -931,6 +1166,7 @@ fun App() {
                 }
             }
         }
+            }
 
         // Bottom Sheets
         if (showGameSetupSheet) {
@@ -951,6 +1187,8 @@ fun App() {
                     }
                     rulesState = chosen.rulesState
                     customTipOffset = null
+                    customPocketOverride = null
+                    focusedStepIndex = 0
                     hasActiveSession = true
                     selectedPlanIndex = 0
                     selectedShotIndex = 0
@@ -967,6 +1205,8 @@ fun App() {
                     )
                     selectedPresetIndex = -1
                     customTipOffset = null
+                    customPocketOverride = null
+                    focusedStepIndex = 0
                     hasActiveSession = true
                 },
                 onResizeTable = { newSpec ->
@@ -975,10 +1215,13 @@ fun App() {
                         layout = currentLayout,
                         newSpec = newSpec.withClothParams(currentLayout.table.cloth),
                     )
+                    focusedStepIndex = 0
                     hasActiveSession = true
                 },
                 onSelectRules = { nextRules ->
                     rulesState = nextRules
+                    customPocketOverride = null
+                    focusedStepIndex = 0
                     hasActiveSession = true
                     selectedPlanIndex = 0
                     selectedShotIndex = 0
@@ -993,10 +1236,13 @@ fun App() {
                 ballSet = ballSetProfile,
                 onToggleBall = { num ->
                     currentLayout = SampleLayouts.toggleObjectBall(currentLayout, num)
+                    focusedStepIndex = 0
+                    customPocketOverride = null
                     hasActiveSession = true
                 },
                 onAddMissingCueBall = {
                     currentLayout = SampleLayouts.addMissingBall(currentLayout, 0)
+                    focusedStepIndex = 0
                     hasActiveSession = true
                 },
                 onRequestReset = { showResetConfirmDialog = true },
@@ -1085,6 +1331,7 @@ fun App() {
                 },
             )
         }
+        }
     }
 }
 
@@ -1092,16 +1339,21 @@ fun App() {
 fun RunoutPracticeScreen(
     displayMode: AppDisplayMode,
     currentLayout: TableLayout,
+    totalObjectBallsCount: Int,
     rulesState: GameRulesState,
     onSelectRules: (GameRulesState) -> Unit,
     onOpenGameSetupSheet: () -> Unit,
     onOpenEditBallsSheet: () -> Unit,
     onOpenShotOptionsSheet: () -> Unit,
     onOpenQuickSpinSheet: () -> Unit,
+    onEnterFullscreen: () -> Unit,
     playerProfile: PlayerProfile,
     ballSetProfile: BallSetProfile,
     onAddMissingBall: (Int) -> Unit,
     onMoveBall: (ballNumber: Int, newPosition: Vec2) -> Unit,
+    isDraggingBall: Boolean,
+    onDragStateChanged: (Boolean) -> Unit,
+    isPlanning: Boolean,
     planningReadiness: PlanningReadinessResult,
     rankedShots: List<ShotRecommendation>,
     selectedShotIndex: Int,
@@ -1117,9 +1369,23 @@ fun RunoutPracticeScreen(
     selectedPlanIndex: Int,
     onSelectPlan: (Int) -> Unit,
     activePlan: RunoutPlan?,
+    focusedStepIndex: Int,
+    showAllStepsOverlay: Boolean,
+    onPrevStep: () -> Unit,
+    onNextStep: () -> Unit,
+    onToggleAllStepsOverlay: () -> Unit,
+    onApplyCurrentStepToTable: () -> Unit,
+    playablePockets: List<PocketId>,
+    customPocketOverride: PocketId?,
+    onSelectPocketOverride: (PocketId?) -> Unit,
     onUpdateClothParams: (ClothParams) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val activeStep = activePlan?.steps?.getOrNull(
+        focusedStepIndex.coerceIn(0, (activePlan.steps.size - 1).coerceAtLeast(0)),
+    )
+    val activeTargetPocketId = activeStep?.pocketId ?: selectedShot?.pocket?.id
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -1150,13 +1416,19 @@ fun RunoutPracticeScreen(
                     selected = false,
                     onClick = onOpenEditBallsSheet,
                     modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
-                    label = { Text("Edit Balls (${currentLayout.objectBalls().size})") },
+                    label = { Text("Edit Balls ($totalObjectBallsCount)") },
                 )
                 FilterChip(
                     selected = false,
                     onClick = onOpenShotOptionsSheet,
                     modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
                     label = { Text("Shot Options") },
+                )
+                FilterChip(
+                    selected = false,
+                    onClick = onEnterFullscreen,
+                    modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
+                    label = { Text("Fullscreen") },
                 )
             }
 
@@ -1178,11 +1450,42 @@ fun RunoutPracticeScreen(
                         modifier = Modifier.fillMaxWidth(),
                         ballSet = ballSetProfile,
                         onMoveBall = onMoveBall,
+                        onDragStateChanged = onDragStateChanged,
                         visibleSpins = visibleSpins,
                         activeRunoutPlan = activePlan,
-                        showHeatZone = displayMode == AppDisplayMode.PRO && showHeatZone,
+                        focusedStepIndex = if (showAllStepsOverlay && focusedStepIndex == 0) null else focusedStepIndex,
+                        isDraggingBall = isDraggingBall,
+                        availablePockets = if (focusedStepIndex == 0 && planningReadiness.isReady) playablePockets else emptyList(),
+                        onSelectPocket = if (focusedStepIndex == 0 && planningReadiness.isReady) { pocketId ->
+                            onSelectPocketOverride(if (customPocketOverride == pocketId) null else pocketId)
+                        } else null,
+                        showHeatZone = displayMode == AppDisplayMode.PRO && showHeatZone && focusedStepIndex == 0,
                         showLandingCloud = if (displayMode == AppDisplayMode.SIMPLE) true else showLandingCloud,
                     )
+
+                    if (planningReadiness.isReady) {
+                        StepPlaybackControlBar(
+                            activePlan = activePlan,
+                            selectedShot = selectedShot,
+                            ballSetProfile = ballSetProfile,
+                            focusedStepIndex = focusedStepIndex,
+                            showAllStepsOverlay = showAllStepsOverlay,
+                            isPlanning = isPlanning,
+                            onPrevStep = onPrevStep,
+                            onNextStep = onNextStep,
+                            onToggleAllSteps = onToggleAllStepsOverlay,
+                            onApplyCurrentStepToTable = if (focusedStepIndex > 0) onApplyCurrentStepToTable else null,
+                        )
+
+                        if (focusedStepIndex == 0 && (playablePockets.size > 1 || customPocketOverride != null)) {
+                            PocketSelectorStrip(
+                                playablePockets = playablePockets,
+                                activePocketId = activeTargetPocketId,
+                                customPocketOverride = customPocketOverride,
+                                onSelectPocketOverride = onSelectPocketOverride,
+                            )
+                        }
+                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1190,9 +1493,18 @@ fun RunoutPracticeScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = "Drag any ball on the table to adjust",
+                            text = when {
+                                isDraggingBall -> "Release ball to re-plan"
+                                isPlanning -> "Updating runout plan…"
+                                playablePockets.size > 1 && focusedStepIndex == 0 -> "Drag balls to adjust • Tap a highlighted pocket to switch"
+                                else -> "Drag any ball on the table to adjust"
+                            },
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (isPlanning || isDraggingBall) {
+                                RunoutColors.WarningAmber
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
                         )
                         if (displayMode == AppDisplayMode.PRO && showHeatZone) {
                             Text(
@@ -1223,6 +1535,7 @@ fun RunoutPracticeScreen(
         if (displayMode == AppDisplayMode.SIMPLE) {
             SimpleModeShotSection(
                 activePlan = activePlan,
+                focusedStepIndex = focusedStepIndex,
                 fallbackShot = selectedShot,
                 allPlans = runoutPlans,
                 selectedPlanIndex = selectedPlanIndex,
@@ -1255,6 +1568,7 @@ fun RunoutPracticeScreen(
 @Composable
 private fun SimpleModeShotSection(
     activePlan: RunoutPlan?,
+    focusedStepIndex: Int,
     fallbackShot: ShotRecommendation?,
     allPlans: List<RunoutPlan>,
     selectedPlanIndex: Int,
@@ -1267,8 +1581,10 @@ private fun SimpleModeShotSection(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            val steps = activePlan?.steps.orEmpty()
+            val safeStepIdx = focusedStepIndex.coerceIn(0, (steps.size - 1).coerceAtLeast(0))
             RunoutSectionHeader(
-                title = "Recommended Shot",
+                title = if (steps.size > 1) "Shot ${safeStepIdx + 1} of ${steps.size}" else "Recommended Shot",
                 modifier = Modifier.weight(1f),
             )
             GlossaryInfoButton(
@@ -1277,11 +1593,12 @@ private fun SimpleModeShotSection(
             )
         }
 
-        val firstStep = activePlan?.steps?.firstOrNull()
-        if (firstStep != null && activePlan != null) {
-            val speedWord = plainSpeedLabel(firstStep.recommendedSpeedScale)
-            val makePct = formatPercentInt(firstStep.uncertainty.makeProbability)
-            val tipWord = plainTipLabel(firstStep.recommendedTip)
+        val steps = activePlan?.steps.orEmpty()
+        val activeStep = steps.getOrNull(focusedStepIndex.coerceIn(0, (steps.size - 1).coerceAtLeast(0)))
+        if (activePlan != null && activeStep != null) {
+            val speedWord = plainSpeedLabel(activeStep.recommendedSpeedScale)
+            val makePct = formatPercentInt(activeStep.uncertainty.makeProbability)
+            val tipWord = plainTipLabel(activeStep.recommendedTip)
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -1310,10 +1627,10 @@ private fun SimpleModeShotSection(
                                 modifier = Modifier
                                     .size(16.dp)
                                     .clip(CircleShape)
-                                    .background(ballBaseColor(firstStep.targetBall.number, ballSet)),
+                                    .background(ballBaseColor(activeStep.targetBall.number, ballSet)),
                             )
                             Text(
-                                text = "Ball #${firstStep.targetBall.number} -> ${firstStep.pocketId.displayName}",
+                                text = "Ball #${activeStep.targetBall.number} -> ${activeStep.pocketId.displayName}",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface,
@@ -1339,7 +1656,7 @@ private fun SimpleModeShotSection(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = "Speed: $speedWord (${firstStep.recommendedSpeedScale}/10)",
+                            text = "Speed: $speedWord (${activeStep.recommendedSpeedScale}/10)",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium,
                             color = MaterialTheme.colorScheme.tertiary,
