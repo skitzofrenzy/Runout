@@ -1,4 +1,5 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
@@ -15,13 +16,13 @@
         android:translateY="54">
         <path
             android:fillColor="#334155"
-            android:pathData="M-34.2,-2.67 L-20.67,-2.39 L-20.67,2.39 L-34.2,2.67 Q-36.1,1.8 -36.1,0 Q-36.1,-1.8 -34.2,-2.67 Z" />
+            android:pathData="M-34.2,-2.67 L-23.60,-2.45 L-23.60,2.45 L-34.2,2.67 Q-36.1,1.8 -36.1,0 Q-36.1,-1.8 -34.2,-2.67 Z" />
         <path
             android:fillColor="#38BDF8"
-            android:pathData="M-20.67,-2.39 L-19.20,-2.36 L-19.20,2.36 L-20.67,2.39 Z" />
+            android:pathData="M-23.60,-2.45 L-22.00,-2.42 L-22.00,2.42 L-23.60,2.45 Z" />
         <path
             android:fillColor="#475569"
-            android:pathData="M-19.20,-2.36 L-5.50,-2.08 L-5.50,2.08 L-19.20,2.36 Z" />
+            android:pathData="M-22.00,-2.42 L-5.50,-2.08 L-5.50,2.08 L-22.00,2.42 Z" />
         <path
             android:fillColor="#F1D7B4"
             android:pathData="M-5.50,-2.08 L30.80,-1.32 L30.80,1.32 L-5.50,2.08 Z" />
@@ -45,13 +46,13 @@
         android:translateY="54">
         <path
             android:fillColor="#334155"
-            android:pathData="M-34.2,-2.67 L-20.67,-2.39 L-20.67,2.39 L-34.2,2.67 Q-36.1,1.8 -36.1,0 Q-36.1,-1.8 -34.2,-2.67 Z" />
+            android:pathData="M-34.2,-2.67 L-23.60,-2.45 L-23.60,2.45 L-34.2,2.67 Q-36.1,1.8 -36.1,0 Q-36.1,-1.8 -34.2,-2.67 Z" />
         <path
             android:fillColor="#38BDF8"
-            android:pathData="M-20.67,-2.39 L-19.20,-2.36 L-19.20,2.36 L-20.67,2.39 Z" />
+            android:pathData="M-23.60,-2.45 L-22.00,-2.42 L-22.00,2.42 L-23.60,2.45 Z" />
         <path
             android:fillColor="#475569"
-            android:pathData="M-19.20,-2.36 L-5.50,-2.08 L-5.50,2.08 L-19.20,2.36 Z" />
+            android:pathData="M-22.00,-2.42 L-5.50,-2.08 L-5.50,2.08 L-22.00,2.42 Z" />
         <path
             android:fillColor="#F1D7B4"
             android:pathData="M-5.50,-2.08 L30.80,-1.32 L30.80,1.32 L-5.50,2.08 Z" />
@@ -66,35 +67,83 @@
             android:pathData="M-34.2,0.20 L34.18,0.20 Q36.05,0.20 36.10,0 Q36.10,0.75 34.18,1.22 L-34.2,2.67 Q-36.1,1.8 -36.1,0.20 Z" />
     </group>
 
-    <!-- Navy knockout border separating cues from foreground cue ball -->
+    <!-- Flush navy knockout border separating cues from foreground cue ball -->
     <path
         android:fillColor="#0B1120"
-        android:pathData="M54,36.28 A17.72,17.72 0 1,0 54,71.72 A17.72,17.72 0 1,0 54,36.28 Z" />
+        android:pathData="M54,34.40 A19.60,19.60 0 1,0 54,73.60 A19.60,19.60 0 1,0 54,34.40 Z" />
 
-    <!-- Subtle cyan geometric halo ring -->
+    <!-- Flush cyan geometric halo ring -->
     <path
-        android:pathData="M54,35.44 A18.56,18.56 0 1,0 54,72.56 A18.56,18.56 0 1,0 54,35.44 Z"
-        android:strokeWidth="0.45"
-        android:strokeColor="#4C38BDF8" />
+        android:pathData="M54,34.40 A19.60,19.60 0 1,0 54,73.60 A19.60,19.60 0 1,0 54,34.40 Z"
+        android:strokeWidth="0.55"
+        android:strokeColor="#5C38BDF8" />
 
-    <!-- White cue ball + clipped cel shadow + 3 classic Pro-Cup red dots -->
+    <!-- CueBallHitGuide cue ball with 3D shading, top-left 3-level hit zone, crosshairs, dashed safe ring, F/D/L/R, and strike dot -->
     <group>
-        <clip-path android:pathData="M54,37.76 A16.24,16.24 0 1,0 54,70.24 A16.24,16.24 0 1,0 54,37.76 Z" />
+        <clip-path android:pathData="M54,35.80 A18.20,18.20 0 1,0 54,72.20 A18.20,18.20 0 1,0 54,35.80 Z" />
+
+        <!-- 3D White Sphere Radial Gradient -->
+        <path android:pathData="M54,35.80 A18.20,18.20 0 1,0 54,72.20 A18.20,18.20 0 1,0 54,35.80 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:centerX="49.45"
+                    android:centerY="48.90"
+                    android:gradientRadius="24.57"
+                    android:type="radial">
+                    <item android:color="#FFFFFFFF" android:offset="0.0" />
+                    <item android:color="#FFF1F5F9" android:offset="0.58" />
+                    <item android:color="#FFCBD5E1" android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- 3-level tightness hit zone centered at top-left (48.90, 48.90) -->
         <path
-            android:fillColor="#F8FAFC"
-            android:pathData="M54,37.76 A16.24,16.24 0 1,0 54,70.24 A16.24,16.24 0 1,0 54,37.76 Z" />
+            android:fillColor="#4CF87171"
+            android:pathData="M48.90,40.02 A8.88,8.88 0 1,0 48.90,57.78 A8.88,8.88 0 1,0 48.90,40.02 Z" />
         <path
-            android:fillColor="#CBD5E1"
-            android:fillType="evenOdd"
-            android:pathData="M50,25.36 A24,24 0 1,0 50,73.36 A24,24 0 1,0 50,25.36 Z M50,33.12 A16.24,16.24 0 1,0 50,65.60 A16.24,16.24 0 1,0 50,33.12 Z" />
+            android:fillColor="#62FBBF24"
+            android:pathData="M48.90,42.35 A6.55,6.55 0 1,0 48.90,55.45 A6.55,6.55 0 1,0 48.90,42.35 Z" />
+        <path
+            android:fillColor="#784ADE80"
+            android:pathData="M48.90,44.68 A4.22,4.22 0 1,0 48.90,53.12 A4.22,4.22 0 1,0 48.90,44.68 Z"
+            android:strokeWidth="0.65"
+            android:strokeColor="#D916A34A" />
+
+        <!-- Crosshairs (+/-0.59R) -->
+        <path
+            android:pathData="M43.26,54 L64.74,54 M54,43.26 L54,64.74"
+            android:strokeWidth="0.58"
+            android:strokeColor="#88475569"
+            android:strokeLineCap="round" />
+
+        <!-- Dashed 0.50R miscue-safe ring (12 evenly spaced arcs) -->
+        <path
+            android:pathData="M63.050,54.951 A9.10,9.10 0 0,1 62.313,57.701 M61.362,59.349 A9.10,9.10 0 0,1 59.349,61.362 M57.701,62.313 A9.10,9.10 0 0,1 54.951,63.050 M53.049,63.050 A9.10,9.10 0 0,1 50.299,62.313 M48.651,61.362 A9.10,9.10 0 0,1 46.638,59.349 M45.687,57.701 A9.10,9.10 0 0,1 44.950,54.951 M44.950,53.049 A9.10,9.10 0 0,1 45.687,50.299 M46.638,48.651 A9.10,9.10 0 0,1 48.651,46.638 M50.299,45.687 A9.10,9.10 0 0,1 53.049,44.950 M54.951,44.950 A9.10,9.10 0 0,1 57.701,45.687 M59.349,46.638 A9.10,9.10 0 0,1 61.362,48.651 M62.313,50.299 A9.10,9.10 0 0,1 63.050,53.049"
+            android:strokeWidth="0.58"
+            android:strokeColor="#AA0284C7"
+            android:strokeLineCap="round" />
+
+        <!-- Axis Letters F, D, L, R -->
+        <path
+            android:pathData="M52.580,42.261 L52.580,38.439 L55.420,38.439 M52.580,40.350 L54.923,40.350 M52.580,65.739 L53.858,65.739 Q55.491,65.739 55.491,67.650 Q55.491,69.561 53.858,69.561 L52.580,69.561 Z M39.143,52.089 L39.143,55.911 L41.699,55.911 M66.230,55.911 L66.230,52.089 L67.721,52.089 Q69.070,52.089 69.070,53.140 Q69.070,54.191 67.721,54.191 L66.230,54.191 M67.721,54.191 L69.070,55.911"
+            android:strokeWidth="0.80"
+            android:strokeColor="#CC334155"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+
+        <!-- Top-left cue-tip strike dot -->
+        <path
+            android:fillColor="#0F172A"
+            android:pathData="M48.90,45.72 A3.18,3.18 0 1,0 48.90,52.08 A3.18,3.18 0 1,0 48.90,45.72 Z" />
         <path
             android:fillColor="#EF4444"
-            android:pathData="M59.70,48.94 A1.90,1.90 0 1,0 59.70,52.74 A1.90,1.90 0 1,0 59.70,48.94 Z" />
-        <path
-            android:fillColor="#EF4444"
-            android:pathData="M48.09,56.43 A1.79,1.79 0 1,0 48.09,60.01 A1.79,1.79 0 1,0 48.09,56.43 Z" />
-        <path
-            android:fillColor="#EF4444"
-            android:pathData="M56.53,61.07 A1.58,1.58 0 1,0 56.53,64.23 A1.58,1.58 0 1,0 56.53,61.07 Z" />
+            android:pathData="M48.90,46.44 A2.46,2.46 0 1,0 48.90,51.36 A2.46,2.46 0 1,0 48.90,46.44 Z" />
     </group>
+
+    <!-- Outer ball contour ring -->
+    <path
+        android:pathData="M54,35.80 A18.20,18.20 0 1,0 54,72.20 A18.20,18.20 0 1,0 54,35.80 Z"
+        android:strokeWidth="0.76"
+        android:strokeColor="#CC64748B" />
 </vector>

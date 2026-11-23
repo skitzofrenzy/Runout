@@ -41,6 +41,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -774,7 +775,7 @@ fun ShotDifficultyPairRow(
 }
 
 /**
- * In-app brand badge matching the Minimal Vector launcher icon (crossed cues + 3-dot Pro-Cup cue ball).
+ * In-app brand badge matching the launcher icon (crossed cues + CueBallHitGuide top-left spin emblem).
  */
 @Composable
 fun RunoutAppLogo(
@@ -817,9 +818,9 @@ fun RunoutAppLogo(
                     close()
                 }
                 clipPath(cuePath) {
-                    drawRect(Color(0xFF334155), Offset(-36.5f, -3f), Size(15.83f, 6f))
-                    drawRect(Color(0xFF38BDF8), Offset(-20.67f, -3f), Size(1.47f, 6f))
-                    drawRect(Color(0xFF475569), Offset(-19.20f, -3f), Size(13.70f, 6f))
+                    drawRect(Color(0xFF334155), Offset(-36.5f, -3f), Size(12.9f, 6f))
+                    drawRect(Color(0xFF38BDF8), Offset(-23.6f, -3f), Size(1.6f, 6f))
+                    drawRect(Color(0xFF475569), Offset(-22.0f, -3f), Size(16.5f, 6f))
                     drawRect(Color(0xFFF1D7B4), Offset(-5.50f, -3f), Size(36.30f, 6f))
                     drawRect(Color(0xFFF8FAFC), Offset(30.80f, -3f), Size(2.53f, 6f))
                     drawRect(Color(0xFF38BDF8), Offset(33.33f, -3f), Size(3.2f, 6f))
@@ -832,44 +833,167 @@ fun RunoutAppLogo(
         drawLogoCue(rotationDeg = -45f, flipY = false)
 
         val ballScale = unit * 1.24f
-        // Navy knockout border + cyan ring
+        val koR = 19.6f * ballScale
+        // Flush navy knockout border + cyan halo ring
         drawCircle(
             color = RunoutColors.Background,
-            radius = 17.72f * ballScale,
+            radius = koR,
             center = Offset(cx, cy),
         )
         drawCircle(
-            color = Color(0x4C38BDF8),
-            radius = 18.56f * ballScale,
+            color = Color(0x5C38BDF8),
+            radius = koR,
             center = Offset(cx, cy),
             style = Stroke(width = 0.55f * ballScale),
         )
 
-        val ballR = 16.24f * ballScale
+        val ballR = 18.2f * ballScale
+        val contact = Offset(cx - ballR * 0.28f, cy - ballR * 0.28f)
         val ballClip = Path().apply {
             addOval(Rect(cx - ballR, cy - ballR, cx + ballR, cy + ballR))
         }
         clipPath(ballClip) {
             drawCircle(
-                color = Color(0xFFF8FAFC),
+                brush = Brush.radialGradient(
+                    colorStops = arrayOf(
+                        0.00f to Color.White,
+                        0.58f to Color(0xFFF1F5F9),
+                        1.00f to Color(0xFFCBD5E1),
+                    ),
+                    center = Offset(cx - ballR * 0.25f, cy - ballR * 0.28f),
+                    radius = ballR * 1.35f,
+                ),
                 radius = ballR,
                 center = Offset(cx, cy),
             )
-            // Subtle lower-right cel shadow crescent
+
+            // 3-level tightness hit zone centered at top-left spin contact point
             drawCircle(
-                color = Color(0xFFCBD5E1),
-                radius = ballR * 1.15f,
-                center = Offset(cx + ballR * 0.42f, cy + ballR * 0.45f),
+                color = Color(0x4CF87171),
+                radius = ballR * 0.488f,
+                center = contact,
             )
             drawCircle(
-                color = Color(0xFFF8FAFC),
-                radius = ballR,
-                center = Offset(cx - ballR * 0.22f, cy - ballR * 0.26f),
+                color = Color(0x62FBBF24),
+                radius = ballR * 0.360f,
+                center = contact,
             )
-            // 3 Classic Pro-Cup crimson dots
-            drawCircle(Color(0xFFEF4444), radius = 1.90f * ballScale, center = Offset(cx + 5.70f * ballScale, cy - 3.16f * ballScale))
-            drawCircle(Color(0xFFEF4444), radius = 1.79f * ballScale, center = Offset(cx - 5.91f * ballScale, cy + 4.22f * ballScale))
-            drawCircle(Color(0xFFEF4444), radius = 1.58f * ballScale, center = Offset(cx + 2.53f * ballScale, cy + 8.65f * ballScale))
+            val greenR = ballR * 0.232f
+            drawCircle(
+                color = Color(0x784ADE80),
+                radius = greenR,
+                center = contact,
+            )
+            drawCircle(
+                color = Color(0xD916A34A),
+                radius = greenR,
+                center = contact,
+                style = Stroke(width = ballR * 0.036f),
+            )
+
+            // Crosshairs (+/-0.59R)
+            val crossSpan = ballR * 0.59f
+            val guideStroke = ballR * 0.032f
+            drawLine(
+                color = Color(0x88475569),
+                start = Offset(cx - crossSpan, cy),
+                end = Offset(cx + crossSpan, cy),
+                strokeWidth = guideStroke,
+                cap = StrokeCap.Round,
+            )
+            drawLine(
+                color = Color(0x88475569),
+                start = Offset(cx, cy - crossSpan),
+                end = Offset(cx, cy + crossSpan),
+                strokeWidth = guideStroke,
+                cap = StrokeCap.Round,
+            )
+
+            // Dashed 0.50R miscue-safe ring (12 evenly spaced arcs)
+            val safeR = ballR * 0.50f
+            val arcTopLeft = Offset(cx - safeR, cy - safeR)
+            val arcSize = Size(safeR * 2f, safeR * 2f)
+            val ringStroke = Stroke(width = guideStroke, cap = StrokeCap.Round)
+            for (i in 0 until 12) {
+                drawArc(
+                    color = Color(0xAA0284C7),
+                    startAngle = i * 30f + 6f,
+                    sweepAngle = 18f,
+                    useCenter = false,
+                    topLeft = arcTopLeft,
+                    size = arcSize,
+                    style = ringStroke,
+                )
+            }
+
+            // Geometric F, D, L, R markers
+            val dist = ballR * 0.75f
+            val hw = ballR * 0.078f
+            val hh = ballR * 0.105f
+            val lettersPath = Path().apply {
+                val fx = cx
+                val fy = cy - dist
+                moveTo(fx - hw, fy + hh)
+                lineTo(fx - hw, fy - hh)
+                lineTo(fx + hw, fy - hh)
+                moveTo(fx - hw, fy)
+                lineTo(fx + 0.65f * hw, fy)
+
+                val dx = cx
+                val dy = cy + dist
+                moveTo(dx - hw, dy - hh)
+                lineTo(dx - 0.1f * hw, dy - hh)
+                quadraticTo(dx + 1.05f * hw, dy - hh, dx + 1.05f * hw, dy)
+                quadraticTo(dx + 1.05f * hw, dy + hh, dx - 0.1f * hw, dy + hh)
+                lineTo(dx - hw, dy + hh)
+                close()
+
+                val lx = cx - dist
+                val ly = cy
+                moveTo(lx - 0.85f * hw, ly - hh)
+                lineTo(lx - 0.85f * hw, ly + hh)
+                lineTo(lx + 0.95f * hw, ly + hh)
+
+                val rx = cx + dist
+                val ry = cy
+                moveTo(rx - hw, ry + hh)
+                lineTo(rx - hw, ry - hh)
+                lineTo(rx + 0.05f * hw, ry - hh)
+                quadraticTo(rx + hw, ry - hh, rx + hw, ry - 0.45f * hh)
+                quadraticTo(rx + hw, ry + 0.10f * hw, rx + 0.05f * hw, ry + 0.10f * hh)
+                lineTo(rx - hw, ry + 0.10f * hh)
+                moveTo(rx + 0.05f * hw, ry + 0.10f * hh)
+                lineTo(rx + hw, ry + hh)
+            }
+            drawPath(
+                path = lettersPath,
+                color = Color(0xCC334155),
+                style = Stroke(
+                    width = ballR * 0.044f,
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round,
+                ),
+            )
+
+            // Cue-tip strike dot at top-left contact point
+            drawCircle(
+                color = Color(0xFF0F172A),
+                radius = ballR * 0.175f,
+                center = contact,
+            )
+            drawCircle(
+                color = Color(0xFFEF4444),
+                radius = ballR * 0.135f,
+                center = contact,
+            )
         }
+
+        // Outer ball contour ring
+        drawCircle(
+            color = Color(0xCC64748B),
+            radius = ballR,
+            center = Offset(cx, cy),
+            style = Stroke(width = ballR * 0.042f),
+        )
     }
 }
