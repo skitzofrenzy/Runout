@@ -32,6 +32,7 @@ data class ShotUncertaintyResult(
     val meanLandingPosition: Vec2,
     val landingSpreadRadiusMeters: Double,
     val postShotSimulation: PostShotTableSimulation? = null,
+    val nominalLandingPosition: Vec2 = meanLandingPosition,
 )
 
 /**
@@ -125,12 +126,19 @@ object ExecutionErrorModel {
         )
 
         val landingCloud = ArrayList<Vec2>(stencil.size)
+        val scratchedAtPoint = BooleanArray(stencil.size)
         var nominalTrajectory: CueBallTrajectory? = null
+        var nominalStop = aim.ghostBallCenter
         var weightedScratchProb = 0.0
         var weightedEnsembleMake = 0.0
         var weightedReachFrac = 0.0
         var meanX = 0.0
         var meanY = 0.0
+        var nonScratchWeightSum = 0.0
+        var nonScratchX = 0.0
+        var nonScratchY = 0.0
+        val maxStopX = (table.lengthMeters - cueBallRadius).coerceAtLeast(cueBallRadius)
+        val maxStopY = (table.widthMeters - cueBallRadius).coerceAtLeast(cueBallRadius)
 
         for ((index, point) in stencil.withIndex()) {
             val perturbedSpeed = (cueSpeedMps * (1.0 + point.dSpeedFrac)).coerceAtLeast(0.30)
@@ -159,15 +167,22 @@ object ExecutionErrorModel {
                 )
             }
 
-            val trajectory = if (index == 0) {
-                nominalSimulation.cueBallTrajectory
-            } else {
-                SpinPhysics.traceCueBallPathWithSpin(
+            val trajectory = when {
+                index == 0 -> nominalSimulation.cueBallTrajectory
+                nominalSimulation.disturbedBalls.isNotEmpty() -> TableCollisionSimulator.simulatePostImpact(
+                    layout = layout,
+                    targetBall = targetBall,
+                    aim = perturbedAim,
+                    cueSpeedMps = perturbedSpeed,
+                    tip = perturbedTip,
+                ).cueBallTrajectory
+                else -> SpinPhysics.traceCueBallPathWithSpin(
                     aim = perturbedAim,
                     cueSpeedMps = perturbedSpeed,
                     tip = perturbedTip,
                     table = table,
                     ballRadiusMeters = cueBallRadius,
+                    maxBounces = 6,
                     obstacleBalls = obstacleBalls,
                 )
             }
@@ -175,19 +190,32 @@ object ExecutionErrorModel {
                 nominalTrajectory = trajectory
             }
 
-            val rawStop = trajectory.points.lastOrNull() ?: perturbedAim.ghostBallCenter
-            val maxStopX = (table.lengthMeters - cueBallRadius).coerceAtLeast(cueBallRadius)
-            val maxStopY = (table.widthMeters - cueBallRadius).coerceAtLeast(cueBallRadius)
+            val rawStop = if (index == 0) {
+                nominalSimulation.resultingLayout.cueBall()?.position
+                    ?: trajectory.points.lastOrNull()
+                    ?: perturbedAim.ghostBallCenter
+            } else {
+                trajectory.points.lastOrNull() ?: perturbedAim.ghostBallCenter
+            }
             val stopPos = Vec2(
                 x = rawStop.x.coerceIn(cueBallRadius, maxStopX),
                 y = rawStop.y.coerceIn(cueBallRadius, maxStopY),
             )
+            if (index == 0) {
+                nominalStop = stopPos
+            }
             landingCloud += stopPos
             meanX += point.weight * stopPos.x
             meanY += point.weight * stopPos.y
 
-            if (trajectory.hitsScratchPocket != null) {
+            val didScratch = trajectory.hitsScratchPocket != null
+            scratchedAtPoint[index] = didScratch
+            if (didScratch) {
                 weightedScratchProb += point.weight
+            } else {
+                nonScratchWeightSum += point.weight
+                nonScratchX += point.weight * stopPos.x
+                nonScratchY += point.weight * stopPos.y
             }
 
             val vObjInitial = perturbedSpeed * cos(abs(perturbedCut)).coerceAtLeast(0.05) * 0.96
@@ -209,17 +237,23 @@ object ExecutionErrorModel {
             }
         }
 
-        val maxMeanX = (table.lengthMeters - cueBallRadius).coerceAtLeast(cueBallRadius)
-        val maxMeanY = (table.widthMeters - cueBallRadius).coerceAtLeast(cueBallRadius)
+        val useNonScratchOnly = nonScratchWeightSum > 1e-6
+        val resolvedMeanX = if (useNonScratchOnly) nonScratchX / nonScratchWeightSum else meanX
+        val resolvedMeanY = if (useNonScratchOnly) nonScratchY / nonScratchWeightSum else meanY
         val meanLanding = Vec2(
-            x = meanX.coerceIn(cueBallRadius, maxMeanX),
-            y = meanY.coerceIn(cueBallRadius, maxMeanY),
+            x = resolvedMeanX.coerceIn(cueBallRadius, maxStopX),
+            y = resolvedMeanY.coerceIn(cueBallRadius, maxStopY),
         )
         var meanSqDist = 0.0
+        var spreadWeightSum = 0.0
         for (i in stencil.indices) {
-            meanSqDist += stencil[i].weight * landingCloud[i].distanceSquaredTo(meanLanding)
+            if (useNonScratchOnly && scratchedAtPoint[i]) continue
+            val w = stencil[i].weight
+            meanSqDist += w * landingCloud[i].distanceSquaredTo(meanLanding)
+            spreadWeightSum += w
         }
-        val spreadRadius = 1.96 * sqrt(meanSqDist)
+        val rmsSq = if (spreadWeightSum > 1e-6) meanSqDist / spreadWeightSum else meanSqDist
+        val spreadRadius = max(1.96 * sqrt(rmsSq), meanLanding.distanceTo(nominalStop))
 
         val nomVObj = cueSpeedMps * cos(abs(aim.cutAngleRadians)).coerceAtLeast(0.05) * 0.96
         val nomArrivalSpeed = sqrt(
@@ -257,6 +291,7 @@ object ExecutionErrorModel {
             meanLandingPosition = meanLanding,
             landingSpreadRadiusMeters = spreadRadius,
             postShotSimulation = nominalSimulation,
+            nominalLandingPosition = nominalStop,
         )
     }
 }

@@ -1,5 +1,10 @@
 package com.runout.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -73,7 +78,7 @@ fun resolveDisplayedLayoutForStep(
     val updatedBalls = baseLayout.balls
         .filter { it.number !in pottedNumbers }
         .map { ball ->
-            if (ball.number == 0) ball.copy(position = priorStep.uncertainty.meanLandingPosition) else ball
+            if (ball.number == 0) ball.copy(position = priorStep.uncertainty.nominalLandingPosition) else ball
         }
     return baseLayout.copy(balls = updatedBalls)
 }
@@ -114,6 +119,18 @@ fun FullscreenTableScreen(
     onOpenQuickSpinSheet: () -> Unit,
     onOpenShotOptionsSheet: () -> Unit,
     onOpenPhotoScan: () -> Unit,
+    customTipOffset: TipOffset? = null,
+    defaultTipForShot: TipOffset? = null,
+    speedScaleOverride: Int? = null,
+    defaultSpeedScaleForShot: Int? = null,
+    sandboxTargetBallNumber: Int? = null,
+    showCueSandboxPanel: Boolean = false,
+    hasSandboxOverrides: Boolean = false,
+    onToggleCueSandbox: () -> Unit = onOpenQuickSpinSheet,
+    onCloseCueSandbox: () -> Unit = {},
+    onUpdateCustomTip: (TipOffset?) -> Unit = {},
+    onSelectSpeedScale: (Int?) -> Unit = {},
+    onResetSandboxDefaults: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val activeStep = activePlan?.steps?.getOrNull(
@@ -199,6 +216,20 @@ fun FullscreenTableScreen(
                     } else {
                         Spacer(modifier = Modifier.weight(1f))
                     }
+                    if (hasSandboxOverrides) {
+                        FilterChip(
+                            selected = true,
+                            onClick = onResetSandboxDefaults,
+                            modifier = Modifier.defaultMinSize(minHeight = 36.dp),
+                            label = {
+                                Text(
+                                    text = "Reset",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            },
+                        )
+                    }
                 }
 
                 // Expanded Pool Table Canvas
@@ -219,6 +250,8 @@ fun FullscreenTableScreen(
                     onSelectPocket = if (focusedStepIndex == 0) { pocketId ->
                         onSelectPocketOverride(if (customPocketOverride == pocketId) null else pocketId)
                     } else null,
+                    onTapCueBall = if (planningReadiness.isReady) onToggleCueSandbox else null,
+                    highlightCueBall = showCueSandboxPanel || hasSandboxOverrides,
                     showHeatZone = displayMode == AppDisplayMode.PRO && showHeatZone && focusedStepIndex == 0,
                     showLandingCloud = if (displayMode == AppDisplayMode.SIMPLE) true else showLandingCloud,
                     fitContainer = true,
@@ -236,9 +269,46 @@ fun FullscreenTableScreen(
                     onNextStep = onNextStep,
                     onToggleAllSteps = onToggleAllStepsOverlay,
                     onApplyCurrentStepToTable = if (focusedStepIndex > 0) onApplyCurrentStepToTable else null,
-                    onTapCueHitGuide = onOpenQuickSpinSheet,
+                    onTapCueHitGuide = onToggleCueSandbox,
                     compactLandscape = true,
                 )
+            }
+
+            // Collapsible Live Cue-Ball Sandbox Panel side-by-side with table
+            AnimatedVisibility(
+                visible = showCueSandboxPanel && planningReadiness.isReady,
+                enter = expandHorizontally() + fadeIn(),
+                exit = shrinkHorizontally() + fadeOut(),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(228.dp)
+                        .fillMaxHeight()
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    val resolvedTip = customTipOffset
+                        ?: activeStep?.recommendedTip
+                        ?: defaultTipForShot
+                        ?: TipOffset()
+                    val resolvedSpeed = speedScaleOverride
+                        ?: activeStep?.recommendedSpeedScale
+                        ?: defaultSpeedScaleForShot
+                        ?: 5
+                    CueBallSandboxPanel(
+                        activeTip = resolvedTip,
+                        defaultTip = defaultTipForShot ?: activeStep?.recommendedTip,
+                        customTipOffset = customTipOffset,
+                        activeSpeedScale = resolvedSpeed,
+                        speedScaleOverride = speedScaleOverride,
+                        lockedTargetBallNumber = sandboxTargetBallNumber,
+                        hasOverrides = hasSandboxOverrides,
+                        onUpdateTip = onUpdateCustomTip,
+                        onUpdateSpeedScale = onSelectSpeedScale,
+                        onResetDefaults = onResetSandboxDefaults,
+                        onClose = onCloseCueSandbox,
+                        compactVertical = true,
+                    )
+                }
             }
 
             // Right Vertical Action Rail (Side Bar for Options & Buttons)
@@ -320,7 +390,8 @@ fun FullscreenTableScreen(
                     FullscreenRailButton(
                         icon = RunoutIcon.PLAN,
                         label = "Spin",
-                        onClick = onOpenQuickSpinSheet,
+                        highlighted = showCueSandboxPanel || hasSandboxOverrides,
+                        onClick = onToggleCueSandbox,
                     )
                     FullscreenRailButton(
                         icon = RunoutIcon.TABLE,

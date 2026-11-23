@@ -185,6 +185,8 @@ fun PoolTableCanvas(
     isDraggingBall: Boolean = false,
     availablePockets: List<PocketId> = emptyList(),
     onSelectPocket: ((PocketId) -> Unit)? = null,
+    onTapCueBall: (() -> Unit)? = null,
+    highlightCueBall: Boolean = false,
     showHeatZone: Boolean = false,
     showLandingCloud: Boolean = true,
     fitContainer: Boolean = false,
@@ -200,6 +202,7 @@ fun PoolTableCanvas(
     val latestOnDragStateChanged by rememberUpdatedState(onDragStateChanged)
     val latestAvailablePockets by rememberUpdatedState(availablePockets)
     val latestOnSelectPocket by rememberUpdatedState(onSelectPocket)
+    val latestOnTapCueBall by rememberUpdatedState(onTapCueBall)
 
     val dragModifier = if (onMoveBall != null) {
         Modifier.pointerInput(true) {
@@ -264,17 +267,32 @@ fun PoolTableCanvas(
         Modifier
     }
 
-    val pocketTapModifier = if (onSelectPocket != null) {
+    val tapModifier = if (onSelectPocket != null || onTapCueBall != null) {
         Modifier.pointerInput(true) {
             detectTapGestures { tapOffset ->
-                val validPockets = latestAvailablePockets
-                if (validPockets.isEmpty()) return@detectTapGestures
                 val activeLayout = latestLayout
                 val geom = computeTableCanvasGeometry(
                     canvasWidth = size.width.toFloat(),
                     canvasHeight = size.height.toFloat(),
                     table = activeLayout.table,
                 )
+                if (latestOnTapCueBall != null) {
+                    val cueBall = activeLayout.cueBall()
+                    if (cueBall != null) {
+                        val cueCenter = geom.toCanvasOffset(cueBall.position)
+                        val cueDist = hypot(tapOffset.x - cueCenter.x, tapOffset.y - cueCenter.y)
+                        val cueHitRadius = max(
+                            40f,
+                            (cueBall.radiusMeters * geom.pxPerMeter * 2.3).toFloat(),
+                        )
+                        if (cueDist <= cueHitRadius) {
+                            latestOnTapCueBall?.invoke()
+                            return@detectTapGestures
+                        }
+                    }
+                }
+                val validPockets = latestAvailablePockets
+                if (validPockets.isEmpty() || latestOnSelectPocket == null) return@detectTapGestures
                 val validSet = validPockets.toSet()
                 val tappedPocket = activeLayout.table.pockets
                     .filter { it.id in validSet }
@@ -310,7 +328,7 @@ fun PoolTableCanvas(
     Canvas(
         modifier = sizeModifier
             .then(dragModifier)
-            .then(pocketTapModifier),
+            .then(tapModifier),
     ) {
         val geom = computeTableCanvasGeometry(
             canvasWidth = size.width,
@@ -508,12 +526,14 @@ fun PoolTableCanvas(
         }
         for (ball in layout.balls) {
             val isTargetBall = ball.number == targetBallNumber
+            val isCueSelected = highlightCueBall && ball.isCueBall
             drawPoolBall(
                 ball = ball,
                 ballColor = ballBaseColor(ball.number, ballSet),
                 center = toCanvasOffset(ball.position),
                 radiusPx = (ball.radiusMeters * pxPerMeter).toFloat(),
                 isTargetBall = isTargetBall,
+                isCueSelected = isCueSelected,
                 textMeasurer = textMeasurer,
                 fontSizeSp = fontSizeSp,
             )
@@ -708,9 +728,24 @@ private fun DrawScope.drawPoolBall(
     center: Offset,
     radiusPx: Float,
     isTargetBall: Boolean,
+    isCueSelected: Boolean = false,
     textMeasurer: TextMeasurer,
     fontSizeSp: androidx.compose.ui.unit.TextUnit,
 ) {
+    if (isCueSelected) {
+        drawCircle(
+            color = Color(0x4438BDF8),
+            radius = radiusPx * 1.56f,
+            center = center,
+        )
+        drawCircle(
+            color = Color(0xFF38BDF8),
+            radius = radiusPx * 1.38f,
+            center = center,
+            style = Stroke(width = max(2f, radiusPx * 0.16f)),
+        )
+    }
+
     if (isTargetBall) {
         drawCircle(
             color = PotLineColor.copy(alpha = 0.35f),
@@ -813,19 +848,36 @@ private fun resolveStepNextVisibility(
 ): PocketVisibilityRegion? {
     val steps = plan.steps
     val primaryStep = steps.getOrNull(activeIdx) ?: return null
-    val nextStep = steps.getOrNull(activeIdx + 1) ?: return null
     val postShotLayout = primaryStep.resultingLayout ?: TableLayout(
         table = layout.table,
         balls = layout.balls.filter { it.number != primaryStep.targetBall.number },
     )
-    val nextTarget = postShotLayout.ballByNumber(nextStep.targetBall.number) ?: nextStep.targetBall
-    val nextPocket = postShotLayout.table.pockets.firstOrNull { it.id == nextStep.pocketId } ?: return null
-    return HeatZoneGenerator.computePocketVisibility(
-        layout = postShotLayout,
-        targetBall = nextTarget,
-        pocket = nextPocket,
-        cueRadius = layout.table.ballRadiusMeters,
-    )
+    val cueRadius = layout.table.ballRadiusMeters
+    val nextStep = steps.getOrNull(activeIdx + 1)
+    if (nextStep != null) {
+        val nextTarget = postShotLayout.ballByNumber(nextStep.targetBall.number) ?: nextStep.targetBall
+        val nextPocket = postShotLayout.table.pockets.firstOrNull { it.id == nextStep.pocketId } ?: return null
+        return HeatZoneGenerator.computePocketVisibility(
+            layout = postShotLayout,
+            targetBall = nextTarget,
+            pocket = nextPocket,
+            cueRadius = cueRadius,
+        )
+    }
+
+    val fallbackTargetNum = plan.nextBallHeatZone?.targetBallNumbers?.firstOrNull() ?: return null
+    val fallbackTarget = postShotLayout.ballByNumber(fallbackTargetNum) ?: return null
+    val regions = postShotLayout.table.pockets.map { pocket ->
+        HeatZoneGenerator.computePocketVisibility(
+            layout = postShotLayout,
+            targetBall = fallbackTarget,
+            pocket = pocket,
+            cueRadius = cueRadius,
+        )
+    }
+    return regions.firstOrNull {
+        !HeatZoneGenerator.isPointOccludedForPocket(primaryStep.uncertainty.nominalLandingPosition, it)
+    } ?: regions.firstOrNull { it.isPocketClear } ?: regions.firstOrNull()
 }
 
 private fun buildOcclusionCutoutPath(
@@ -1077,7 +1129,8 @@ private fun DrawScope.drawRunoutPlanOverlay(
     val stepEffect = PathEffect.dashPathEffect(floatArrayOf(stepDash, stepGap), 0f)
     for (idx in 1 until steps.size) {
         val step = steps[idx]
-        val prevLanding = steps[idx - 1].uncertainty.meanLandingPosition
+        val prevLanding = steps[idx - 1].resultingLayout?.cueBall()?.position
+            ?: steps[idx - 1].uncertainty.nominalLandingPosition
         val stepColor = multiStepAccentColor(step.stepNumber)
         val stepCueStart = toCanvasOffset(prevLanding)
         val stepGhost = toCanvasOffset(step.compensatedAim.compensatedGhostBallCenter)
@@ -1269,8 +1322,16 @@ private fun DrawScope.drawLandingCloudOverlay(
     playHeight: Float,
     toCanvasOffset: (Vec2) -> Offset,
 ) {
-    val meanCenter = toCanvasOffset(uncertainty.meanLandingPosition)
-    val outerRadiusPx = (uncertainty.landingSpreadRadiusMeters * pxPerMeter)
+    val nominalPos = uncertainty.nominalLandingPosition
+    val meanPos = uncertainty.meanLandingPosition
+    val zoneCenter = toCanvasOffset(nominalPos)
+    val meanCenter = toCanvasOffset(meanPos)
+    val skewOffset = nominalPos.distanceTo(meanPos)
+    val effectiveRadiusMeters = max(
+        uncertainty.landingSpreadRadiusMeters,
+        skewOffset + table.ballRadiusMeters,
+    )
+    val outerRadiusPx = (effectiveRadiusMeters * pxPerMeter)
         .toFloat()
         .coerceAtLeast(ballRadiusPx * 0.90f)
     val clampedTightness = tightness.coerceIn(0f, 1f)
@@ -1287,12 +1348,12 @@ private fun DrawScope.drawLandingCloudOverlay(
         drawCircle(
             color = Color(0x2CF87171),
             radius = outerRadiusPx,
-            center = meanCenter,
+            center = zoneCenter,
         )
         drawCircle(
             color = Color(0xAAF87171),
             radius = outerRadiusPx,
-            center = meanCenter,
+            center = zoneCenter,
             style = Stroke(
                 width = max(1.4f, pxPerMeter * 0.0044f),
                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(ringDash, ringGap), 0f),
@@ -1303,12 +1364,12 @@ private fun DrawScope.drawLandingCloudOverlay(
         drawCircle(
             color = Color(0x36FBBF24),
             radius = midRadiusPx,
-            center = meanCenter,
+            center = zoneCenter,
         )
         drawCircle(
             color = Color(0xAAFBBF24),
             radius = midRadiusPx,
-            center = meanCenter,
+            center = zoneCenter,
             style = Stroke(width = max(1.3f, pxPerMeter * 0.0040f)),
         )
 
@@ -1316,12 +1377,12 @@ private fun DrawScope.drawLandingCloudOverlay(
         drawCircle(
             color = Color(0x464ADE80),
             radius = innerRadiusPx,
-            center = meanCenter,
+            center = zoneCenter,
         )
         drawCircle(
             color = Color(0xCC4ADE80),
             radius = innerRadiusPx,
-            center = meanCenter,
+            center = zoneCenter,
             style = Stroke(width = max(1.6f, pxPerMeter * 0.0048f)),
         )
     }
@@ -1339,12 +1400,12 @@ private fun DrawScope.drawLandingCloudOverlay(
             drawCircle(
                 color = Color(0x24F87171),
                 radius = outerRadiusPx,
-                center = meanCenter,
+                center = zoneCenter,
             )
             drawCircle(
                 color = Color(0xAAF87171),
                 radius = outerRadiusPx,
-                center = meanCenter,
+                center = zoneCenter,
                 style = Stroke(
                     width = max(1.4f, pxPerMeter * 0.0044f),
                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(ringDash, ringGap), 0f),
@@ -1365,10 +1426,10 @@ private fun DrawScope.drawLandingCloudOverlay(
             val landingDisk = Path().apply {
                 addOval(
                     Rect(
-                        meanCenter.x - outerRadiusPx,
-                        meanCenter.y - outerRadiusPx,
-                        meanCenter.x + outerRadiusPx,
-                        meanCenter.y + outerRadiusPx,
+                        zoneCenter.x - outerRadiusPx,
+                        zoneCenter.y - outerRadiusPx,
+                        zoneCenter.x + outerRadiusPx,
+                        zoneCenter.y + outerRadiusPx,
                     ),
                 )
             }
@@ -1414,13 +1475,26 @@ private fun DrawScope.drawLandingCloudOverlay(
             )
         }
 
-        // Mean landing center marker
-        val meanOccluded = visibility != null &&
-            HeatZoneGenerator.isPointOccludedForPocket(uncertainty.meanLandingPosition, visibility)
+        // Secondary skewed-mean marker when ensemble mean differs noticeably from nominal stop
+        if (skewOffset > 0.02) {
+            drawCircle(
+                color = Color(0x9938BDF8),
+                radius = max(2.6f, ballRadiusPx * 0.22f),
+                center = meanCenter,
+                style = Stroke(
+                    width = max(1.2f, pxPerMeter * 0.0035f),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(3f, 3f), 0f),
+                ),
+            )
+        }
+
+        // Nominal landing center marker
+        val nominalOccluded = visibility != null &&
+            HeatZoneGenerator.isPointOccludedForPocket(nominalPos, visibility)
         drawCircle(
-            color = if (meanOccluded) Color(0xFFF87171) else Color(0xFF38BDF8),
+            color = if (nominalOccluded) Color(0xFFF87171) else Color(0xFF38BDF8),
             radius = max(3f, ballRadiusPx * 0.25f),
-            center = meanCenter,
+            center = zoneCenter,
             style = Stroke(width = max(1.5f, pxPerMeter * 0.0045f)),
         )
     }
@@ -1485,6 +1559,7 @@ fun CueTipSelectorCanvas(
     tipOffset: TipOffset,
     onUpdateTip: (TipOffset) -> Unit,
     modifier: Modifier = Modifier,
+    defaultTipOffset: TipOffset? = null,
 ) {
     val textMeasurer = rememberTextMeasurer()
     val latestTip by rememberUpdatedState(tipOffset)
@@ -1514,7 +1589,7 @@ fun CueTipSelectorCanvas(
 
     Canvas(
         modifier = modifier
-            .defaultMinSize(minWidth = 148.dp, minHeight = 148.dp)
+            .defaultMinSize(minWidth = 104.dp, minHeight = 104.dp)
             .aspectRatio(1f)
             .pointerInput(Unit) {
                 detectTapGestures { offset ->
@@ -1615,6 +1690,32 @@ fun CueTipSelectorCanvas(
                     y = pos.y - measured.size.height * 0.5f,
                 ),
             )
+        }
+
+        // Planner-default contact ring marker when the user overrides tip position in Sandbox
+        if (defaultTipOffset != null) {
+            val diff = hypot(
+                defaultTipOffset.clampedSideRatio - tipOffset.clampedSideRatio,
+                defaultTipOffset.clampedVerticalRatio - tipOffset.clampedVerticalRatio,
+            )
+            if (diff > 0.04) {
+                val defCenter = Offset(
+                    x = center.x + (defaultTipOffset.clampedSideRatio.toFloat() * ballRadiusPx),
+                    y = center.y - (defaultTipOffset.clampedVerticalRatio.toFloat() * ballRadiusPx),
+                )
+                val defR = max(5f, ballRadiusPx * 0.13f)
+                drawCircle(
+                    color = Color(0x384ADE80),
+                    radius = defR * 1.45f,
+                    center = defCenter,
+                )
+                drawCircle(
+                    color = Color(0xFF4ADE80),
+                    radius = defR,
+                    center = defCenter,
+                    style = Stroke(width = max(1.8f, ballRadiusPx * 0.032f)),
+                )
+            }
         }
 
         // Red/blue cue-tip contact dot at (clampedSideRatio, clampedVerticalRatio)

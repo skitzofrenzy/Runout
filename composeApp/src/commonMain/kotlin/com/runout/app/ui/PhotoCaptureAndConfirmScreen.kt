@@ -106,6 +106,8 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.round
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private const val METERS_TO_MM: Double = 1000.0
 private const val TARGET_MEDIAN_ERROR_MM: Double = 10.0
@@ -196,19 +198,34 @@ fun PhotoCaptureAndConfirmScreen(
 
     LaunchedEffect(pendingImportedFrame, ballSet) {
         val imported = pendingImportedFrame ?: return@LaunchedEffect
-        val bundle = PhotoCaptureEvaluator.createCapturedPhotoFromRawFrame(
-            id = imported.id,
-            title = imported.title,
-            subtitle = imported.subtitle,
-            frame = imported.frame,
-            tableSpec = selectedPhoto.tableSpec,
-            baseBallSet = ballSet,
+        val outcome = runCatching {
+            withContext(Dispatchers.Default) {
+                val bundle = PhotoCaptureEvaluator.createCapturedPhotoFromRawFrame(
+                    id = imported.id,
+                    title = imported.title,
+                    subtitle = imported.subtitle,
+                    frame = imported.frame,
+                    tableSpec = selectedPhoto.tableSpec,
+                    baseBallSet = ballSet,
+                )
+                val previewBitmap = imported.frame.toComposeImageBitmap()
+                bundle to previewBitmap
+            }
+        }
+        outcome.fold(
+            onSuccess = { (bundle, previewBitmap) ->
+                importedImageBitmap = previewBitmap
+                selectedPhoto = bundle.photo
+                activeBallSet = bundle.inferredBallSet
+                importError = null
+                pendingImportedFrame = null
+                wizardStep = PhotoWizardStep.REVIEW_TABLE
+            },
+            onFailure = { err ->
+                importError = err.message ?: "Unable to analyze the selected table photo."
+                pendingImportedFrame = null
+            },
         )
-        importedImageBitmap = imported.frame.toComposeImageBitmap()
-        selectedPhoto = bundle.photo
-        activeBallSet = bundle.inferredBallSet
-        pendingImportedFrame = null
-        wizardStep = PhotoWizardStep.REVIEW_TABLE
     }
 
     var overriddenQuadCornersPx by remember(selectedPhoto.id) {
@@ -469,7 +486,7 @@ fun PhotoCaptureAndConfirmScreen(
                             ) {
                                 CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
                                 Text(
-                                    text = "Detecting cushion corners and table balls...",
+                                    text = "Analyzing table photo…",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurface,
                                 )

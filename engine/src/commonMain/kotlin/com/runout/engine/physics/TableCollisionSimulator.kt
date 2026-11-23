@@ -156,11 +156,12 @@ object TableCollisionSimulator {
                     val stopDist = (speed * speed) / (2.0 * decel)
 
                     val railHit = intersectRails(sb.pos, dir, table, sb.radius)
-                    val maxTravel = min(stopDist, railHit.distance)
+                    val pocketCheckDist = if (stopDist >= railHit.distance) railHit.distance + sb.radius else stopDist
 
-                    val pocketDrop = findEarliestPocketOnRay(sb.pos, dir, maxTravel, table.pockets)
+                    val pocketDrop = findEarliestPocketOnRay(sb.pos, dir, pocketCheckDist, table.pockets)
                     if (pocketDrop != null) {
-                        val tDrop = timeToTravelDistance(speed, pocketDrop.second, decel)
+                        val dropDist = pocketDrop.second.coerceAtMost(stopDist)
+                        val tDrop = timeToTravelDistance(speed, dropDist, decel)
                         consider(SimEvent.PocketDrop(tDrop, idx, pocketDrop.first))
                     } else if (railHit.distance <= stopDist && railHit.distance > 1e-6) {
                         val tRail = timeToTravelDistance(speed, railHit.distance, decel)
@@ -280,15 +281,17 @@ object TableCollisionSimulator {
             }
         }
 
-        // Append final resting coordinates cleanly
-        for (sb in simBalls) {
+        // Append simulated resting coordinates cleanly before overlap resolution
+        val surviving = simBalls.filter { it.number == 0 || it.active }
+        val preSeparationPos = HashMap<Int, Vec2>(surviving.size)
+        for (sb in surviving) {
             if (sb.active) {
                 appendPathPoint(sb.path, sb.pos)
             }
+            preSeparationPos[sb.number] = sb.pos
         }
 
         // Guarantee non-overlapping surviving balls
-        val surviving = simBalls.filter { it.number == 0 || it.active }
         repeat(4) {
             var anyOverlap = false
             for (i in surviving.indices) {
@@ -308,6 +311,22 @@ object TableCollisionSimulator {
                 }
             }
             if (!anyOverlap) return@repeat
+        }
+
+        // Sync separated resting positions back onto active paths so trajectory ends match evolved layout
+        for (sb in surviving) {
+            if (!sb.active) continue
+            val before = preSeparationPos[sb.number] ?: sb.pos
+            if (sb.pos.distanceTo(before) > 1e-6) {
+                val lastIdx = sb.path.lastIndex
+                if (lastIdx >= 1 && sb.path[lastIdx].distanceTo(before) <= 1e-4 &&
+                    sb.path[lastIdx].distanceTo(sb.path[lastIdx - 1]) > 1e-3
+                ) {
+                    sb.path[lastIdx] = sb.pos
+                } else {
+                    appendPathPoint(sb.path, sb.pos)
+                }
+            }
         }
 
         val cueSim = simBalls.first()
@@ -332,9 +351,14 @@ object TableCollisionSimulator {
         }
 
         val evolvedBalls = surviving.map { sb ->
+            val layoutPos = if (sb.number == 0 && !sb.active) {
+                clampToBounds(sb.pos, table, sb.radius)
+            } else {
+                sb.pos
+            }
             Ball(
                 number = sb.number,
-                position = sb.pos,
+                position = layoutPos,
                 radiusMeters = sb.radius,
             )
         }

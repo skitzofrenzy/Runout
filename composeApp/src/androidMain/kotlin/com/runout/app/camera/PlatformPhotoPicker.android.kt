@@ -3,24 +3,29 @@ package com.runout.app.camera
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
 import com.runout.engine.vision.ArgbImageFrame
+import java.io.ByteArrayInputStream
 import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -40,8 +45,7 @@ actual fun rememberPlatformPhotoPicker(
     val latestOnPhotoImported by rememberUpdatedState(onPhotoImported)
     val latestOnError by rememberUpdatedState(onError)
 
-    var pendingCameraFile by remember { mutableStateOf<File?>(null) }
-    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingCameraPath by rememberSaveable { mutableStateOf<String?>(null) }
 
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
@@ -72,22 +76,26 @@ actual fun rememberPlatformPhotoPicker(
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture(),
     ) { success ->
-        val file = pendingCameraFile
-        val uri = pendingCameraUri
-        pendingCameraFile = null
-        pendingCameraUri = null
+        val path = pendingCameraPath
+        pendingCameraPath = null
+        val file = path?.let { File(it) }
 
-        if (!success || uri == null) {
+        if (!success) {
             runCatching { file?.delete() }
+            return@rememberLauncherForActivityResult
+        }
+        if (file == null || !file.exists() || file.length() == 0L) {
+            runCatching { file?.delete() }
+            latestOnError("Captured photo could not be read from camera storage.")
             return@rememberLauncherForActivityResult
         }
 
         scope.launch {
             val result = withContext(Dispatchers.Default) {
                 try {
-                    decodeUriToArgbFrame(context, uri)
+                    decodeFileToArgbFrame(file)
                 } finally {
-                    runCatching { file?.delete() }
+                    runCatching { file.delete() }
                 }
             }
             result.fold(
@@ -122,13 +130,11 @@ actual fun rememberPlatformPhotoPicker(
                         "${context.packageName}.fileprovider",
                         file,
                     )
-                    pendingCameraFile = file
-                    pendingCameraUri = uri
+                    pendingCameraPath = file.absolutePath
                     cameraLauncher.launch(uri)
                 }.onFailure { err ->
-                    runCatching { pendingCameraFile?.delete() }
-                    pendingCameraFile = null
-                    pendingCameraUri = null
+                    pendingCameraPath?.let { path -> runCatching { File(path).delete() } }
+                    pendingCameraPath = null
                     latestOnError(err.message ?: "Unable to open camera on this device.")
                 }
             }
@@ -156,13 +162,58 @@ private fun decodeUriToArgbFrame(
     uri: Uri,
 ): Result<ArgbImageFrame> = runCatching {
     val resolver = context.contentResolver
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val decodedViaImageDecoder = runCatching {
+            val source = ImageDecoder.createSource(resolver, uri)
+            decodeWithImageDecoder(source)
+        }.getOrNull()
+        if (decodedViaImageDecoder != null) {
+            return@runCatching bitmapToArgbFrame(decodedViaImageDecoder)
+        }
+    }
 
-    // Read image bounds without loading full bitmap into memory
+    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+        ?: error("Unable to open image stream.")
+    decodeBytesFallback(bytes)
+}
+
+private fun decodeFileToArgbFrame(file: File): Result<ArgbImageFrame> = runCatching {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val decodedViaImageDecoder = runCatching {
+            val source = ImageDecoder.createSource(file)
+            decodeWithImageDecoder(source)
+        }.getOrNull()
+        if (decodedViaImageDecoder != null) {
+            return@runCatching bitmapToArgbFrame(decodedViaImageDecoder)
+        }
+    }
+
+    val bytes = file.takeIf { it.exists() }?.readBytes()
+        ?: error("Unable to read captured photo file.")
+    decodeBytesFallback(bytes)
+}
+
+@RequiresApi(Build.VERSION_CODES.P)
+private fun decodeWithImageDecoder(source: ImageDecoder.Source): Bitmap =
+    ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        decoder.isMutableRequired = false
+        val rawW = info.size.width
+        val rawH = info.size.height
+        val maxSide = max(rawW, rawH)
+        if (maxSide > MAX_DECODED_IMAGE_SIDE_PX && rawW > 0 && rawH > 0) {
+            val scale = MAX_DECODED_IMAGE_SIDE_PX.toDouble() / maxSide.toDouble()
+            val targetW = (rawW * scale).roundToInt().coerceAtLeast(16)
+            val targetH = (rawH * scale).roundToInt().coerceAtLeast(16)
+            decoder.setTargetSize(targetW, targetH)
+        }
+    }
+
+private fun decodeBytesFallback(bytes: ByteArray): ArgbImageFrame {
+    require(bytes.isNotEmpty()) { "Selected image file is empty." }
+
     val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    resolver.openInputStream(uri)?.use { stream ->
-        BitmapFactory.decodeStream(stream, null, boundsOptions)
-    } ?: error("Unable to open image stream.")
-
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOptions)
     val rawW = boundsOptions.outWidth
     val rawH = boundsOptions.outHeight
     require(rawW > 0 && rawH > 0) { "Selected file is not a valid image." }
@@ -172,23 +223,21 @@ private fun decodeUriToArgbFrame(
         sampleSize *= 2
     }
 
-    // Read only EXIF orientation so rotated photos stand upright; GPS/EXIF tags are never copied
     val orientation = runCatching {
-        resolver.openInputStream(uri)?.use { stream ->
+        ByteArrayInputStream(bytes).use { stream ->
             ExifInterface(stream).getAttributeInt(
                 ExifInterface.TAG_ORIENTATION,
                 ExifInterface.ORIENTATION_NORMAL,
             )
-        } ?: ExifInterface.ORIENTATION_NORMAL
+        }
     }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
 
     val decodeOptions = BitmapFactory.Options().apply {
         inSampleSize = sampleSize
         inPreferredConfig = Bitmap.Config.ARGB_8888
     }
-    val decoded = resolver.openInputStream(uri)?.use { stream ->
-        BitmapFactory.decodeStream(stream, null, decodeOptions)
-    } ?: error("Failed to decode image pixels.")
+    val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions)
+        ?: error("Failed to decode image pixels.")
 
     val orientedBitmap = applyExifOrientationOnly(decoded, orientation)
     if (orientedBitmap !== decoded) {
@@ -196,7 +245,7 @@ private fun decodeUriToArgbFrame(
     }
 
     val maxSide = max(orientedBitmap.width, orientedBitmap.height)
-    val finalBitmap = if (maxSide > MAX_DECODED_IMAGE_SIDE_PX) {
+    val scaledBitmap = if (maxSide > MAX_DECODED_IMAGE_SIDE_PX) {
         val scale = MAX_DECODED_IMAGE_SIDE_PX.toDouble() / maxSide.toDouble()
         val targetW = (orientedBitmap.width * scale).roundToInt().coerceAtLeast(16)
         val targetH = (orientedBitmap.height * scale).roundToInt().coerceAtLeast(16)
@@ -209,13 +258,24 @@ private fun decodeUriToArgbFrame(
         orientedBitmap
     }
 
-    val width = finalBitmap.width
-    val height = finalBitmap.height
-    val argbPixels = IntArray(width * height)
-    finalBitmap.getPixels(argbPixels, 0, width, 0, 0, width, height)
-    finalBitmap.recycle()
+    return bitmapToArgbFrame(scaledBitmap)
+}
 
-    ArgbImageFrame(
+private fun bitmapToArgbFrame(bitmap: Bitmap): ArgbImageFrame {
+    val argbBitmap = if (bitmap.config == Bitmap.Config.ARGB_8888) {
+        bitmap
+    } else {
+        val converted = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+            ?: error("Unable to convert image to ARGB_8888.")
+        bitmap.recycle()
+        converted
+    }
+    val width = argbBitmap.width
+    val height = argbBitmap.height
+    val argbPixels = IntArray(width * height)
+    argbBitmap.getPixels(argbPixels, 0, width, 0, 0, width, height)
+    argbBitmap.recycle()
+    return ArgbImageFrame(
         width = width,
         height = height,
         argbPixels = argbPixels,

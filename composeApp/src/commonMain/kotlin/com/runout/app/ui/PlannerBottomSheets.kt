@@ -28,6 +28,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.runout.engine.model.AssumedSurfacePreset
 import com.runout.engine.model.BallSetProfile
@@ -638,6 +640,279 @@ fun QuickSpinSheet(
             Spacer(modifier = Modifier.height(RunoutSpacing.Element))
         }
     }
+}
+
+@Composable
+fun CueBallSandboxPanel(
+    activeTip: TipOffset,
+    defaultTip: TipOffset?,
+    customTipOffset: TipOffset?,
+    activeSpeedScale: Int,
+    speedScaleOverride: Int?,
+    lockedTargetBallNumber: Int?,
+    hasOverrides: Boolean,
+    onUpdateTip: (TipOffset?) -> Unit,
+    onUpdateSpeedScale: (Int?) -> Unit,
+    onResetDefaults: () -> Unit,
+    onClose: () -> Unit,
+    compactVertical: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    val spinPresets = listOf(
+        "Auto" to null,
+        "Stun" to TipOffset(sideRatio = 0.0, verticalRatio = 0.0),
+        "Follow" to TipOffset.fromPreset(CueBallSpinPreset.FOLLOW),
+        "Draw" to TipOffset.fromPreset(CueBallSpinPreset.DRAW),
+        "Left" to TipOffset(sideRatio = -0.30, verticalRatio = 0.0),
+        "Right" to TipOffset(sideRatio = 0.30, verticalRatio = 0.0),
+    )
+
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = RunoutColors.SurfaceMid,
+        border = BorderStroke(
+            width = 1.2.dp,
+            color = if (hasOverrides) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(if (compactVertical) 10.dp else 12.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compactVertical) 8.dp else 10.dp),
+        ) {
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Cue Ball Sandbox",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (lockedTargetBallNumber != null) {
+                        Text(
+                            text = "Testing #${lockedTargetBallNumber} live",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                        )
+                    }
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = if (hasOverrides) {
+                            RunoutColors.WarningAmber.copy(alpha = 0.16f)
+                        } else {
+                            RunoutColors.SuccessGreen.copy(alpha = 0.16f)
+                        },
+                    ) {
+                        Text(
+                            text = if (hasOverrides) "Custom" else "Default",
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (hasOverrides) RunoutColors.WarningAmber else RunoutColors.SuccessGreen,
+                        )
+                    }
+                    TextButton(
+                        onClick = onClose,
+                        modifier = Modifier.defaultMinSize(minHeight = 36.dp),
+                    ) {
+                        Text("Done", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+
+            if (compactVertical) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    CueTipSelectorCanvas(
+                        tipOffset = activeTip,
+                        defaultTipOffset = if (customTipOffset != null) defaultTip else null,
+                        onUpdateTip = { onUpdateTip(it) },
+                        modifier = Modifier.size(116.dp),
+                    )
+                    Text(
+                        text = formatSandboxSpinSummary(activeTip),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Speed: $activeSpeedScale/10 (${sandboxSpeedLabel(activeSpeedScale)})",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        if (speedScaleOverride == null) {
+                            Text(
+                                text = "Auto",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.secondary,
+                            )
+                        }
+                    }
+                    Slider(
+                        value = activeSpeedScale.toFloat(),
+                        onValueChange = { onUpdateSpeedScale(it.roundToInt().coerceIn(1, 10)) },
+                        valueRange = 1f..10f,
+                        steps = 8,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CueTipSelectorCanvas(
+                        tipOffset = activeTip,
+                        defaultTipOffset = if (customTipOffset != null) defaultTip else null,
+                        onUpdateTip = { onUpdateTip(it) },
+                        modifier = Modifier.size(126.dp),
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = formatSandboxSpinSummary(activeTip),
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "Speed: $activeSpeedScale/10 (${sandboxSpeedLabel(activeSpeedScale)})",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = if (speedScaleOverride == null) "Auto" else "Manual",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (speedScaleOverride == null) {
+                                    MaterialTheme.colorScheme.secondary
+                                } else {
+                                    RunoutColors.WarningAmber
+                                },
+                            )
+                        }
+                        Slider(
+                            value = activeSpeedScale.toFloat(),
+                            onValueChange = { onUpdateSpeedScale(it.roundToInt().coerceIn(1, 10)) },
+                            valueRange = 1f..10f,
+                            steps = 8,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
+
+            // Quick spin presets
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                spinPresets.forEach { (label, tip) ->
+                    val isSelected = if (tip == null) {
+                        customTipOffset == null
+                    } else {
+                        customTipOffset != null &&
+                            abs(customTipOffset.clampedSideRatio - tip.clampedSideRatio) < 0.04 &&
+                            abs(customTipOffset.clampedVerticalRatio - tip.clampedVerticalRatio) < 0.04
+                    }
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onUpdateTip(tip) },
+                        modifier = Modifier.defaultMinSize(minHeight = if (compactVertical) 36.dp else 40.dp),
+                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                    )
+                }
+            }
+
+            // Auto speed + Reset to Plan Defaults
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilterChip(
+                    selected = speedScaleOverride == null,
+                    onClick = { onUpdateSpeedScale(null) },
+                    modifier = Modifier.defaultMinSize(minHeight = if (compactVertical) 38.dp else 44.dp),
+                    label = { Text("Auto Speed", style = MaterialTheme.typography.labelSmall) },
+                )
+                OutlinedButton(
+                    onClick = onResetDefaults,
+                    enabled = hasOverrides,
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = if (compactVertical) 38.dp else 44.dp),
+                ) {
+                    Text(
+                        text = if (compactVertical) "Reset Defaults" else "Reset to Plan Defaults",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun sandboxSpeedLabel(scale: Int): String = when {
+    scale <= 3 -> "Gentle"
+    scale <= 6 -> "Medium"
+    scale <= 8 -> "Firm"
+    else -> "Hard"
+}
+
+private fun formatSandboxSpinSummary(tip: TipOffset): String {
+    val vert = when {
+        tip.clampedVerticalRatio > 0.12 -> "Follow"
+        tip.clampedVerticalRatio < -0.12 -> "Draw"
+        else -> "Stun"
+    }
+    val side = when {
+        tip.clampedSideRatio > 0.08 -> "Right"
+        tip.clampedSideRatio < -0.08 -> "Left"
+        else -> "Center"
+    }
+    return if (side == "Center") "Spin: $vert" else "Spin: $vert + $side"
 }
 
 @Composable

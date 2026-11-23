@@ -100,7 +100,7 @@ data class SelfPlayBenchmarkResult(
  * ply.
  */
 object MultiShotPlanner {
-    private const val MAX_CUT_ANGLE_RAD: Double = 1.38
+    private const val MAX_CUT_ANGLE_RAD: Double = HeatZoneGenerator.MAX_HEAT_CUT_ANGLE_RAD
     private const val MAX_SCRATCH_PROBABILITY: Double = 0.45
     private const val LEAVE_FLOOR: Double = 0.05
     private const val BREAKOUT_BONUS_WITH_INSURANCE: Double = 0.15
@@ -133,6 +133,7 @@ object MultiShotPlanner {
         customFirstShotSpeedScale: Int? = null,
         customFirstShotTargetBallNumber: Int? = null,
         customFirstShotPocketId: PocketId? = null,
+        allowHighScratchFirstShot: Boolean = false,
     ): List<RunoutPlan> {
         if (layout.cueBall() == null) return emptyList()
         val objectBallCount = layout.balls.count { it.number != 0 }
@@ -151,6 +152,7 @@ object MultiShotPlanner {
             ),
             customTargetBallNumber = customFirstShotTargetBallNumber,
             customPocketId = customFirstShotPocketId,
+            allowHighScratchFirstShot = allowHighScratchFirstShot,
         )
 
         val root = SearchNode(
@@ -275,6 +277,7 @@ object MultiShotPlanner {
         val customSpeedScale: Int?,
         val customTargetBallNumber: Int? = null,
         val customPocketId: PocketId? = null,
+        val allowHighScratchFirstShot: Boolean = false,
     ) {
         private val problemCache = HashMap<String, List<ProblemBallReport>>()
         private val heatCache = HashMap<String, HeatZoneMap>()
@@ -386,7 +389,17 @@ object MultiShotPlanner {
         context: SearchContext,
     ): SearchNode? {
         val table = node.layout.table
-        val evaluation = evaluateShot(node.layout, cue, target, pocket, aim, scale, tip, context.profile) ?: return null
+        val evaluation = evaluateShot(
+            layout = node.layout,
+            cue = cue,
+            target = target,
+            pocket = pocket,
+            aim = aim,
+            scale = scale,
+            tip = tip,
+            profile = context.profile,
+            allowHighScratch = ply == 1 && context.allowHighScratchFirstShot,
+        ) ?: return null
         val uncertainty = evaluation.uncertainty
         val stepProbability = evaluation.stepProbability
 
@@ -408,11 +421,12 @@ object MultiShotPlanner {
             rules = node.rules,
             cue = cue,
             target = target,
-            landingPosition = uncertainty.meanLandingPosition,
+            landingPosition = uncertainty.nominalLandingPosition,
             simulation = uncertainty.postShotSimulation,
         )
-        val landing = advanced.layout.cueBall()?.position ?: uncertainty.meanLandingPosition
+        val landing = advanced.layout.cueBall()?.position ?: uncertainty.nominalLandingPosition
         val terminal = advanced.nextTargets.isEmpty()
+        val virtualCueAtLanding = Ball(number = 0, position = landing, radiusMeters = cue.radiusMeters)
         val (leaveFactor, positionSuccessProbability) = when {
             terminal -> computeExecutionSimplicityFactor(
                 scale = scale,
@@ -431,10 +445,13 @@ object MultiShotPlanner {
                     table.pockets.any { nextPocket ->
                         playableAim(
                             layout = advanced.layout,
-                            cue = Ball(number = 0, position = landing, radiusMeters = cue.radiusMeters),
+                            cue = virtualCueAtLanding,
                             target = finalBall,
                             pocket = nextPocket,
-                        ) != null
+                        ) != null && !HeatZoneGenerator.isPointOccludedForPocket(
+                            landing,
+                            HeatZoneGenerator.computePocketVisibility(advanced.layout, finalBall, nextPocket, cue.radiusMeters),
+                        )
                     }
                 val heatValue = if (!hasClearNextShot) 0.0 else heat.valueAt(landing)
                 val cloudEase = evaluateFinalBallLandingCloudEase(
@@ -475,10 +492,13 @@ object MultiShotPlanner {
                         table.pockets.any { nextPocket ->
                             playableAim(
                                 layout = advanced.layout,
-                                cue = Ball(number = 0, position = landing, radiusMeters = cue.radiusMeters),
+                                cue = virtualCueAtLanding,
                                 target = nextTarget,
                                 pocket = nextPocket,
-                            ) != null
+                            ) != null && !HeatZoneGenerator.isPointOccludedForPocket(
+                                landing,
+                                HeatZoneGenerator.computePocketVisibility(advanced.layout, nextTarget, nextPocket, cue.radiusMeters),
+                            )
                         }
                     }
                 val heatValue = if (!hasClearNextShot) 0.0 else heat.valueAt(landing)
@@ -547,6 +567,7 @@ object MultiShotPlanner {
         scale: Int,
         tip: TipOffset,
         profile: PlayerProfile,
+        allowHighScratch: Boolean = false,
     ): ShotEvaluation? {
         val cueSpeed = profile.speedForScale(scale)
         val compensated = SpinPhysics.solveCompensatedAim(
@@ -567,7 +588,7 @@ object MultiShotPlanner {
             tip = tip,
             playerProfile = profile,
         )
-        if (uncertainty.scratchProbability >= MAX_SCRATCH_PROBABILITY) return null
+        if (!allowHighScratch && uncertainty.scratchProbability >= MAX_SCRATCH_PROBABILITY) return null
         return ShotEvaluation(compensated, uncertainty, cueSpeed)
     }
 
@@ -920,7 +941,14 @@ object MultiShotPlanner {
             val step = plan.steps.firstOrNull() ?: return 0.0
             probability *= (step.uncertainty.makeProbability * (1.0 - step.uncertainty.scratchProbability))
                 .coerceIn(0.0, 1.0)
-            val advanced = advance(layout, rules, cue, step.targetBall, step.uncertainty.meanLandingPosition)
+            val advanced = advance(
+                layout,
+                rules,
+                cue,
+                step.targetBall,
+                step.uncertainty.nominalLandingPosition,
+                step.uncertainty.postShotSimulation,
+            )
             layout = advanced.layout
             rules = advanced.rules
             if (advanced.nextTargets.isEmpty()) break
@@ -960,7 +988,14 @@ object MultiShotPlanner {
             val chosenTarget = bestTarget ?: return 0.0
             val chosen = bestEvaluation ?: return 0.0
             probability *= chosen.stepProbability
-            val advanced = advance(layout, rules, cue, chosenTarget, chosen.uncertainty.meanLandingPosition)
+            val advanced = advance(
+                layout,
+                rules,
+                cue,
+                chosenTarget,
+                chosen.uncertainty.nominalLandingPosition,
+                chosen.uncertainty.postShotSimulation,
+            )
             layout = advanced.layout
             rules = advanced.rules
             if (advanced.nextTargets.isEmpty()) break
