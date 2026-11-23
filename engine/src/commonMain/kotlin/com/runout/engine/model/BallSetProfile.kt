@@ -31,6 +31,12 @@ data class BallSetProfile(
     }
 
     /**
+     * Whether this profile represents a UK Blackball (yellows 1–7, reds 9–15, black 8) set.
+     */
+    val isUkBlackball: Boolean
+        get() = name.contains("Blackball", ignoreCase = true)
+
+    /**
      * Returns the configured [BallPaletteColor] for [number], falling back to the standard
      * pool palette if [number] is not explicitly mapped.
      */

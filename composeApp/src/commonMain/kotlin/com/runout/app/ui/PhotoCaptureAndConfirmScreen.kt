@@ -79,6 +79,8 @@ import com.runout.engine.model.EightBallGroup
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
 import com.runout.engine.model.TableLayout
+import com.runout.engine.planner.PlanningReadinessResult
+import com.runout.engine.planner.PlanningReadinessValidator
 import com.runout.engine.vision.ArgbImageFrame
 import com.runout.engine.vision.BallIdentificationAndAssignment
 import com.runout.engine.vision.CameraIntrinsicsSpec
@@ -119,6 +121,7 @@ private val EIGHT_BALL_CONFIRM_GROUPS = listOf(
     EightBallGroup.SOLIDS,
     EightBallGroup.STRIPES,
     EightBallGroup.OPEN,
+    EightBallGroup.EIGHT_BALL,
 )
 
 private val SuccessGreenColor = Color(0xFF4ADE80)
@@ -273,12 +276,27 @@ fun PhotoCaptureAndConfirmScreen(
     val topSuggestion = gameSuggestions.firstOrNull()
     val activeVariant = selectedVariantOverride ?: topSuggestion?.variant ?: DetectedGameVariant.EIGHT_BALL
     val activeSuggestion = gameSuggestions.firstOrNull { it.variant == activeVariant } ?: topSuggestion
-    val activeEightBallGroup = (confirmedEightBallGroup
-        ?: activeSuggestion?.suggestedEightBallGroup
-        ?: EightBallGroup.OPEN)
-        .let { group ->
-            if (group == EightBallGroup.EIGHT_BALL) EightBallGroup.OPEN else group
-        }
+    // Never silently assume Solids, Stripes, or Open Table after detecting 8-Ball; require explicit user selection.
+    val activeEightBallGroup = confirmedEightBallGroup ?: EightBallGroup.UNSET
+    val candidateGameType = activeSuggestion?.engineGameType ?: lastPlayedGameType
+    val candidateRulesState = GameRulesState(
+        gameType = candidateGameType,
+        eightBallGroup = if (
+            candidateGameType == GameType.EIGHT_BALL &&
+            activeVariant == DetectedGameVariant.EIGHT_BALL
+        ) {
+            activeEightBallGroup
+        } else {
+            EightBallGroup.OPEN
+        },
+    )
+    val planningReadiness = remember(finalLayout, candidateRulesState, ballSet) {
+        PlanningReadinessValidator.evaluate(
+            layout = finalLayout,
+            rulesState = candidateRulesState,
+            ballSet = ballSet,
+        )
+    }
 
     Column(
         modifier = modifier
@@ -428,29 +446,20 @@ fun PhotoCaptureAndConfirmScreen(
             suggestions = gameSuggestions,
             selectedVariant = activeVariant,
             selectedEightBallGroup = activeEightBallGroup,
+            ballSet = ballSet,
+            planningReadiness = planningReadiness,
             onSelectVariant = { variant ->
                 selectedVariantOverride = variant
             },
             onSelectEightBallGroup = { group ->
                 confirmedEightBallGroup = group
             },
-            canConfirm = activeRectification != null && !isQuadGeometryInvalid,
+            canConfirm = activeRectification != null && !isQuadGeometryInvalid &&
+                (planningReadiness.isReady || planningReadiness.missingBallNumbers.isNotEmpty()),
             onConfirm = {
-                val confirmedGameType = activeSuggestion?.engineGameType ?: lastPlayedGameType
-                val confirmedGroup = if (
-                    confirmedGameType == GameType.EIGHT_BALL &&
-                    activeVariant == DetectedGameVariant.EIGHT_BALL
-                ) {
-                    activeEightBallGroup
-                } else {
-                    EightBallGroup.OPEN
-                }
                 onConfirmScannedLayout(
                     finalLayout.copy(table = finalLayout.table.withClothParams(selectedClothParams)),
-                    GameRulesState(
-                        gameType = confirmedGameType,
-                        eightBallGroup = confirmedGroup,
-                    ),
+                    candidateRulesState,
                 )
             },
         )
@@ -1935,6 +1944,8 @@ private fun GameTypeConfirmationCard(
     suggestions: List<GameTypeSuggestion>,
     selectedVariant: DetectedGameVariant,
     selectedEightBallGroup: EightBallGroup,
+    ballSet: BallSetProfile,
+    planningReadiness: PlanningReadinessResult,
     onSelectVariant: (DetectedGameVariant) -> Unit,
     onSelectEightBallGroup: (EightBallGroup) -> Unit,
     canConfirm: Boolean,
@@ -2022,9 +2033,17 @@ private fun GameTypeConfirmationCard(
             if (selectedVariant == DetectedGameVariant.EIGHT_BALL) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "Confirm 8-Ball Group",
+                        text = if (selectedEightBallGroup == EightBallGroup.UNSET) {
+                            "Choose Your 8-Ball Group (Required Before Planning)"
+                        } else {
+                            "8-Ball Group"
+                        },
                         style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (selectedEightBallGroup == EightBallGroup.UNSET) {
+                            WarningAmberColor
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                     )
                     Row(
                         modifier = Modifier
@@ -2039,7 +2058,7 @@ private fun GameTypeConfirmationCard(
                                 onClick = { onSelectEightBallGroup(group) },
                                 label = {
                                     Text(
-                                        text = group.displayName,
+                                        text = group.displayNameFor(ballSet),
                                         fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
                                     )
                                 },
@@ -2053,13 +2072,48 @@ private fun GameTypeConfirmationCard(
                 }
             }
 
+            if (!planningReadiness.isReady) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = WarningAmberColor.copy(alpha = 0.14f),
+                    border = BorderStroke(1.dp, WarningAmberColor.copy(alpha = 0.65f)),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = "Planning Paused: ${planningReadiness.headline}",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = WarningAmberColor,
+                        )
+                        Text(
+                            text = planningReadiness.guidance,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            }
+
+            val confirmLabel = when {
+                planningReadiness.isReady -> "Confirm & Start Planning"
+                planningReadiness.missingBallNumbers.isNotEmpty() ->
+                    "Open in Table Editor (Planning Paused)"
+                else -> "Select Your 8-Ball Group Above"
+            }
+
             Button(
                 onClick = onConfirm,
                 enabled = canConfirm,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    text = "Confirm & Open in Table Planner",
+                    text = confirmLabel,
                     fontWeight = FontWeight.SemiBold,
                 )
             }

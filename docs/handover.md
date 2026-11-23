@@ -1,6 +1,6 @@
 # Handover
 
-**Last updated:** 2026-11-19
+**Last updated:** 2026-11-20
 
 Where the project stands, what has been decided and why, and what to do next. Update this file whenever the state of the project changes.
 
@@ -34,6 +34,8 @@ All six roadmap milestones — 0 (Research & prototype), 1 (MVP), 2 (Photo detec
 - **Raw ARGB pixel frame & video decoder (`:engine` + `:composeApp`):**
   - `RawImageTableDetector` (`com.runout.engine.vision`) decodes `ArgbImageFrame` pixel buffers directly in pure KMP Kotlin: 36-bin HSV auto-cloth segmentation (`ClothHueCategory`: `TOURNAMENT_BLUE` including low-saturation CPBA/Simonis Shark Grey broadcast cloth, `SIMONIS_GREEN`, `CHAMPIONSHIP_RED`, `SLATE_GREY`) rejecting outer arena floor carpet, center-seeded 4-corner perspective quad extraction (`detectTableQuadCornersPx`) with end-on broadcast trapezoid refinement and corner/camera orientation (`isEndOnPerspectiveQuad`, `orientQuadForHomography`), cloth drop-shadow and glove/cue-stick separation (`isClothShadowHsv`, compatibility-gated connected-component ball blob extraction), WNT/TV ball-set palette voting (`BallSetProfile.wntTournamentBlackPool()` with `4 = PINK, 5 = PURPLE, 7 = BROWN` and yellow/black 9-ball stripe detection), synthetic table photo rendering (`renderSyntheticTablePhotoArgb`), and multi-frame video pixel tracking feeding `VideoBallTracker` (`trackBallInArgbVideoFrames`).
   - `PhotoCaptureEvaluator.processRawArgbFrame` and `SampleCapturedPhotos.renderPresetAsRawArgbFrame` wire raw `640×360` ARGB pixel decoding into `PhotoCaptureAndConfirmScreen` via the **Online Photo / Raw Pixel Frame Decoder** card (cloth colour selector, live HSV/corner/blob/SI-error readout, and **"Use Pixel-Detected Layout"** confirmation loader), while local `.png`/`.jpg` online photo and video frame diagnostics use the gitignored `ml/datasets/` folder (see [computer vision](research/computer-vision.md)).
+- **Planning readiness & confirmation guardrails (`:engine` + `:composeApp`):**
+  - `PlanningReadinessValidator` (`com.runout.engine.planner`) and `EightBallGroup.UNSET` pause shot and run-out planning whenever the cue ball (`#0`) or the game's required end ball (`#8` for 8-Ball, `#9` for 9-Ball, `#10` for 10-Ball) is missing, or when an 8-Ball layout has not had a group explicitly chosen by the user (`Solids`/`Stripes`/`Open Table`, or `Yellows`/`Reds`/`Open Table` for `UK Blackball`). Both `PhotoCaptureAndConfirmScreen` and `App` (`Table & Planner`) surface clear confirmation prompts with one-tap group selection, missing-ball placement (`SampleLayouts.addMissingBall`), and game-type switching before planning resumes.
 
 ## What's here
 

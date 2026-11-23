@@ -3,20 +3,37 @@ package com.runout.engine.model
 /**
  * Supported cue-sports game types for legal target resolution and shot planning.
  */
-enum class GameType(val displayName: String) {
-    EIGHT_BALL("8-Ball"),
-    NINE_BALL("9-Ball"),
-    TEN_BALL("10-Ball"),
+enum class GameType(
+    val displayName: String,
+    val requiredEndBallNumber: Int,
+    val endBallLabel: String,
+) {
+    EIGHT_BALL("8-Ball", requiredEndBallNumber = 8, endBallLabel = "8-ball"),
+    NINE_BALL("9-Ball", requiredEndBallNumber = 9, endBallLabel = "9-ball"),
+    TEN_BALL("10-Ball", requiredEndBallNumber = 10, endBallLabel = "10-ball"),
 }
 
 /**
  * Group assignment state in an 8-ball rack.
  */
 enum class EightBallGroup(val displayName: String) {
+    UNSET("Choose Group"),
     OPEN("Open Table"),
     SOLIDS("Solids (1–7)"),
     STRIPES("Stripes (9–15)"),
     EIGHT_BALL("8-Ball"),
+    ;
+
+    /**
+     * Human-readable label adapted for UK Blackball (Yellows/Reds) vs standard US 8-ball (Solids/Stripes).
+     */
+    fun displayNameFor(ballSet: BallSetProfile): String = when (this) {
+        UNSET -> "Choose Group"
+        OPEN -> "Open Table"
+        SOLIDS -> if (ballSet.isUkBlackball) "Yellows (1–7)" else "Solids (1–7)"
+        STRIPES -> if (ballSet.isUkBlackball) "Reds (9–15)" else "Stripes (9–15)"
+        EIGHT_BALL -> "8-Ball"
+    }
 }
 
 /**
@@ -40,6 +57,8 @@ data class GameRulesState(
             -> listOfNotNull(objectBalls.minByOrNull { it.number })
 
             GameType.EIGHT_BALL -> when (eightBallGroup) {
+                EightBallGroup.UNSET -> emptyList()
+
                 EightBallGroup.OPEN -> {
                     val groupBalls = objectBalls.filter { it.isSolid || it.isStripe }
                     groupBalls.ifEmpty { objectBalls.filter { it.isEightBall } }

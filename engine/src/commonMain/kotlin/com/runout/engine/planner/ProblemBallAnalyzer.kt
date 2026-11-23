@@ -171,6 +171,7 @@ object ProblemBallAnalyzer {
     private fun relevantBalls(objectBalls: List<Ball>, rulesState: GameRulesState): List<Ball> {
         if (rulesState.gameType != GameType.EIGHT_BALL) return objectBalls
         return when (rulesState.eightBallGroup) {
+            EightBallGroup.UNSET -> emptyList()
             EightBallGroup.SOLIDS -> objectBalls.filter { it.isSolid || it.isEightBall }
             EightBallGroup.STRIPES -> objectBalls.filter { it.isStripe || it.isEightBall }
             EightBallGroup.EIGHT_BALL -> objectBalls.filter { it.isEightBall }

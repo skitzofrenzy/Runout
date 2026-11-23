@@ -216,10 +216,28 @@ object SampleLayouts {
         if (layout.ballByNumber(ballNumber) != null) {
             return layout.copy(balls = layout.balls.filterNot { it.number == ballNumber })
         }
+        return addMissingBall(layout, ballNumber)
+    }
+
+    /**
+     * Adds ball [ballNumber] (`0..15`, including the cue ball `0`) at a free non-overlapping spot
+     * if it is not already on [layout]. Places cue ball near the head spot and object balls near
+     * the foot spot.
+     */
+    fun addMissingBall(
+        layout: TableLayout,
+        ballNumber: Int,
+    ): TableLayout {
+        if (ballNumber !in 0..15) return layout
+        if (layout.ballByNumber(ballNumber) != null) return layout
 
         val table = layout.table
         val ballRadius = layout.balls.firstOrNull { !it.isCueBall }?.radiusMeters ?: table.ballRadiusMeters
-        val preferred = table.footSpot()
+        val preferred = if (ballNumber == 0) {
+            Vec2(table.lengthMeters * 0.25, table.widthMeters * 0.5)
+        } else {
+            table.footSpot()
+        }
         val freePosition = findFreeSpotNear(preferred, layout.balls, table, ballRadius)
         return layout.copy(
             balls = layout.balls + Ball(

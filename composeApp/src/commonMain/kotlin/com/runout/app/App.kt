@@ -69,6 +69,9 @@ import com.runout.engine.physics.TipOffset
 import com.runout.engine.planner.MultiShotPlanner
 import com.runout.engine.planner.OneShotPlanner
 import com.runout.engine.planner.PlannedShotStep
+import com.runout.engine.planner.PlanningPauseReason
+import com.runout.engine.planner.PlanningReadinessResult
+import com.runout.engine.planner.PlanningReadinessValidator
 import com.runout.engine.planner.ProblemBallReason
 import com.runout.engine.planner.RunoutPlan
 import com.runout.engine.planner.ShotRecommendation
@@ -180,6 +183,14 @@ fun App() {
     var showLandingCloud by remember { mutableStateOf(true) }
     var customTipOffset by remember { mutableStateOf<TipOffset?>(null) }
 
+    val planningReadiness = remember(currentLayout, rulesState, ballSetProfile) {
+        PlanningReadinessValidator.evaluate(
+            layout = currentLayout,
+            rulesState = rulesState,
+            ballSet = ballSetProfile,
+        )
+    }
+
     val runoutPlans = remember(
         currentLayout,
         rulesState,
@@ -187,7 +198,9 @@ fun App() {
         selectedHorizon,
         customTipOffset,
         speedScaleOverride,
+        planningReadiness.isReady,
     ) {
+        if (!planningReadiness.isReady) return@remember emptyList()
         MultiShotPlanner.planRunout(
             layout = currentLayout,
             rulesState = rulesState,
@@ -199,7 +212,14 @@ fun App() {
         )
     }
 
-    val rankedShots = remember(currentLayout, rulesState, playerProfile, speedScaleOverride) {
+    val rankedShots = remember(
+        currentLayout,
+        rulesState,
+        playerProfile,
+        speedScaleOverride,
+        planningReadiness.isReady,
+    ) {
+        if (!planningReadiness.isReady) return@remember emptyList()
         OneShotPlanner.rankShots(
             layout = currentLayout,
             rulesState = rulesState,
@@ -301,9 +321,13 @@ fun App() {
                             onToggleBall = { ballNumber ->
                                 currentLayout = SampleLayouts.toggleObjectBall(currentLayout, ballNumber)
                             },
+                            onAddMissingBall = { ballNumber ->
+                                currentLayout = SampleLayouts.addMissingBall(currentLayout, ballNumber)
+                            },
                             onMoveBall = { ballNumber, newPosition ->
                                 currentLayout = SampleLayouts.moveBallSafely(currentLayout, ballNumber, newPosition)
                             },
+                            planningReadiness = planningReadiness,
                             rankedShots = rankedShots,
                             selectedShotIndex = safeShotIndex,
                             onSelectShot = { index -> selectedShotIndex = index },
@@ -446,6 +470,12 @@ fun RunoutPracticeScreen(
     visibleSpins: Set<CueBallSpinPreset>,
     onToggleSpin: (CueBallSpinPreset) -> Unit,
     modifier: Modifier = Modifier,
+    planningReadiness: PlanningReadinessResult = PlanningReadinessValidator.evaluate(
+        layout = currentLayout,
+        rulesState = rulesState,
+        ballSet = ballSetProfile,
+    ),
+    onAddMissingBall: (Int) -> Unit = onToggleBall,
     selectedHorizon: PlanningHorizonOption = PlanningHorizonOption.THREE_BALL,
     onSelectHorizon: (PlanningHorizonOption) -> Unit = {},
     showHeatZone: Boolean = false,
@@ -488,7 +518,21 @@ fun RunoutPracticeScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            RulesBadge(rulesState = rulesState, tableName = currentLayout.table.name)
+            RulesBadge(
+                rulesState = rulesState,
+                ballSet = ballSetProfile,
+                tableName = currentLayout.table.name,
+            )
+        }
+
+        if (!planningReadiness.isReady) {
+            PlanningPausedCard(
+                readiness = planningReadiness,
+                rulesState = rulesState,
+                ballSet = ballSetProfile,
+                onSelectRules = onSelectRules,
+                onAddMissingBall = onAddMissingBall,
+            )
         }
 
         // Preset layout chips
@@ -775,7 +819,11 @@ fun RunoutPracticeScreen(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             ) {
                 Text(
-                    text = "No multi-shot run-out plan found for this layout.",
+                    text = if (!planningReadiness.isReady) {
+                        "Planning is paused — ${planningReadiness.headline}. Confirm above to generate a run-out plan."
+                    } else {
+                        "No multi-shot run-out plan found for this layout."
+                    },
                     modifier = Modifier.padding(16.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -813,7 +861,11 @@ fun RunoutPracticeScreen(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             ) {
                 Text(
-                    text = "No direct legal pots available for this layout.",
+                    text = if (!planningReadiness.isReady) {
+                        "Planning is paused — ${planningReadiness.headline}."
+                    } else {
+                        "No direct legal pots available for this layout."
+                    },
                     modifier = Modifier.padding(16.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -842,12 +894,119 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
+private fun PlanningPausedCard(
+    readiness: PlanningReadinessResult,
+    rulesState: GameRulesState,
+    ballSet: BallSetProfile,
+    onSelectRules: (GameRulesState) -> Unit,
+    onAddMissingBall: (Int) -> Unit,
+) {
+    val amber = Color(0xFFFBBF24)
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = amber.copy(alpha = 0.12f)),
+        border = BorderStroke(1.2.dp, amber.copy(alpha = 0.70f)),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "Planning Paused — ${readiness.headline}",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = amber,
+            )
+            Text(
+                text = readiness.guidance,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+
+            if (readiness.needsEightBallGroupSelection) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    listOf(
+                        EightBallGroup.SOLIDS,
+                        EightBallGroup.STRIPES,
+                        EightBallGroup.OPEN,
+                        EightBallGroup.EIGHT_BALL,
+                    ).forEach { group ->
+                        FilterChip(
+                            selected = false,
+                            onClick = {
+                                onSelectRules(rulesState.copy(eightBallGroup = group))
+                            },
+                            label = {
+                                Text(
+                                    text = group.displayNameFor(ballSet),
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            },
+                        )
+                    }
+                }
+            }
+
+            if (readiness.missingBallNumbers.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    readiness.missingBallNumbers.forEach { missingNum ->
+                        val label = if (missingNum == 0) "Add Cue Ball (#0)" else "Add Ball #$missingNum"
+                        FilterChip(
+                            selected = false,
+                            onClick = { onAddMissingBall(missingNum) },
+                            label = {
+                                Text(
+                                    text = label,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            },
+                        )
+                    }
+                    if (PlanningPauseReason.MISSING_END_BALL in readiness.pauseReasons) {
+                        GameType.entries
+                            .filter { it != rulesState.gameType }
+                            .forEach { altGame ->
+                                FilterChip(
+                                    selected = false,
+                                    onClick = {
+                                        val nextGroup = if (altGame == GameType.EIGHT_BALL) {
+                                            EightBallGroup.UNSET
+                                        } else {
+                                            EightBallGroup.OPEN
+                                        }
+                                        onSelectRules(GameRulesState(altGame, nextGroup))
+                                    },
+                                    label = { Text("Switch to ${altGame.displayName}") },
+                                )
+                            }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun RulesBadge(
     rulesState: GameRulesState,
+    ballSet: BallSetProfile,
     tableName: String,
 ) {
     val groupSuffix = if (rulesState.gameType == GameType.EIGHT_BALL) {
-        " • ${rulesState.eightBallGroup.displayName}"
+        " • ${rulesState.eightBallGroup.displayNameFor(ballSet)}"
     } else {
         ""
     }

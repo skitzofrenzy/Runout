@@ -180,6 +180,23 @@ class SampleLayoutsTest {
     }
 
     @Test
+    fun addMissingBallPlacesMissingCueBallAndEndBallSafely() {
+        val base = SampleLayouts.eightBallKeyBallToEight().layout
+        val withoutCueOrEight = base.copy(balls = base.balls.filterNot { it.number == 0 || it.number == 8 })
+        assertNull(withoutCueOrEight.cueBall())
+        assertNull(withoutCueOrEight.ballByNumber(8))
+
+        val restoredCue = SampleLayouts.addMissingBall(withoutCueOrEight, 0)
+        val restoredBoth = SampleLayouts.addMissingBall(restoredCue, 8)
+
+        val cue = assertNotNull(restoredBoth.cueBall())
+        val eight = assertNotNull(restoredBoth.ballByNumber(8))
+        assertTrue(restoredBoth.table.isWithinPlayableBounds(cue.position, cue.radiusMeters))
+        assertTrue(restoredBoth.table.isWithinPlayableBounds(eight.position, eight.radiusMeters))
+        assertTrue(cue.position.distanceTo(eight.position) >= cue.radiusMeters + eight.radiusMeters - 1e-6)
+    }
+
+    @Test
     fun ballSetProfileColorsAreAvailableForStandardAndTvSets() {
         val standard = BallSetProfile.standardPool()
         val tv = BallSetProfile.tvTournamentPool()
