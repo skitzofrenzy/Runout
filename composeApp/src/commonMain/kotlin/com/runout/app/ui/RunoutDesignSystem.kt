@@ -53,6 +53,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.runout.engine.planner.ShotDifficultyTier
+import kotlin.math.roundToInt
 
 /**
  * Spatial grid tokens on an 8 dp rhythm with a 3:1 section-to-content proximity ratio.
@@ -674,6 +676,98 @@ fun SimpleProTogglePill(
                         },
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Semantic difficulty accent colour shared across make and position badges.
+ */
+fun shotDifficultyColor(tier: ShotDifficultyTier): Color = when (tier) {
+    ShotDifficultyTier.EASY -> RunoutColors.SuccessGreen
+    ShotDifficultyTier.MEDIUM -> RunoutColors.WarningAmber
+    ShotDifficultyTier.HARD -> RunoutColors.DangerCoral
+}
+
+/**
+ * Side-by-side paired Make Difficulty + Position Difficulty pills for Simple and Pro planner cards.
+ */
+@Composable
+fun ShotDifficultyPairRow(
+    makeProbability: Double,
+    positionProbability: Double?,
+    modifier: Modifier = Modifier,
+) {
+    val makePct = (makeProbability.coerceIn(0.0, 1.0) * 100.0).roundToInt()
+    val makeTier = ShotDifficultyTier.fromProbability(makeProbability)
+    val makeColor = shotDifficultyColor(makeTier)
+
+    val posPct = positionProbability?.let { (it.coerceIn(0.0, 1.0) * 100.0).roundToInt() }
+    val posTier = positionProbability?.let { ShotDifficultyTier.fromProbability(it) }
+    val posColor = posTier?.let(::shotDifficultyColor) ?: RunoutColors.PrimaryCyan
+
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Element),
+    ) {
+        Surface(
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(10.dp),
+            color = makeColor.copy(alpha = 0.14f),
+            border = BorderStroke(1.dp, makeColor.copy(alpha = 0.40f)),
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = "MAKE",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+                Text(
+                    text = "$makePct% • ${makeTier.label}",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = makeColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        Surface(
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(10.dp),
+            color = posColor.copy(alpha = 0.14f),
+            border = BorderStroke(1.dp, posColor.copy(alpha = 0.40f)),
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = "POSITION",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+                Text(
+                    text = if (posPct != null && posTier != null) {
+                        "$posPct% • ${posTier.label}"
+                    } else {
+                        "Last ball"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = posColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }

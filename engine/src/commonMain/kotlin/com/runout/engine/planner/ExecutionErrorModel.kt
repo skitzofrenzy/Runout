@@ -44,6 +44,9 @@ object ExecutionErrorModel {
     private const val SQRT_2: Double = 1.4142135623730951
     private const val MAX_PERTURBED_CUT_RAD: Double = 1.45
 
+    /** Weights aligned 1:1 with the 9-point sigma ensemble in [ShotUncertaintyResult.landingCloud]. */
+    val SIGMA_WEIGHTS: List<Double> = listOf(0.28, 0.12, 0.12, 0.12, 0.12, 0.06, 0.06, 0.06, 0.06)
+
     private data class SigmaOffset(
         val dAimRad: Double,
         val dSpeedFrac: Double,
@@ -96,15 +99,15 @@ object ExecutionErrorModel {
         val sigmaSpeedFrac = (0.04 + playerProfile.aimErrorStdRad * 2.5).coerceIn(0.04, 0.18)
 
         val stencil = listOf(
-            SigmaOffset(0.0, 0.0, 0.0, 0.0, 0.28),
-            SigmaOffset(1.35 * sigmaAim, 0.0, 0.0, 0.0, 0.12),
-            SigmaOffset(-1.35 * sigmaAim, 0.0, 0.0, 0.0, 0.12),
-            SigmaOffset(0.0, 1.35 * sigmaSpeedFrac, 0.0, 0.0, 0.12),
-            SigmaOffset(0.0, -1.35 * sigmaSpeedFrac, 0.0, 0.0, 0.12),
-            SigmaOffset(0.85 * sigmaAim, 0.85 * sigmaSpeedFrac, 0.05, 0.0, 0.06),
-            SigmaOffset(-0.85 * sigmaAim, -0.85 * sigmaSpeedFrac, -0.05, 0.0, 0.06),
-            SigmaOffset(-0.85 * sigmaAim, 0.85 * sigmaSpeedFrac, 0.0, 0.05, 0.06),
-            SigmaOffset(0.85 * sigmaAim, -0.85 * sigmaSpeedFrac, 0.0, -0.05, 0.06),
+            SigmaOffset(0.0, 0.0, 0.0, 0.0, SIGMA_WEIGHTS[0]),
+            SigmaOffset(1.35 * sigmaAim, 0.0, 0.0, 0.0, SIGMA_WEIGHTS[1]),
+            SigmaOffset(-1.35 * sigmaAim, 0.0, 0.0, 0.0, SIGMA_WEIGHTS[2]),
+            SigmaOffset(0.0, 1.35 * sigmaSpeedFrac, 0.0, 0.0, SIGMA_WEIGHTS[3]),
+            SigmaOffset(0.0, -1.35 * sigmaSpeedFrac, 0.0, 0.0, SIGMA_WEIGHTS[4]),
+            SigmaOffset(0.85 * sigmaAim, 0.85 * sigmaSpeedFrac, 0.05, 0.0, SIGMA_WEIGHTS[5]),
+            SigmaOffset(-0.85 * sigmaAim, -0.85 * sigmaSpeedFrac, -0.05, 0.0, SIGMA_WEIGHTS[6]),
+            SigmaOffset(-0.85 * sigmaAim, 0.85 * sigmaSpeedFrac, 0.0, 0.05, SIGMA_WEIGHTS[7]),
+            SigmaOffset(0.85 * sigmaAim, -0.85 * sigmaSpeedFrac, 0.0, -0.05, SIGMA_WEIGHTS[8]),
         )
 
         val muR = table.cloth.rollingResistanceMuR.coerceAtLeast(1e-4)

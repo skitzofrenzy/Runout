@@ -33,9 +33,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.BallSetProfile
@@ -469,6 +472,10 @@ fun StepPlaybackControlBar(
             ) {
                 if (currentStep != null) {
                     val makePct = (currentStep.uncertainty.makeProbability * 100.0).roundToInt()
+                    val makeTier = currentStep.makeDifficulty
+                    val posProb = currentStep.positionSuccessProbability
+                    val posTier = currentStep.positionDifficulty
+                    val mutedColor = MaterialTheme.colorScheme.onSurfaceVariant
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -480,7 +487,7 @@ fun StepPlaybackControlBar(
                                 .background(ballBaseColor(currentStep.targetBall.number, ballSetProfile)),
                         )
                         Text(
-                            text = "Shot ${safeStepIdx + 1}/${steps.size}: #${currentStep.targetBall.number} -> ${currentStep.pocketId.displayName} ($makePct%)",
+                            text = "Shot ${safeStepIdx + 1}/${steps.size}: #${currentStep.targetBall.number} -> ${currentStep.pocketId.displayName}",
                             style = if (compactLandscape) MaterialTheme.typography.labelLarge else MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface,
@@ -488,26 +495,38 @@ fun StepPlaybackControlBar(
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    val subtitle = buildString {
-                        if (isPlanning) {
-                            append("Updating shots…")
-                        } else if (currentStep.disturbedBalls.isNotEmpty()) {
-                            val bumped = currentStep.disturbedBalls.joinToString(", ") { "#${it.ballNumber}" }
-                            append("Bumps $bumped • Next table updated")
-                        } else if (safeStepIdx > 0) {
-                            append("Showing table after potting Step $safeStepIdx")
+                    val subtitle = buildAnnotatedString {
+                        withStyle(SpanStyle(color = shotDifficultyColor(makeTier), fontWeight = FontWeight.SemiBold)) {
+                            append("Make $makePct% ${makeTier.label}")
+                        }
+                        withStyle(SpanStyle(color = mutedColor)) {
+                            append(" • ")
+                        }
+                        if (posProb != null && posTier != null) {
+                            val posPct = (posProb.coerceIn(0.0, 1.0) * 100.0).roundToInt()
+                            withStyle(SpanStyle(color = shotDifficultyColor(posTier), fontWeight = FontWeight.SemiBold)) {
+                                append("Pos $posPct% ${posTier.label}")
+                            }
                         } else {
-                            append("Tap Next to pot #${currentStep.targetBall.number} and advance")
+                            withStyle(SpanStyle(color = RunoutColors.PrimaryCyan, fontWeight = FontWeight.SemiBold)) {
+                                append("Final ball")
+                            }
+                        }
+                        when {
+                            isPlanning -> withStyle(SpanStyle(color = RunoutColors.WarningAmber)) {
+                                append(" • Updating…")
+                            }
+                            currentStep.disturbedBalls.isNotEmpty() -> {
+                                val bumped = currentStep.disturbedBalls.joinToString(", ") { "#${it.ballNumber}" }
+                                withStyle(SpanStyle(color = RunoutColors.WarningAmber)) {
+                                    append(" • Bumps $bumped")
+                                }
+                            }
                         }
                     }
                     Text(
                         text = subtitle,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (currentStep.disturbedBalls.isNotEmpty()) {
-                            RunoutColors.WarningAmber
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )

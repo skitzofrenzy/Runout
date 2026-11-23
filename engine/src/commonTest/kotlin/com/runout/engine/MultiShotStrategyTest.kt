@@ -5,6 +5,7 @@ import com.runout.engine.model.Ball
 import com.runout.engine.model.EightBallGroup
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
+import com.runout.engine.model.PlayerProfile
 import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
@@ -15,6 +16,7 @@ import com.runout.engine.planner.HeatZoneGenerator
 import com.runout.engine.planner.MultiShotPlanner
 import com.runout.engine.planner.ProblemBallAnalyzer
 import com.runout.engine.planner.ProblemBallReason
+import com.runout.engine.planner.ShotDifficultyTier
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -389,6 +391,164 @@ class MultiShotStrategyTest {
         assertEquals(0.0, result.beamPlannerRunoutRate)
         assertEquals(0.0, result.greedyBaselineRunoutRate)
         assertEquals(0.0, result.relativeImprovementFraction)
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Position difficulty (independent from Make %)
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    fun shotDifficultyTierThresholdsMapCorrectly() {
+        assertEquals(ShotDifficultyTier.EASY, ShotDifficultyTier.fromProbability(0.65))
+        assertEquals(ShotDifficultyTier.EASY, ShotDifficultyTier.fromProbability(0.92))
+        assertEquals(ShotDifficultyTier.MEDIUM, ShotDifficultyTier.fromProbability(0.649))
+        assertEquals(ShotDifficultyTier.MEDIUM, ShotDifficultyTier.fromProbability(0.35))
+        assertEquals(ShotDifficultyTier.HARD, ShotDifficultyTier.fromProbability(0.349))
+        assertEquals(ShotDifficultyTier.HARD, ShotDifficultyTier.fromProbability(0.05))
+    }
+
+    @Test
+    fun terminalShotsHaveNullPositionDifficultyWhileNonTerminalShotsPopulateIt() {
+        val nineBallTerminal = layoutOf(
+            ball(0, 1.85, 0.55),
+            ball(9, 2.28, 0.24),
+        )
+        val nineTerminalPlan = MultiShotPlanner.planRunout(
+            layout = nineBallTerminal,
+            rulesState = GameRulesState(GameType.NINE_BALL),
+        ).firstOrNull()
+        val nineTerminalStep = assertNotNull(nineTerminalPlan).steps.single()
+        assertNull(nineTerminalStep.positionSuccessProbability)
+        assertNull(nineTerminalStep.positionDifficulty)
+        assertTrue(nineTerminalPlan.explanationReasons.first().endsWith("final ball."))
+
+        val eightBallTerminal = layoutOf(
+            ball(0, 1.85, 0.55),
+            ball(8, 2.28, 0.24),
+        )
+        val eightTerminalPlan = MultiShotPlanner.planRunout(
+            layout = eightBallTerminal,
+            rulesState = GameRulesState(GameType.EIGHT_BALL, EightBallGroup.EIGHT_BALL),
+        ).firstOrNull()
+        val eightTerminalStep = assertNotNull(eightTerminalPlan).steps.single()
+        assertNull(eightTerminalStep.positionSuccessProbability)
+        assertNull(eightTerminalStep.positionDifficulty)
+
+        val multiPlan = MultiShotPlanner.planRunout(openNineBallLayout(), horizonShots = 3).first()
+        assertTrue(multiPlan.steps.size >= 2)
+        val step1 = multiPlan.steps.first()
+        val step1Pos = assertNotNull(step1.positionSuccessProbability)
+        assertTrue(step1Pos in 0.02..0.98)
+        assertNotNull(step1.positionDifficulty)
+        assertTrue(multiPlan.explanationReasons.first().contains("position (${step1.positionDifficulty?.label})"))
+    }
+
+    @Test
+    fun easyOpenLeaveScoresSignificantlyHigherThanDemandingMultiRailDrawLeave() {
+        val easyLayout = layoutOf(
+            ball(0, 1.92, 0.60),
+            ball(1, 2.28, 0.24),
+            ball(9, 2.02, 0.90),
+        )
+        val easyPlan = assertNotNull(
+            MultiShotPlanner.planRunout(
+                layout = easyLayout,
+                rulesState = GameRulesState(GameType.NINE_BALL),
+                horizonShots = 2,
+            ).firstOrNull(),
+        )
+        val easyStep = easyPlan.steps.first()
+        val easyPos = assertNotNull(easyStep.positionSuccessProbability)
+        assertTrue(easyPos >= 0.65, "Open short stun leave should be Easy (>= 0.65), was $easyPos")
+        assertEquals(ShotDifficultyTier.EASY, easyStep.positionDifficulty)
+
+        // Same easy pot, but forced max speed + full side+draw english leaving long across-table shape behind blockers
+        val demandingLayout = layoutOf(
+            ball(0, 1.92, 0.60),
+            ball(1, 2.28, 0.24),
+            ball(5, 1.15, 0.55),
+            ball(9, 0.38, 0.95),
+        )
+        val hardPlan = assertNotNull(
+            MultiShotPlanner.planRunout(
+                layout = demandingLayout,
+                rulesState = GameRulesState(GameType.NINE_BALL),
+                horizonShots = 2,
+                customFirstShotTip = TipOffset(sideRatio = 0.45, verticalRatio = -0.45),
+                customFirstShotSpeedScale = 9,
+                customFirstShotTargetBallNumber = 1,
+            ).firstOrNull(),
+        )
+        val hardStep = hardPlan.steps.first()
+        val hardPos = assertNotNull(hardStep.positionSuccessProbability)
+        assertTrue(
+            easyPos > hardPos + 0.12,
+            "Easy position ($easyPos) must materially exceed demanding draw/side position ($hardPos)",
+        )
+    }
+
+    @Test
+    fun makeProbabilityAndPositionProbabilityCanDivergeIndependently() {
+        // Ball 1 is a short hanger makeable > 80%, while ball 9 is tucked cleanly only from across the table
+        // and draw + english sends the cue ball awkwardly away from clean position.
+        val layout = layoutOf(
+            ball(0, 1.92, 0.60),
+            ball(1, 2.34, 0.18),
+            ball(8, 1.95, 0.68),
+            ball(9, 1.25, 0.88),
+        )
+        val plan = assertNotNull(
+            MultiShotPlanner.planRunout(
+                layout = layout,
+                rulesState = GameRulesState(GameType.NINE_BALL),
+                horizonShots = 2,
+                customFirstShotTip = TipOffset(sideRatio = -0.45, verticalRatio = -0.45),
+                customFirstShotSpeedScale = 10,
+                customFirstShotTargetBallNumber = 1,
+            ).firstOrNull(),
+        )
+        val step = plan.steps.first()
+        val makeProb = step.uncertainty.makeProbability
+        val posProb = assertNotNull(step.positionSuccessProbability)
+        assertTrue(makeProb >= 0.70, "Short hanger make % should remain high even when position is tough, was $makeProb")
+        assertTrue(
+            makeProb - posProb >= 0.20,
+            "Position % ($posProb) should diverge cleanly below easy hanger Make % ($makeProb)",
+        )
+    }
+
+    @Test
+    fun lowerAimErrorPlayerProfileEarnsHigherPositionProbabilityOnNonTrivialShot() {
+        val layout = layoutOf(
+            ball(0, 0.80, 0.95),
+            ball(1, 1.50, 0.55),
+            ball(9, 1.95, 0.95),
+        )
+        val proStep = assertNotNull(
+            MultiShotPlanner.planRunout(
+                layout = layout,
+                rulesState = GameRulesState(GameType.NINE_BALL),
+                playerProfile = PlayerProfile(aimErrorStdRad = 0.008),
+                horizonShots = 2,
+                customFirstShotTargetBallNumber = 1,
+            ).firstOrNull(),
+        ).steps.first()
+        val beginnerStep = assertNotNull(
+            MultiShotPlanner.planRunout(
+                layout = layout,
+                rulesState = GameRulesState(GameType.NINE_BALL),
+                playerProfile = PlayerProfile(aimErrorStdRad = 0.032),
+                horizonShots = 2,
+                customFirstShotTargetBallNumber = 1,
+            ).firstOrNull(),
+        ).steps.first()
+
+        val proPos = assertNotNull(proStep.positionSuccessProbability)
+        val begPos = assertNotNull(beginnerStep.positionSuccessProbability)
+        assertTrue(
+            proPos > begPos,
+            "Lower aim-error profile ($proPos) must achieve higher position probability than high-error profile ($begPos)",
+        )
     }
 
     private companion object {

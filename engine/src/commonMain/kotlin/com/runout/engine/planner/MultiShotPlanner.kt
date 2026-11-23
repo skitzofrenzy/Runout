@@ -21,9 +21,27 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 
 /**
+ * Plain-language difficulty bucket paired with a shot's make or position probability.
+ */
+enum class ShotDifficultyTier(val label: String) {
+    EASY("Easy"),
+    MEDIUM("Medium"),
+    HARD("Hard"),
+    ;
+
+    companion object {
+        fun fromProbability(probability: Double): ShotDifficultyTier = when {
+            probability >= 0.65 -> EASY
+            probability >= 0.35 -> MEDIUM
+            else -> HARD
+        }
+    }
+}
+
+/**
  * One planned shot inside a [RunoutPlan]: the target and pocket, the spin-compensated aim, the recommended speed
- * (player scale `1..10` and SI m/s), the recommended tip contact point, the execution-error evaluation and the
- * score used for ranking.
+ * (player scale `1..10` and SI m/s), the recommended tip contact point, the execution-error evaluation,
+ * next-ball position difficulty probability (`null` on the final winning ball), and the score used for ranking.
  */
 data class PlannedShotStep(
     val stepNumber: Int,
@@ -39,7 +57,14 @@ data class PlannedShotStep(
     val stepScore: Double,
     val resultingLayout: TableLayout? = null,
     val disturbedBalls: List<DisplacedBallPath> = emptyList(),
-)
+    val positionSuccessProbability: Double? = null,
+) {
+    val makeDifficulty: ShotDifficultyTier
+        get() = ShotDifficultyTier.fromProbability(uncertainty.makeProbability)
+
+    val positionDifficulty: ShotDifficultyTier?
+        get() = positionSuccessProbability?.let { ShotDifficultyTier.fromProbability(it) }
+}
 
 /**
  * A multi-shot position-play plan: the ordered shots, the probability of executing all of them, the ranking
@@ -388,13 +413,13 @@ object MultiShotPlanner {
         )
         val landing = advanced.layout.cueBall()?.position ?: uncertainty.meanLandingPosition
         val terminal = advanced.nextTargets.isEmpty()
-        val leaveFactor = when {
+        val (leaveFactor, positionSuccessProbability) = when {
             terminal -> computeExecutionSimplicityFactor(
                 scale = scale,
                 tip = tip,
                 bounceCount = 0,
                 isTerminalShot = true,
-            )
+            ) to null
             isFinalTargetState(advanced.rules, advanced.nextTargets) -> {
                 val finalBall = advanced.nextTargets.first()
                 val heat = context.heatMap(advanced.layout, listOf(finalBall.number))
@@ -426,7 +451,18 @@ object MultiShotPlanner {
                     isTerminalShot = false,
                 )
                 val combinedEase = (0.75 * cloudEase + 0.25 * heatValue).coerceIn(0.0, 1.0) * simplicity
-                0.20 + 0.80 * combinedEase
+                val factor = 0.20 + 0.80 * combinedEase
+                val posProb = evaluatePositionSuccessProbability(
+                    uncertainty = uncertainty,
+                    heat = heat,
+                    nextLayout = advanced.layout,
+                    landing = landing,
+                    hasClearNextShot = hasClearNextShot,
+                    cueRadius = cue.radiusMeters,
+                    scale = scale,
+                    tip = tip,
+                )
+                factor to posProb
             }
             else -> {
                 val heat = context.heatMap(advanced.layout, advanced.nextTargets.take(2).map { it.number })
@@ -446,7 +482,18 @@ object MultiShotPlanner {
                         }
                     }
                 val heatValue = if (!hasClearNextShot) 0.0 else heat.valueAt(landing)
-                LEAVE_FLOOR + (1.0 - LEAVE_FLOOR) * heatValue
+                val factor = LEAVE_FLOOR + (1.0 - LEAVE_FLOOR) * heatValue
+                val posProb = evaluatePositionSuccessProbability(
+                    uncertainty = uncertainty,
+                    heat = heat,
+                    nextLayout = advanced.layout,
+                    landing = landing,
+                    hasClearNextShot = hasClearNextShot,
+                    cueRadius = cue.radiusMeters,
+                    scale = scale,
+                    tip = tip,
+                )
+                factor to posProb
             }
         }
 
@@ -464,6 +511,7 @@ object MultiShotPlanner {
             stepScore = stepProbability * (1.0 + breakoutBonus),
             resultingLayout = advanced.layout,
             disturbedBalls = uncertainty.postShotSimulation?.disturbedBalls.orEmpty(),
+            positionSuccessProbability = positionSuccessProbability,
         )
 
         return SearchNode(
@@ -580,6 +628,72 @@ object MultiShotPlanner {
             totalEase += bestPointScore
         }
         return (totalEase / samplePoints.size.toDouble()).coerceIn(0.0, 1.0)
+    }
+
+    private fun evaluatePositionSuccessProbability(
+        uncertainty: ShotUncertaintyResult,
+        heat: HeatZoneMap,
+        nextLayout: TableLayout,
+        landing: Vec2,
+        hasClearNextShot: Boolean,
+        cueRadius: Double,
+        scale: Int,
+        tip: TipOffset,
+    ): Double {
+        val cloud = uncertainty.landingCloud.ifEmpty { listOf(landing) }
+        val weights = ExecutionErrorModel.SIGMA_WEIGHTS
+        val table = nextLayout.table
+        val objectBalls = nextLayout.balls.filter { !it.isCueBall }
+        val nominalHeat = if (hasClearNextShot) heat.valueAt(landing) else 0.0
+
+        var weightedSum = 0.0
+        var totalWeight = 0.0
+        for (i in cloud.indices) {
+            val pt = cloud[i]
+            val w = weights.getOrElse(i) { 1.0 / cloud.size }
+            totalWeight += w
+            val inBounds = table.isWithinPlayableBounds(pt, cueRadius)
+            val hitsBall = objectBalls.any {
+                it.position.distanceTo(pt) < LANDING_CLEARANCE_FACTOR * cueRadius
+            }
+            if (!inBounds || hitsBall) continue
+            val v = heat.valueAt(pt)
+            if (v <= 0.02) continue
+            val rel = if (nominalHeat > 0.05) (v / nominalHeat).coerceIn(0.0, 1.0) else 0.0
+            val absQuality = (v / 0.72).coerceIn(0.0, 1.0)
+            weightedSum += w * (0.55 * rel + 0.45 * absQuality)
+        }
+
+        val rawZoneAccuracy = (weightedSum / totalWeight.coerceAtLeast(1e-6)).coerceIn(0.0, 1.0)
+        val zoneAccuracy = if (hasClearNextShot) {
+            rawZoneAccuracy
+        } else {
+            (rawZoneAccuracy * 0.25).coerceAtMost(0.18)
+        }
+
+        val pts = uncertainty.nominalTrajectory.points
+        val bounceCount = (pts.size - 2).coerceAtLeast(0)
+        var travelMeters = 0.0
+        for (i in 1 until pts.size) {
+            travelMeters += pts[i - 1].distanceTo(pts[i])
+        }
+        val sideMag = abs(tip.clampedSideRatio)
+        val drawMag = (-tip.clampedVerticalRatio).coerceAtLeast(0.0)
+        val followMag = tip.clampedVerticalRatio.coerceAtLeast(0.0)
+        val spinPenalty = 0.36 * sideMag + 0.32 * drawMag + 0.10 * followMag
+        val railPenalty = (0.11 * bounceCount).coerceAtMost(0.38)
+        val travelPenalty = (0.09 * (travelMeters - 0.35).coerceAtLeast(0.0)).coerceAtMost(0.24)
+        val spreadPenalty = 0.28 * (uncertainty.landingSpreadRadiusMeters / 0.55).coerceIn(0.0, 1.0)
+        val speedStress = when {
+            scale <= 2 -> 0.10
+            scale >= 9 -> 0.22 + 0.06 * (scale - 9)
+            scale >= 7 -> 0.08 * (scale - 6)
+            else -> 0.0
+        }
+        val strokeControl = (1.0 - spinPenalty - railPenalty - travelPenalty - spreadPenalty - speedStress)
+            .coerceIn(0.18, 1.0)
+        val scratchSurvival = (1.0 - uncertainty.scratchProbability).coerceIn(0.0, 1.0)
+        return (zoneAccuracy * strokeControl * scratchSurvival).coerceIn(0.02, 0.98)
     }
 
     private fun computeExecutionSimplicityFactor(
@@ -718,8 +832,11 @@ object MultiShotPlanner {
         var rules = initialRules
         for ((index, step) in steps.withIndex()) {
             val ballNumber = step.targetBall.number
+            val posSummary = step.positionSuccessProbability?.let { posProb ->
+                ", ${percent(posProb)}% position (${step.positionDifficulty!!.label})"
+            } ?: ", final ball"
             reasons += "Step ${step.stepNumber}: pot ball #$ballNumber in the ${step.pocketId.displayName} pocket " +
-                "at speed ${step.recommendedSpeedScale}/10, ${percent(step.uncertainty.makeProbability)}% to make."
+                "at speed ${step.recommendedSpeedScale}/10, ${percent(step.uncertainty.makeProbability)}% to make (${step.makeDifficulty.label})$posSummary."
 
             val nextStep = steps.getOrNull(index + 1)
             val spinText = describeTip(step.recommendedTip)

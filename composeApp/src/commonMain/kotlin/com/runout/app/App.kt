@@ -106,6 +106,7 @@ import com.runout.app.ui.RunoutVectorIcon
 import com.runout.app.ui.SampleLayouts
 import com.runout.app.ui.SampleScenario
 import com.runout.app.ui.ShotOptionsSheet
+import com.runout.app.ui.ShotDifficultyPairRow
 import com.runout.app.ui.SimpleProTogglePill
 import com.runout.app.ui.StepPlaybackControlBar
 import com.runout.app.ui.ToolFocusDestination
@@ -1594,8 +1595,8 @@ private fun SimpleModeShotSection(
                 modifier = Modifier.weight(1f),
             )
             GlossaryInfoButton(
-                term = "How Recommendations Work",
-                explanation = "Runout simulates pocket angle, cue speed, and where the cue ball lands next to pick the safest high-percentage shot.",
+                term = "Make vs. Position Difficulty",
+                explanation = "Make % is your chance to pot this ball. Position % is how easily the cue ball lands cleanly in shape for the next shot.",
             )
         }
 
@@ -1605,7 +1606,6 @@ private fun SimpleModeShotSection(
         val nextStep = steps.getOrNull(safeStepIdx + 1)
         if (activePlan != null && activeStep != null) {
             val speedWord = plainSpeedLabel(activeStep.recommendedSpeedScale)
-            val makePct = formatPercentInt(activeStep.uncertainty.makeProbability)
             val tipWord = plainTipLabel(activeStep.recommendedTip)
             val tightness = computeShotTightness(activeStep, nextStep)
 
@@ -1621,43 +1621,29 @@ private fun SimpleModeShotSection(
                         .padding(RunoutSpacing.Margin),
                     verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
                 ) {
-                    // 3 primary stats max in Simple Mode + visual cue-ball hit guide
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(16.dp)
-                                    .clip(CircleShape)
-                                    .background(ballBaseColor(activeStep.targetBall.number, ballSet)),
-                            )
-                            Text(
-                                text = "Ball #${activeStep.targetBall.number} -> ${activeStep.pocketId.displayName}",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = RunoutColors.SuccessGreen.copy(alpha = 0.16f),
-                        ) {
-                            Text(
-                                text = "Make: $makePct%",
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = RunoutColors.SuccessGreen,
-                            )
-                        }
+                        Box(
+                            modifier = Modifier
+                                .size(16.dp)
+                                .clip(CircleShape)
+                                .background(ballBaseColor(activeStep.targetBall.number, ballSet)),
+                        )
+                        Text(
+                            text = "Ball #${activeStep.targetBall.number} -> ${activeStep.pocketId.displayName}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
                     }
+
+                    ShotDifficultyPairRow(
+                        makeProbability = activeStep.uncertainty.makeProbability,
+                        positionProbability = activeStep.positionSuccessProbability,
+                    )
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1849,10 +1835,20 @@ private fun ProModeStrategySection(
     Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Section)) {
         // Hero Runout / Shot Card
         Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element)) {
-            RunoutSectionHeader(
-                title = if (activePlan != null) "Top Run-Out Plan" else "Shot Analysis",
-                subtitle = "Pro physics telemetry & multi-ball shape",
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RunoutSectionHeader(
+                    title = if (activePlan != null) "Top Run-Out Plan" else "Shot Analysis",
+                    subtitle = "Pro physics telemetry & multi-ball shape",
+                    modifier = Modifier.weight(1f),
+                )
+                GlossaryInfoButton(
+                    term = "Make vs. Position Difficulty",
+                    explanation = "Make % is your chance to pot this ball. Position % is how easily the cue ball lands cleanly in shape for the next shot.",
+                )
+            }
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp),
@@ -2341,65 +2337,75 @@ private fun ActivePlanReadoutBar(
     val activeStep = steps[safeIdx]
     val nextStep = steps.getOrNull(safeIdx + 1)
     val clearPct = formatPercentOneDecimal(plan.cumulativeRunoutProbability)
-    val makePct = formatPercentInt(activeStep.uncertainty.makeProbability)
     val spreadCm = (activeStep.uncertainty.landingSpreadRadiusMeters * METERS_TO_CM).roundToInt()
     val cutDeg = formatOneDecimal(abs(radiansToDegrees(activeStep.compensatedAim.geometricAim.cutAngleRadians)))
     val tightness = computeShotTightness(activeStep, nextStep)
 
-    Row(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
     ) {
-        CueBallHitGuide(
-            tipOffset = activeStep.recommendedTip,
-            tightness = tightness,
-            showAxisLabels = true,
-            onClick = onTapCueHitGuide,
-            modifier = Modifier.size(68.dp),
-        )
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+            Text(
+                text = "Step ${activeStep.stepNumber}: Ball #${activeStep.targetBall.number} -> ${activeStep.pocketId.displayName}",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "Run-Out: $clearPct%",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.secondary,
+            )
+        }
+
+        ShotDifficultyPairRow(
+            makeProbability = activeStep.uncertainty.makeProbability,
+            positionProbability = activeStep.positionSuccessProbability,
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CueBallHitGuide(
+                tipOffset = activeStep.recommendedTip,
+                tightness = tightness,
+                showAxisLabels = true,
+                onClick = onTapCueHitGuide,
+                modifier = Modifier.size(68.dp),
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    text = "Step ${activeStep.stepNumber}: Ball #${activeStep.targetBall.number} -> ${activeStep.pocketId.displayName}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.weight(1f),
+                    text = "Cut $cutDeg° • Speed ${activeStep.recommendedSpeedScale}/10 • ±$spreadCm cm",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    text = "Run-Out: $clearPct%",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.secondary,
-                )
-            }
-            Text(
-                text = "Cut $cutDeg° • Make $makePct% • Speed ${activeStep.recommendedSpeedScale}/10 • ±$spreadCm cm",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = "Hit: ${plainTipLabel(activeStep.recommendedTip)} • ${shotTightnessLabel(tightness)} sweet spot",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            if (plan.steps.size >= 2) {
-                val sequenceLabel = plan.steps.joinToString(" -> ") { "#${it.targetBall.number}" }
-                Text(
-                    text = "Sequence: $sequenceLabel",
-                    style = MaterialTheme.typography.labelMedium,
+                    text = "Hit: ${plainTipLabel(activeStep.recommendedTip)} • ${shotTightnessLabel(tightness)} sweet spot",
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.primary,
                 )
+                if (plan.steps.size >= 2) {
+                    val sequenceLabel = plan.steps.joinToString(" -> ") { "#${it.targetBall.number}" }
+                    Text(
+                        text = "Sequence: $sequenceLabel",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
         }
     }
@@ -2611,6 +2617,9 @@ private fun RunoutPlanCard(
             }
             plan.steps.forEach { step ->
                 val makePct = formatPercentInt(step.uncertainty.makeProbability)
+                val posText = step.positionSuccessProbability?.let {
+                    "Pos ${formatPercentInt(it)}% (${step.positionDifficulty?.label})"
+                } ?: "Final ball"
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2623,7 +2632,7 @@ private fun RunoutPlanCard(
                             .background(ballBaseColor(step.targetBall.number, ballSet)),
                     )
                     Text(
-                        text = "${step.stepNumber}. #${step.targetBall.number} -> ${step.pocketId.displayName} • $makePct% • Speed ${step.recommendedSpeedScale}/10",
+                        text = "${step.stepNumber}. #${step.targetBall.number} -> ${step.pocketId.displayName} • Make $makePct% • $posText • Speed ${step.recommendedSpeedScale}/10",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
