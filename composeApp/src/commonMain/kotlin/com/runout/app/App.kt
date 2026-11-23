@@ -78,6 +78,7 @@ import com.runout.app.ui.AppDisplayMode
 import com.runout.app.ui.AssumedSurfaceControlCard
 import com.runout.app.ui.CalibrationScreen
 import com.runout.app.ui.CollapsibleSectionCard
+import com.runout.app.ui.CueBallHitGuide
 import com.runout.app.ui.CueTipSelectorCanvas
 import com.runout.app.ui.EditBallsSheet
 import com.runout.app.ui.ExtrasAndToolsScreen
@@ -111,7 +112,9 @@ import com.runout.app.ui.ToolFocusDestination
 import com.runout.app.ui.TutorialDetailPlayerScreen
 import com.runout.app.ui.WalkthroughDetailPlayerScreen
 import com.runout.app.ui.ballBaseColor
+import com.runout.app.ui.computeShotTightness
 import com.runout.app.ui.resolveDisplayedLayoutForStep
+import com.runout.app.ui.shotTightnessLabel
 import com.runout.app.ui.spinColor
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.AssumedSurfacePreset
@@ -1475,6 +1478,7 @@ fun RunoutPracticeScreen(
                             onNextStep = onNextStep,
                             onToggleAllSteps = onToggleAllStepsOverlay,
                             onApplyCurrentStepToTable = if (focusedStepIndex > 0) onApplyCurrentStepToTable else null,
+                            onTapCueHitGuide = onOpenQuickSpinSheet,
                         )
 
                         if (focusedStepIndex == 0 && (playablePockets.size > 1 || customPocketOverride != null)) {
@@ -1546,6 +1550,7 @@ fun RunoutPracticeScreen(
         } else {
             ProModeStrategySection(
                 activePlan = activePlan,
+                focusedStepIndex = focusedStepIndex,
                 selectedShot = selectedShot,
                 runoutPlans = runoutPlans,
                 selectedPlanIndex = selectedPlanIndex,
@@ -1558,6 +1563,7 @@ fun RunoutPracticeScreen(
                 onToggleSpin = onToggleSpin,
                 customTipOffset = customTipOffset,
                 onUpdateCustomTip = onUpdateCustomTip,
+                onOpenQuickSpinSheet = onOpenQuickSpinSheet,
                 clothParams = currentLayout.table.cloth,
                 onUpdateClothParams = onUpdateClothParams,
             )
@@ -1594,11 +1600,14 @@ private fun SimpleModeShotSection(
         }
 
         val steps = activePlan?.steps.orEmpty()
-        val activeStep = steps.getOrNull(focusedStepIndex.coerceIn(0, (steps.size - 1).coerceAtLeast(0)))
+        val safeStepIdx = if (steps.isNotEmpty()) focusedStepIndex.coerceIn(0, steps.lastIndex) else 0
+        val activeStep = steps.getOrNull(safeStepIdx)
+        val nextStep = steps.getOrNull(safeStepIdx + 1)
         if (activePlan != null && activeStep != null) {
             val speedWord = plainSpeedLabel(activeStep.recommendedSpeedScale)
             val makePct = formatPercentInt(activeStep.uncertainty.makeProbability)
             val tipWord = plainTipLabel(activeStep.recommendedTip)
+            val tightness = computeShotTightness(activeStep, nextStep)
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -1612,7 +1621,7 @@ private fun SimpleModeShotSection(
                         .padding(RunoutSpacing.Margin),
                     verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
                 ) {
-                    // 3 primary stats max in Simple Mode
+                    // 3 primary stats max in Simple Mode + visual cue-ball hit guide
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1652,20 +1661,38 @@ private fun SimpleModeShotSection(
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            text = "Speed: $speedWord (${activeStep.recommendedSpeedScale}/10)",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.tertiary,
+                        CueBallHitGuide(
+                            tipOffset = activeStep.recommendedTip,
+                            tightness = tightness,
+                            showAxisLabels = true,
+                            onClick = onOpenQuickSpinSheet,
+                            modifier = Modifier.size(68.dp),
                         )
-                        Text(
-                            text = "Tip: $tipWord",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = "Speed: $speedWord (${activeStep.recommendedSpeedScale}/10)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.tertiary,
+                            )
+                            Text(
+                                text = "Hit: $tipWord",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                text = "Zone: ${shotTightnessLabel(tightness)} sweet spot (tap ball to edit)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
 
                     if (activePlan.problemBalls.isNotEmpty()) {
@@ -1738,29 +1765,49 @@ private fun SimpleModeShotSection(
                 }
             }
         } else if (fallbackShot != null) {
+            val fallbackTip = TipOffset.fromPreset(fallbackShot.recommendedSpin)
+            val fallbackTightness = computeShotTightness(fallbackShot)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.surfaceVariant),
             ) {
-                Column(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(RunoutSpacing.Margin),
-                    verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element),
+                    horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        text = "Best Direct Pot: Ball #${fallbackShot.targetBall.number} -> ${fallbackShot.pocket.id.displayName}",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
+                    CueBallHitGuide(
+                        tipOffset = fallbackTip,
+                        tightness = fallbackTightness,
+                        showAxisLabels = true,
+                        onClick = onOpenQuickSpinSheet,
+                        modifier = Modifier.size(68.dp),
                     )
-                    Text(
-                        text = "Speed: ${plainSpeedLabel(fallbackShot.recommendedSpeedScale)} (${fallbackShot.recommendedSpeedScale}/10) • Recommended: ${fallbackShot.recommendedSpin.name.lowercase()}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = "Best Direct Pot: Ball #${fallbackShot.targetBall.number} -> ${fallbackShot.pocket.id.displayName}",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = "Speed: ${plainSpeedLabel(fallbackShot.recommendedSpeedScale)} (${fallbackShot.recommendedSpeedScale}/10) • Hit: ${plainTipLabel(fallbackTip)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            text = "Zone: ${shotTightnessLabel(fallbackTightness)} sweet spot",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
             }
         } else {
@@ -1782,6 +1829,7 @@ private fun SimpleModeShotSection(
 @Composable
 private fun ProModeStrategySection(
     activePlan: RunoutPlan?,
+    focusedStepIndex: Int,
     selectedShot: ShotRecommendation?,
     runoutPlans: List<RunoutPlan>,
     selectedPlanIndex: Int,
@@ -1794,6 +1842,7 @@ private fun ProModeStrategySection(
     onToggleSpin: (CueBallSpinPreset) -> Unit,
     customTipOffset: TipOffset?,
     onUpdateCustomTip: (TipOffset?) -> Unit,
+    onOpenQuickSpinSheet: () -> Unit,
     clothParams: ClothParams,
     onUpdateClothParams: (ClothParams) -> Unit,
 ) {
@@ -1817,9 +1866,16 @@ private fun ProModeStrategySection(
                     verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
                 ) {
                     if (activePlan != null && activePlan.steps.isNotEmpty()) {
-                        ActivePlanReadoutBar(plan = activePlan)
+                        ActivePlanReadoutBar(
+                            plan = activePlan,
+                            focusedStepIndex = focusedStepIndex,
+                            onTapCueHitGuide = onOpenQuickSpinSheet,
+                        )
                     } else if (selectedShot != null) {
-                        SelectedShotReadoutBar(shot = selectedShot)
+                        SelectedShotReadoutBar(
+                            shot = selectedShot,
+                            onTapCueHitGuide = onOpenQuickSpinSheet,
+                        )
                     } else {
                         Text(
                             text = "No direct legal pots or multi-shot plan available for this layout.",
@@ -2071,55 +2127,80 @@ private fun PlanningPausedCard(
 }
 
 @Composable
-private fun SelectedShotReadoutBar(shot: ShotRecommendation) {
+private fun SelectedShotReadoutBar(
+    shot: ShotRecommendation,
+    onTapCueHitGuide: (() -> Unit)? = null,
+) {
     val cutDeg = formatOneDecimal(abs(radiansToDegrees(shot.aim.cutAngleRadians)))
     val cueDistText = formatDistanceMeters(shot.aim.cueToGhostDistanceMeters)
     val obDistText = formatDistanceMeters(shot.aim.objectToPocketDistanceMeters)
     val scratchSpins = shot.cueBallPaths.values.filter { it.hitsScratchPocket != null }
+    val recommendedTip = TipOffset.fromPreset(shot.recommendedSpin)
+    val tightness = computeShotTightness(shot)
 
-    Column(
+    Row(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = formatShotSummary(shot),
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                text = "Cut $cutDeg° • Speed ${shot.recommendedSpeedScale}/10",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.tertiary,
-            )
-        }
-        Text(
-            text = "Cue → Ghost: $cueDistText   •   Object → Pocket: $obDistText",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        CueBallHitGuide(
+            tipOffset = recommendedTip,
+            tightness = tightness,
+            showAxisLabels = true,
+            onClick = onTapCueHitGuide,
+            modifier = Modifier.size(68.dp),
         )
-        if (shot.nextTargetBallNumber != null) {
-            Text(
-                text = "Next shape: Ball #${shot.nextTargetBallNumber}",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.secondary,
-            )
-        }
-        if (scratchSpins.isNotEmpty()) {
-            val warningText = scratchSpins.joinToString(", ") { path ->
-                "${path.spin.name} scratches (${path.hitsScratchPocket?.displayName})"
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = formatShotSummary(shot),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "Cut $cutDeg° • Speed ${shot.recommendedSpeedScale}/10",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
             }
             Text(
-                text = "Scratch risk: $warningText",
-                style = MaterialTheme.typography.labelSmall,
-                color = RunoutColors.DangerCoral,
+                text = "Cue → Ghost: $cueDistText • Object → Pocket: $obDistText",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Text(
+                text = "Hit: ${plainTipLabel(recommendedTip)} • ${shotTightnessLabel(tightness)} sweet spot",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            if (shot.nextTargetBallNumber != null) {
+                Text(
+                    text = "Next shape: Ball #${shot.nextTargetBallNumber}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+            }
+            if (scratchSpins.isNotEmpty()) {
+                val warningText = scratchSpins.joinToString(", ") { path ->
+                    "${path.spin.name} scratches (${path.hitsScratchPocket?.displayName})"
+                }
+                Text(
+                    text = "Scratch risk: $warningText",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = RunoutColors.DangerCoral,
+                )
+            }
         }
     }
 }
@@ -2249,48 +2330,77 @@ private fun ShotRecommendationCard(
 }
 
 @Composable
-private fun ActivePlanReadoutBar(plan: RunoutPlan) {
-    val firstStep = plan.steps.firstOrNull() ?: return
+private fun ActivePlanReadoutBar(
+    plan: RunoutPlan,
+    focusedStepIndex: Int = 0,
+    onTapCueHitGuide: (() -> Unit)? = null,
+) {
+    val steps = plan.steps
+    if (steps.isEmpty()) return
+    val safeIdx = focusedStepIndex.coerceIn(0, steps.lastIndex)
+    val activeStep = steps[safeIdx]
+    val nextStep = steps.getOrNull(safeIdx + 1)
     val clearPct = formatPercentOneDecimal(plan.cumulativeRunoutProbability)
-    val makePct = formatPercentInt(firstStep.uncertainty.makeProbability)
-    val spreadCm = (firstStep.uncertainty.landingSpreadRadiusMeters * METERS_TO_CM).roundToInt()
-    val cutDeg = formatOneDecimal(abs(radiansToDegrees(firstStep.compensatedAim.geometricAim.cutAngleRadians)))
+    val makePct = formatPercentInt(activeStep.uncertainty.makeProbability)
+    val spreadCm = (activeStep.uncertainty.landingSpreadRadiusMeters * METERS_TO_CM).roundToInt()
+    val cutDeg = formatOneDecimal(abs(radiansToDegrees(activeStep.compensatedAim.geometricAim.cutAngleRadians)))
+    val tightness = computeShotTightness(activeStep, nextStep)
 
-    Column(
+    Row(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "Step 1: Ball #${firstStep.targetBall.number} -> ${firstStep.pocketId.displayName}",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                text = "Run-Out: $clearPct%",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.secondary,
-            )
-        }
-        Text(
-            text = "Cut $cutDeg° • Make $makePct% • Speed ${firstStep.recommendedSpeedScale}/10 • 95% spread ±$spreadCm cm",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        CueBallHitGuide(
+            tipOffset = activeStep.recommendedTip,
+            tightness = tightness,
+            showAxisLabels = true,
+            onClick = onTapCueHitGuide,
+            modifier = Modifier.size(68.dp),
         )
-        if (plan.steps.size >= 2) {
-            val sequenceLabel = plan.steps.joinToString(" -> ") { "#${it.targetBall.number}" }
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Step ${activeStep.stepNumber}: Ball #${activeStep.targetBall.number} -> ${activeStep.pocketId.displayName}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "Run-Out: $clearPct%",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+            }
             Text(
-                text = "Sequence: $sequenceLabel",
-                style = MaterialTheme.typography.labelMedium,
+                text = "Cut $cutDeg° • Make $makePct% • Speed ${activeStep.recommendedSpeedScale}/10 • ±$spreadCm cm",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "Hit: ${plainTipLabel(activeStep.recommendedTip)} • ${shotTightnessLabel(tightness)} sweet spot",
+                style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.primary,
             )
+            if (plan.steps.size >= 2) {
+                val sequenceLabel = plan.steps.joinToString(" -> ") { "#${it.targetBall.number}" }
+                Text(
+                    text = "Sequence: $sequenceLabel",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
     }
 }

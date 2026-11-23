@@ -39,6 +39,7 @@ object OneShotPlanner {
     private const val POCKET_WIDTH_NORMALIZATION: Double = 1.15
     private const val ALL_SCRATCH_PENALTY_FACTOR: Double = 0.15
     private const val POSITION_BONUS_WEIGHT: Double = 0.25
+    private const val FINAL_BALL_POSITION_BONUS_WEIGHT: Double = 0.42
     private const val LOW_DRAW_RATIO_THRESHOLD: Double = 0.8
     private const val LOW_DRAW_SCORE_PENALTY: Double = 0.15
     private const val PREFERRED_DEFAULT_SPEED_SCALE: Int = 5
@@ -91,6 +92,8 @@ object OneShotPlanner {
                     aimErrorStdRad = playerProfile.aimErrorStdRad,
                 )
 
+                val isSettingUpFinalBall = nextTargets.size == 1 &&
+                    nextTargets.first().number == rulesState.gameType.requiredEndBallNumber
                 val bestCandidate = selectBestSpinAndSpeed(
                     cueBall = cueBall,
                     aim = aim,
@@ -100,6 +103,7 @@ object OneShotPlanner {
                     halfDiagonal = halfDiagonal,
                     remainingLayout = remainingLayout,
                     nextTargets = nextTargets,
+                    isSettingUpFinalBall = isSettingUpFinalBall,
                     playerProfile = playerProfile,
                     candidateScalesAndSpeeds = candidateScalesAndSpeeds,
                 ) ?: continue
@@ -235,10 +239,12 @@ object OneShotPlanner {
         halfDiagonal: Double,
         remainingLayout: TableLayout,
         nextTargets: List<Ball>,
+        isSettingUpFinalBall: Boolean,
         playerProfile: PlayerProfile,
         candidateScalesAndSpeeds: List<Pair<Int, Double>>,
     ): CandidateEvaluation? {
         var best: CandidateEvaluation? = null
+        val positionWeight = if (isSettingUpFinalBall) FINAL_BALL_POSITION_BONUS_WEIGHT else POSITION_BONUS_WEIGHT
 
         for ((scale, speedMps) in candidateScalesAndSpeeds) {
             val paths = CueBallPath.computePostImpactPaths(
@@ -266,8 +272,44 @@ object OneShotPlanner {
                     null
                 }
 
-                val baseWithCenter = baseScore * (0.90 + 0.10 * centerCloseness)
-                val positionBonus = if (bestNext != null) POSITION_BONUS_WEIGHT * bestNext.score else 0.0
+                val baseWithCenterRaw = baseScore * (0.90 + 0.10 * centerCloseness)
+                val baseWithCenter = if (nextTargets.isEmpty()) {
+                    val terminalEase = (
+                        1.0 -
+                            0.015 * abs(scale - 4) -
+                            (if (spin == CueBallSpinPreset.DRAW) 0.02 else 0.0)
+                        ).coerceIn(0.85, 1.0)
+                    baseWithCenterRaw * terminalEase
+                } else {
+                    baseWithCenterRaw
+                }
+                val positionBonus = if (bestNext != null) {
+                    if (isSettingUpFinalBall) {
+                        val minRailDist = minOf(
+                            cueStop.x,
+                            table.lengthMeters - cueStop.x,
+                            cueStop.y,
+                            table.widthMeters - cueStop.y,
+                        )
+                        val comfortThreshold = 2.2 * cueBall.radiusMeters
+                        val comfort = if (minRailDist >= comfortThreshold) {
+                            1.0
+                        } else {
+                            0.80 + 0.20 * (minRailDist / comfortThreshold).coerceIn(0.0, 1.0)
+                        }
+                        val ease = (
+                            1.0 -
+                                0.05 * ((chosenPath.points.size - 2).coerceAtLeast(0) - 1).coerceAtLeast(0) -
+                                0.02 * abs(scale - 4) -
+                                (if (spin == CueBallSpinPreset.DRAW) 0.04 else 0.0)
+                            ).coerceIn(0.70, 1.0)
+                        positionWeight * bestNext.score * comfort * ease
+                    } else {
+                        positionWeight * bestNext.score
+                    }
+                } else {
+                    0.0
+                }
                 val scratchFactor = if (scratches) ALL_SCRATCH_PENALTY_FACTOR else 1.0
                 val drawPenalty = if (
                     spin == CueBallSpinPreset.DRAW &&

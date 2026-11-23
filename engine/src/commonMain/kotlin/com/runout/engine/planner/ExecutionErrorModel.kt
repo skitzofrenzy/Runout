@@ -172,7 +172,13 @@ object ExecutionErrorModel {
                 nominalTrajectory = trajectory
             }
 
-            val stopPos = trajectory.points.lastOrNull() ?: perturbedAim.ghostBallCenter
+            val rawStop = trajectory.points.lastOrNull() ?: perturbedAim.ghostBallCenter
+            val maxStopX = (table.lengthMeters - cueBallRadius).coerceAtLeast(cueBallRadius)
+            val maxStopY = (table.widthMeters - cueBallRadius).coerceAtLeast(cueBallRadius)
+            val stopPos = Vec2(
+                x = rawStop.x.coerceIn(cueBallRadius, maxStopX),
+                y = rawStop.y.coerceIn(cueBallRadius, maxStopY),
+            )
             landingCloud += stopPos
             meanX += point.weight * stopPos.x
             meanY += point.weight * stopPos.y
@@ -200,7 +206,12 @@ object ExecutionErrorModel {
             }
         }
 
-        val meanLanding = Vec2(meanX, meanY)
+        val maxMeanX = (table.lengthMeters - cueBallRadius).coerceAtLeast(cueBallRadius)
+        val maxMeanY = (table.widthMeters - cueBallRadius).coerceAtLeast(cueBallRadius)
+        val meanLanding = Vec2(
+            x = meanX.coerceIn(cueBallRadius, maxMeanX),
+            y = meanY.coerceIn(cueBallRadius, maxMeanY),
+        )
         var meanSqDist = 0.0
         for (i in stencil.indices) {
             meanSqDist += stencil[i].weight * landingCloud[i].distanceSquaredTo(meanLanding)

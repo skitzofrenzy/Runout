@@ -17,6 +17,7 @@ import com.runout.engine.physics.SpinCompensatedAim
 import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.roundToInt
 
 /**
@@ -387,19 +388,52 @@ object MultiShotPlanner {
         )
         val landing = advanced.layout.cueBall()?.position ?: uncertainty.meanLandingPosition
         val terminal = advanced.nextTargets.isEmpty()
-        val leaveFactor = if (terminal) {
-            1.0
-        } else {
-            val heat = context.heatMap(advanced.layout, advanced.nextTargets.take(2).map { it.number })
-            val overlapsBall = advanced.layout.balls.any {
-                !it.isCueBall && it.position.distanceTo(landing) < LANDING_CLEARANCE_FACTOR * cue.radiusMeters
+        val leaveFactor = when {
+            terminal -> computeExecutionSimplicityFactor(
+                scale = scale,
+                tip = tip,
+                bounceCount = 0,
+                isTerminalShot = true,
+            )
+            isFinalTargetState(advanced.rules, advanced.nextTargets) -> {
+                val finalBall = advanced.nextTargets.first()
+                val heat = context.heatMap(advanced.layout, listOf(finalBall.number))
+                val overlapsBall = advanced.layout.balls.any {
+                    !it.isCueBall && it.position.distanceTo(landing) < LANDING_CLEARANCE_FACTOR * cue.radiusMeters
+                }
+                val heatValue = if (overlapsBall || !table.isWithinPlayableBounds(landing, cue.radiusMeters)) {
+                    0.0
+                } else {
+                    heat.valueAt(landing)
+                }
+                val cloudEase = evaluateFinalBallLandingCloudEase(
+                    landingCloud = uncertainty.landingCloud,
+                    finalBall = finalBall,
+                    nextLayout = advanced.layout,
+                    cueRadius = cue.radiusMeters,
+                    profile = context.profile,
+                )
+                val simplicity = computeExecutionSimplicityFactor(
+                    scale = scale,
+                    tip = tip,
+                    bounceCount = (uncertainty.nominalTrajectory.points.size - 2).coerceAtLeast(0),
+                    isTerminalShot = false,
+                )
+                val combinedEase = (0.75 * cloudEase + 0.25 * heatValue).coerceIn(0.0, 1.0) * simplicity
+                0.20 + 0.80 * combinedEase
             }
-            val heatValue = if (overlapsBall || !table.isWithinPlayableBounds(landing, cue.radiusMeters)) {
-                0.0
-            } else {
-                heat.valueAt(landing)
+            else -> {
+                val heat = context.heatMap(advanced.layout, advanced.nextTargets.take(2).map { it.number })
+                val overlapsBall = advanced.layout.balls.any {
+                    !it.isCueBall && it.position.distanceTo(landing) < LANDING_CLEARANCE_FACTOR * cue.radiusMeters
+                }
+                val heatValue = if (overlapsBall || !table.isWithinPlayableBounds(landing, cue.radiusMeters)) {
+                    0.0
+                } else {
+                    heat.valueAt(landing)
+                }
+                LEAVE_FLOOR + (1.0 - LEAVE_FLOOR) * heatValue
             }
-            LEAVE_FLOOR + (1.0 - LEAVE_FLOOR) * heatValue
         }
 
         val step = PlannedShotStep(
@@ -489,6 +523,61 @@ object MultiShotPlanner {
         GameType.EIGHT_BALL -> target.number == 8
         GameType.NINE_BALL -> target.number == 9
         GameType.TEN_BALL -> target.number == 10
+    }
+
+    private fun isFinalTargetState(rules: GameRulesState, nextTargets: List<Ball>): Boolean =
+        nextTargets.size == 1 && isGameOver(rules, nextTargets.first())
+
+    private fun evaluateFinalBallLandingCloudEase(
+        landingCloud: List<Vec2>,
+        finalBall: Ball,
+        nextLayout: TableLayout,
+        cueRadius: Double,
+        profile: PlayerProfile,
+    ): Double {
+        val samplePoints = landingCloud.ifEmpty { listOfNotNull(nextLayout.cueBall()?.position) }
+        if (samplePoints.isEmpty()) return 0.0
+        val table = nextLayout.table
+        var totalEase = 0.0
+        for (pt in samplePoints) {
+            if (!table.isWithinPlayableBounds(pt, cueRadius)) continue
+            if (pt.distanceTo(finalBall.position) < LANDING_CLEARANCE_FACTOR * cueRadius) continue
+            val virtualCue = Ball(number = 0, position = pt, radiusMeters = cueRadius)
+            var bestPointScore = 0.0
+            for (pocket in table.pockets) {
+                val aim = playableAim(nextLayout, virtualCue, finalBall, pocket) ?: continue
+                val quality = HeatZoneGenerator.shotQuality(aim, pocket, profile.aimErrorStdRad)
+                val cutEase = 0.72 + 0.28 * cos(abs(aim.cutAngleRadians)).coerceAtLeast(0.0)
+                val minRailDist = minOf(
+                    pt.x,
+                    table.lengthMeters - pt.x,
+                    pt.y,
+                    table.widthMeters - pt.y,
+                )
+                val comfortThreshold = 2.2 * cueRadius
+                val comfort = if (minRailDist >= comfortThreshold) {
+                    1.0
+                } else {
+                    0.78 + 0.22 * (minRailDist / comfortThreshold).coerceIn(0.0, 1.0)
+                }
+                val score = (quality * cutEase * comfort).coerceIn(0.0, 1.0)
+                if (score > bestPointScore) bestPointScore = score
+            }
+            totalEase += bestPointScore
+        }
+        return (totalEase / samplePoints.size.toDouble()).coerceIn(0.0, 1.0)
+    }
+
+    private fun computeExecutionSimplicityFactor(
+        scale: Int,
+        tip: TipOffset,
+        bounceCount: Int,
+        isTerminalShot: Boolean,
+    ): Double = if (isTerminalShot) {
+        (1.0 - 0.04 * tip.magnitudeRatio - 0.015 * abs(scale - 4)).coerceIn(0.84, 1.0)
+    } else {
+        (1.0 - 0.08 * tip.magnitudeRatio - 0.022 * abs(scale - 4) - 0.045 * (bounceCount - 1).coerceAtLeast(0))
+            .coerceIn(0.70, 1.0)
     }
 
     private fun rulesAfterPotting(rules: GameRulesState, target: Ball): GameRulesState {
@@ -617,7 +706,9 @@ object MultiShotPlanner {
 
             val nextStep = steps.getOrNull(index + 1)
             val spinText = describeTip(step.recommendedTip)
-            reasons += if (nextStep != null) {
+            reasons += if (nextStep != null && isGameOver(rules, nextStep.targetBall)) {
+                "Use $spinText to set up a clean, easy final shot on ball #${nextStep.targetBall.number}."
+            } else if (nextStep != null) {
                 "Use $spinText so the cue ball lands in the high-percentage zone for ball #${nextStep.targetBall.number}."
             } else if (node.terminal) {
                 "Use $spinText; this is the last ball, so only a safe finish matters."

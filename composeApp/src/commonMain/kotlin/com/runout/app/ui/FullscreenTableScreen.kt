@@ -44,6 +44,7 @@ import com.runout.engine.model.GameType
 import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
 import com.runout.engine.physics.CueBallSpinPreset
+import com.runout.engine.physics.TipOffset
 import com.runout.engine.planner.PlanningReadinessResult
 import com.runout.engine.planner.RunoutPlan
 import com.runout.engine.planner.ShotRecommendation
@@ -232,6 +233,7 @@ fun FullscreenTableScreen(
                     onNextStep = onNextStep,
                     onToggleAllSteps = onToggleAllStepsOverlay,
                     onApplyCurrentStepToTable = if (focusedStepIndex > 0) onApplyCurrentStepToTable else null,
+                    onTapCueHitGuide = onOpenQuickSpinSheet,
                     compactLandscape = true,
                 )
             }
@@ -399,6 +401,7 @@ fun StepPlaybackControlBar(
     onNextStep: () -> Unit,
     onToggleAllSteps: () -> Unit,
     onApplyCurrentStepToTable: (() -> Unit)? = null,
+    onTapCueHitGuide: (() -> Unit)? = null,
     compactLandscape: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
@@ -406,6 +409,7 @@ fun StepPlaybackControlBar(
     val hasSteps = steps.isNotEmpty()
     val safeStepIdx = if (hasSteps) focusedStepIndex.coerceIn(0, steps.lastIndex) else 0
     val currentStep = steps.getOrNull(safeStepIdx)
+    val nextStep = steps.getOrNull(safeStepIdx + 1)
 
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -440,6 +444,22 @@ fun StepPlaybackControlBar(
                         MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
                     },
                     modifier = Modifier.size(18.dp),
+                )
+            }
+
+            if (currentStep != null || selectedShot != null) {
+                val guideTip = currentStep?.recommendedTip ?: TipOffset.fromPreset(selectedShot!!.recommendedSpin)
+                val guideTightness = if (currentStep != null) {
+                    computeShotTightness(currentStep, nextStep)
+                } else {
+                    computeShotTightness(selectedShot!!)
+                }
+                CueBallHitGuide(
+                    tipOffset = guideTip,
+                    tightness = guideTightness,
+                    showAxisLabels = false,
+                    onClick = onTapCueHitGuide,
+                    modifier = Modifier.size(42.dp),
                 )
             }
 

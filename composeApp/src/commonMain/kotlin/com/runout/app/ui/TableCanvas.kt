@@ -1,6 +1,7 @@
 package com.runout.app.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.aspectRatio
@@ -15,6 +16,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -50,6 +52,8 @@ import com.runout.engine.planner.ProblemBallReport
 import com.runout.engine.planner.RunoutPlan
 import com.runout.engine.planner.ShotRecommendation
 import com.runout.engine.planner.ShotUncertaintyResult
+import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -355,7 +359,7 @@ fun PoolTableCanvas(
 
         // 2b. Optional Milestone 3 position-value heat-zone grid over the cloth before balls/lines
         val heatZone = activeRunoutPlan?.nextBallHeatZone
-        if (showHeatZone && heatZone != null) {
+        if (!isDraggingBall && showHeatZone && heatZone != null) {
             drawHeatZoneOverlay(
                 heatZone = heatZone,
                 playLeft = playLeft,
@@ -374,15 +378,15 @@ fun PoolTableCanvas(
 
         // 3. Rail diamond sights (8 divisions along length, 4 along width)
         val diamondRadius = max(2f, railPaddingPx * 0.09f)
-        val topRailSightY = playTop * 0.5f
-        val bottomRailSightY = playTop + playHeight + (size.height - (playTop + playHeight)) * 0.5f
+        val topRailSightY = playTop - railPaddingPx * 0.45f
+        val bottomRailSightY = playTop + playHeight + railPaddingPx * 0.45f
         for (i in listOf(1, 2, 3, 5, 6, 7)) {
             val sightX = playLeft + playWidth * (i / 8f)
             drawCircle(color = DiamondSightColor, radius = diamondRadius, center = Offset(sightX, topRailSightY))
             drawCircle(color = DiamondSightColor, radius = diamondRadius, center = Offset(sightX, bottomRailSightY))
         }
-        val leftRailSightX = playLeft * 0.5f
-        val rightRailSightX = playLeft + playWidth + (size.width - (playLeft + playWidth)) * 0.5f
+        val leftRailSightX = playLeft - railPaddingPx * 0.45f
+        val rightRailSightX = playLeft + playWidth + railPaddingPx * 0.45f
         for (j in 1..3) {
             val sightY = playTop + playHeight * (j / 4f)
             drawCircle(color = DiamondSightColor, radius = diamondRadius, center = Offset(leftRailSightX, sightY))
@@ -458,6 +462,10 @@ fun PoolTableCanvas(
                     showLandingCloud = showLandingCloud,
                     ballRadiusPx = ballRadiusPx,
                     pxPerMeter = pxPerMeter,
+                    playLeft = playLeft,
+                    playTop = playTop,
+                    playWidth = playWidth,
+                    playHeight = playHeight,
                     textMeasurer = textMeasurer,
                     toCanvasOffset = ::toCanvasOffset,
                 )
@@ -498,6 +506,10 @@ fun PoolTableCanvas(
                 layout = layout,
                 problemBalls = activeRunoutPlan.problemBalls,
                 ballRadiusPx = ballRadiusPx,
+                playLeft = playLeft,
+                playTop = playTop,
+                playWidth = playWidth,
+                playHeight = playHeight,
                 toCanvasOffset = ::toCanvasOffset,
             )
         }
@@ -786,27 +798,33 @@ private fun DrawScope.drawHeatZoneOverlay(
     val safeRows = heatZone.rows.coerceAtLeast(1)
     val cellWidthPx = playWidth / safeCols.toFloat()
     val cellHeightPx = playHeight / safeRows.toFloat()
+    val maxRight = playLeft + playWidth
+    val maxBottom = playTop + playHeight
 
     clipRect(
         left = playLeft,
         top = playTop,
-        right = playLeft + playWidth,
-        bottom = playTop + playHeight,
+        right = maxRight,
+        bottom = maxBottom,
     ) {
         for (cell in heatZone.cells) {
             val cellColor = when {
-                cell.value >= 0.60 -> HeatZoneHighColor
-                cell.value >= 0.30 -> HeatZoneMediumColor
-                cell.value >= 0.05 -> HeatZoneLowColor
+                cell.value >= 0.62 -> HeatZoneHighColor
+                cell.value >= 0.32 -> HeatZoneMediumColor
+                cell.value >= 0.06 -> HeatZoneLowColor
                 else -> continue
             }
+            val cellLeft = (playLeft + cell.col * cellWidthPx).coerceIn(playLeft, maxRight)
+            val cellTop = (playTop + cell.row * cellHeightPx).coerceIn(playTop, maxBottom)
+            val cellRight = (cellLeft + cellWidthPx).coerceAtMost(maxRight)
+            val cellBottom = (cellTop + cellHeightPx).coerceAtMost(maxBottom)
+            val drawW = (cellRight - cellLeft).coerceAtLeast(0f)
+            val drawH = (cellBottom - cellTop).coerceAtLeast(0f)
+            if (drawW <= 0f || drawH <= 0f) continue
             drawRect(
                 color = cellColor,
-                topLeft = Offset(
-                    x = playLeft + cell.col * cellWidthPx,
-                    y = playTop + cell.row * cellHeightPx,
-                ),
-                size = Size(cellWidthPx + 0.5f, cellHeightPx + 0.5f),
+                topLeft = Offset(x = cellLeft, y = cellTop),
+                size = Size(drawW, drawH),
             )
         }
     }
@@ -819,6 +837,10 @@ private fun DrawScope.drawRunoutPlanOverlay(
     showLandingCloud: Boolean,
     ballRadiusPx: Float,
     pxPerMeter: Float,
+    playLeft: Float,
+    playTop: Float,
+    playWidth: Float,
+    playHeight: Float,
     textMeasurer: TextMeasurer,
     toCanvasOffset: (Vec2) -> Offset,
 ) {
@@ -827,6 +849,8 @@ private fun DrawScope.drawRunoutPlanOverlay(
 
     val activeIdx = focusedStepIndex?.coerceIn(0, steps.lastIndex) ?: 0
     val primaryStep = steps[activeIdx]
+    val nextStep = steps.getOrNull(activeIdx + 1)
+    val shotTightness = computeShotTightness(primaryStep, nextStep)
 
     val cuePos = layout.cueBall()?.position
     val firstGhostCenter = toCanvasOffset(primaryStep.compensatedAim.compensatedGhostBallCenter)
@@ -872,12 +896,17 @@ private fun DrawScope.drawRunoutPlanOverlay(
         toCanvasOffset = toCanvasOffset,
     )
 
-    // Active step cue-ball landing cloud & 95% spread confidence ring
+    // Active step 3-level position heat zone & landing cloud (strictly clipped inside playable felt)
     if (showLandingCloud) {
         drawLandingCloudOverlay(
             uncertainty = primaryStep.uncertainty,
+            tightness = shotTightness,
             ballRadiusPx = ballRadiusPx,
             pxPerMeter = pxPerMeter,
+            playLeft = playLeft,
+            playTop = playTop,
+            playWidth = playWidth,
+            playHeight = playHeight,
             toCanvasOffset = toCanvasOffset,
         )
     }
@@ -888,6 +917,10 @@ private fun DrawScope.drawRunoutPlanOverlay(
             disturbedBalls = primaryStep.disturbedBalls,
             ballRadiusPx = ballRadiusPx,
             pxPerMeter = pxPerMeter,
+            playLeft = playLeft,
+            playTop = playTop,
+            playWidth = playWidth,
+            playHeight = playHeight,
             alpha = 0.92f,
             toCanvasOffset = toCanvasOffset,
         )
@@ -941,6 +974,10 @@ private fun DrawScope.drawRunoutPlanOverlay(
                 disturbedBalls = step.disturbedBalls,
                 ballRadiusPx = ballRadiusPx * 0.9f,
                 pxPerMeter = pxPerMeter,
+                playLeft = playLeft,
+                playTop = playTop,
+                playWidth = playWidth,
+                playHeight = playHeight,
                 alpha = 0.65f,
                 toCanvasOffset = toCanvasOffset,
             )
@@ -961,6 +998,10 @@ private fun DrawScope.drawDisturbedBallsOverlay(
     disturbedBalls: List<DisplacedBallPath>,
     ballRadiusPx: Float,
     pxPerMeter: Float,
+    playLeft: Float,
+    playTop: Float,
+    playWidth: Float,
+    playHeight: Float,
     alpha: Float,
     toCanvasOffset: (Vec2) -> Offset,
 ) {
@@ -970,33 +1011,40 @@ private fun DrawScope.drawDisturbedBallsOverlay(
     val strokeW = max(1.8f, pxPerMeter * 0.0052f)
     val color = DisturbedScatterColor.copy(alpha = alpha)
 
-    for (path in disturbedBalls) {
-        if (path.points.size < 2) continue
-        val pathObj = Path().apply {
-            val first = toCanvasOffset(path.points.first())
-            moveTo(first.x, first.y)
-            for (i in 1 until path.points.size) {
-                val pt = toCanvasOffset(path.points[i])
-                lineTo(pt.x, pt.y)
+    clipRect(
+        left = playLeft,
+        top = playTop,
+        right = playLeft + playWidth,
+        bottom = playTop + playHeight,
+    ) {
+        for (path in disturbedBalls) {
+            if (path.points.size < 2) continue
+            val pathObj = Path().apply {
+                val first = toCanvasOffset(path.points.first())
+                moveTo(first.x, first.y)
+                for (i in 1 until path.points.size) {
+                    val pt = toCanvasOffset(path.points[i])
+                    lineTo(pt.x, pt.y)
+                }
             }
+            drawPath(
+                path = pathObj,
+                color = color,
+                style = Stroke(width = strokeW, cap = StrokeCap.Round, pathEffect = scatterEffect),
+            )
+            val endOffset = toCanvasOffset(path.points.last())
+            drawCircle(
+                color = color.copy(alpha = alpha * 0.20f),
+                radius = ballRadiusPx * 0.85f,
+                center = endOffset,
+            )
+            drawCircle(
+                color = color,
+                radius = ballRadiusPx * 0.85f,
+                center = endOffset,
+                style = Stroke(width = max(1.4f, strokeW * 0.85f)),
+            )
         }
-        drawPath(
-            path = pathObj,
-            color = color,
-            style = Stroke(width = strokeW, cap = StrokeCap.Round, pathEffect = scatterEffect),
-        )
-        val endOffset = toCanvasOffset(path.points.last())
-        drawCircle(
-            color = color.copy(alpha = alpha * 0.20f),
-            radius = ballRadiusPx * 0.85f,
-            center = endOffset,
-        )
-        drawCircle(
-            color = color,
-            radius = ballRadiusPx * 0.85f,
-            center = endOffset,
-            style = Stroke(width = max(1.4f, strokeW * 0.85f)),
-        )
     }
 }
 
@@ -1068,62 +1116,110 @@ private fun DrawScope.drawStepNumberBadge(
 
 private fun DrawScope.drawLandingCloudOverlay(
     uncertainty: ShotUncertaintyResult,
+    tightness: Float,
     ballRadiusPx: Float,
     pxPerMeter: Float,
+    playLeft: Float,
+    playTop: Float,
+    playWidth: Float,
+    playHeight: Float,
     toCanvasOffset: (Vec2) -> Offset,
 ) {
     val meanCenter = toCanvasOffset(uncertainty.meanLandingPosition)
-    val spreadRadiusPx = (uncertainty.landingSpreadRadiusMeters * pxPerMeter)
+    val outerRadiusPx = (uncertainty.landingSpreadRadiusMeters * pxPerMeter)
         .toFloat()
-        .coerceAtLeast(ballRadiusPx * 0.65f)
+        .coerceAtLeast(ballRadiusPx * 0.90f)
+    val clampedTightness = tightness.coerceIn(0f, 1f)
+    val amberFraction = 0.84f - 0.28f * clampedTightness
+    val greenFraction = 0.58f - 0.32f * clampedTightness
+    val midRadiusPx = (outerRadiusPx * amberFraction).coerceAtLeast(ballRadiusPx * 0.55f)
+    val innerRadiusPx = (outerRadiusPx * greenFraction).coerceAtLeast(ballRadiusPx * 0.32f)
 
-    // Translucent 95% confidence spread circle
-    drawCircle(
-        color = LandingCloudFillColor,
-        radius = spreadRadiusPx,
-        center = meanCenter,
-    )
     val ringDash = max(5f, ballRadiusPx * 0.45f)
     val ringGap = max(4f, ballRadiusPx * 0.30f)
-    drawCircle(
-        color = LandingCloudStrokeColor,
-        radius = spreadRadiusPx,
-        center = meanCenter,
-        style = Stroke(
-            width = max(1.6f, pxPerMeter * 0.005f),
-            pathEffect = PathEffect.dashPathEffect(floatArrayOf(ringDash, ringGap), 0f),
-        ),
-    )
 
-    // Individual sigma-point landing cloud dots
-    val dotRadius = max(2.2f, ballRadiusPx * 0.17f)
-    for (pt in uncertainty.landingCloud) {
-        val ptOffset = toCanvasOffset(pt)
+    clipRect(
+        left = playLeft,
+        top = playTop,
+        right = playLeft + playWidth,
+        bottom = playTop + playHeight,
+    ) {
+        // Level 3 Outer Heat Zone: outer 95% landing spread (tightness-scaled boundary)
         drawCircle(
-            color = Color(0xAA0C4A6E),
-            radius = dotRadius + 0.8f,
-            center = ptOffset,
+            color = Color(0x2CF87171),
+            radius = outerRadiusPx,
+            center = meanCenter,
         )
         drawCircle(
-            color = LandingCloudDotColor,
-            radius = dotRadius,
-            center = ptOffset,
+            color = Color(0xAAF87171),
+            radius = outerRadiusPx,
+            center = meanCenter,
+            style = Stroke(
+                width = max(1.4f, pxPerMeter * 0.0044f),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(ringDash, ringGap), 0f),
+            ),
+        )
+
+        // Level 2 Middle Heat Zone: playable tolerance band
+        drawCircle(
+            color = Color(0x36FBBF24),
+            radius = midRadiusPx,
+            center = meanCenter,
+        )
+        drawCircle(
+            color = Color(0xAAFBBF24),
+            radius = midRadiusPx,
+            center = meanCenter,
+            style = Stroke(width = max(1.3f, pxPerMeter * 0.0040f)),
+        )
+
+        // Level 1 Inner Heat Zone: ideal sweet spot (wider on easy cuts, tighter on demanding shots)
+        drawCircle(
+            color = Color(0x464ADE80),
+            radius = innerRadiusPx,
+            center = meanCenter,
+        )
+        drawCircle(
+            color = Color(0xCC4ADE80),
+            radius = innerRadiusPx,
+            center = meanCenter,
+            style = Stroke(width = max(1.6f, pxPerMeter * 0.0048f)),
+        )
+
+        // Individual sigma-point landing cloud dots
+        val dotRadius = max(2.2f, ballRadiusPx * 0.17f)
+        for (pt in uncertainty.landingCloud) {
+            val ptOffset = toCanvasOffset(pt)
+            drawCircle(
+                color = Color(0xAA0C4A6E),
+                radius = dotRadius + 0.8f,
+                center = ptOffset,
+            )
+            drawCircle(
+                color = LandingCloudDotColor,
+                radius = dotRadius,
+                center = ptOffset,
+            )
+        }
+
+        // Mean landing center marker
+        drawCircle(
+            color = Color(0xFF38BDF8),
+            radius = max(3f, ballRadiusPx * 0.25f),
+            center = meanCenter,
+            style = Stroke(width = max(1.5f, pxPerMeter * 0.0045f)),
         )
     }
-
-    // Mean landing center marker
-    drawCircle(
-        color = Color(0xFF38BDF8),
-        radius = max(3f, ballRadiusPx * 0.25f),
-        center = meanCenter,
-        style = Stroke(width = max(1.5f, pxPerMeter * 0.0045f)),
-    )
 }
 
 private fun DrawScope.drawProblemBallHalos(
     layout: TableLayout,
     problemBalls: List<ProblemBallReport>,
     ballRadiusPx: Float,
+    playLeft: Float,
+    playTop: Float,
+    playWidth: Float,
+    playHeight: Float,
     toCanvasOffset: (Vec2) -> Offset,
 ) {
     val dashLen = max(4f, ballRadiusPx * 0.48f)
@@ -1131,23 +1227,30 @@ private fun DrawScope.drawProblemBallHalos(
     val haloEffect = PathEffect.dashPathEffect(floatArrayOf(dashLen, gapLen), 0f)
     val haloRadius = ballRadiusPx * 1.48f
 
-    for (report in problemBalls) {
-        val pos = layout.ballByNumber(report.ballNumber)?.position ?: report.positionMeters
-        val center = toCanvasOffset(pos)
-        drawCircle(
-            color = ProblemBallWarningColor.copy(alpha = 0.16f),
-            radius = haloRadius,
-            center = center,
-        )
-        drawCircle(
-            color = ProblemBallWarningColor,
-            radius = haloRadius,
-            center = center,
-            style = Stroke(
-                width = max(2f, ballRadiusPx * 0.15f),
-                pathEffect = haloEffect,
-            ),
-        )
+    clipRect(
+        left = playLeft,
+        top = playTop,
+        right = playLeft + playWidth,
+        bottom = playTop + playHeight,
+    ) {
+        for (report in problemBalls) {
+            val pos = layout.ballByNumber(report.ballNumber)?.position ?: report.positionMeters
+            val center = toCanvasOffset(pos)
+            drawCircle(
+                color = ProblemBallWarningColor.copy(alpha = 0.16f),
+                radius = haloRadius,
+                center = center,
+            )
+            drawCircle(
+                color = ProblemBallWarningColor,
+                radius = haloRadius,
+                center = center,
+                style = Stroke(
+                    width = max(2f, ballRadiusPx * 0.15f),
+                    pathEffect = haloEffect,
+                ),
+            )
+        }
     }
 }
 
@@ -1319,6 +1422,219 @@ fun CueTipSelectorCanvas(
         drawCircle(
             color = Color(0xFFDC2626),
             radius = tipDotRadius * 0.56f,
+            center = contactCenter,
+        )
+    }
+}
+
+/**
+ * Computes normalized shot tightness in `0f..1f` (`0f` = forgiving / wide pocket & leave,
+ * `1f` = razor-tight cut, delicate speed/spin, or narrow position window).
+ */
+fun computeShotTightness(
+    step: PlannedShotStep,
+    nextStep: PlannedShotStep? = null,
+): Float {
+    val cutDeg = abs(step.compensatedAim.geometricAim.cutAngleRadians) * (180.0 / PI)
+    val cutTightness = (cutDeg / 65.0).coerceIn(0.0, 1.0)
+    val makeTightness = ((0.96 - step.uncertainty.makeProbability) / 0.65).coerceIn(0.0, 1.0)
+    val scratchTightness = (step.uncertainty.scratchProbability / 0.25).coerceIn(0.0, 1.0)
+    val spinTightness = (step.recommendedTip.magnitudeRatio / 0.50).coerceIn(0.0, 1.0)
+    val nextTightness = nextStep?.let { ((0.94 - it.uncertainty.makeProbability) / 0.65).coerceIn(0.0, 1.0) } ?: 0.0
+    return (
+        0.32 * cutTightness +
+            0.30 * makeTightness +
+            0.16 * nextTightness +
+            0.12 * spinTightness +
+            0.10 * scratchTightness
+        ).toFloat().coerceIn(0f, 1f)
+}
+
+/**
+ * Computes normalized shot tightness in `0f..1f` for single-shot recommendations.
+ */
+fun computeShotTightness(shot: ShotRecommendation): Float {
+    val cutDeg = abs(shot.aim.cutAngleRadians) * (180.0 / PI)
+    val cutTightness = (cutDeg / 65.0).coerceIn(0.0, 1.0)
+    val scoreTightness = ((0.90 - shot.score) / 0.65).coerceIn(0.0, 1.0)
+    val spinTightness = if (shot.recommendedSpin == CueBallSpinPreset.DRAW) 0.55 else 0.15
+    return (0.45 * cutTightness + 0.40 * scoreTightness + 0.15 * spinTightness)
+        .toFloat()
+        .coerceIn(0f, 1f)
+}
+
+/**
+ * Plain-English tightness badge corresponding to [tightness].
+ */
+fun shotTightnessLabel(tightness: Float): String = when {
+    tightness < 0.33f -> "Wide"
+    tightness < 0.64f -> "Moderate"
+    else -> "Tight"
+}
+
+/**
+ * Compact front-facing cue-ball hit guide showing the recommended tip contact point and a
+ * 3-level Green / Amber / Red heat zone clipped inside the ball boundary that tightens on
+ * demanding cuts and opens up on forgiving shots.
+ */
+@Composable
+fun CueBallHitGuide(
+    tipOffset: TipOffset,
+    tightness: Float = 0.35f,
+    modifier: Modifier = Modifier,
+    showAxisLabels: Boolean = true,
+    onClick: (() -> Unit)? = null,
+) {
+    val textMeasurer = rememberTextMeasurer()
+    val clampedTightness = tightness.coerceIn(0f, 1f)
+    val interactionModifier = if (onClick != null) {
+        modifier.clickable(onClick = onClick)
+    } else {
+        modifier
+    }
+
+    Canvas(modifier = interactionModifier.aspectRatio(1f)) {
+        val ballRadiusPx = min(size.width, size.height) * 0.45f
+        val center = Offset(size.width * 0.5f, size.height * 0.5f)
+        val safeRadiusPx = ballRadiusPx * TipOffset.MAX_SAFE_OFFSET_RATIO.toFloat()
+
+        // Drop shadow
+        drawCircle(
+            color = Color(0x4D000000),
+            radius = ballRadiusPx,
+            center = center + Offset(ballRadiusPx * 0.06f, ballRadiusPx * 0.08f),
+        )
+
+        // Shaded 3D white sphere
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    Color(0xFFFFFFFF),
+                    Color(0xFFF1F5F9),
+                    Color(0xFFCBD5E1),
+                ),
+                center = center - Offset(ballRadiusPx * 0.25f, ballRadiusPx * 0.28f),
+                radius = ballRadiusPx * 1.35f,
+            ),
+            radius = ballRadiusPx,
+            center = center,
+        )
+
+        val ballClipPath = Path().apply {
+            addOval(
+                Rect(
+                    left = center.x - ballRadiusPx,
+                    top = center.y - ballRadiusPx,
+                    right = center.x + ballRadiusPx,
+                    bottom = center.y + ballRadiusPx,
+                ),
+            )
+        }
+
+        val contactCenter = Offset(
+            x = center.x + (tipOffset.clampedSideRatio.toFloat() * ballRadiusPx),
+            y = center.y - (tipOffset.clampedVerticalRatio.toFloat() * ballRadiusPx),
+        )
+
+        clipPath(ballClipPath) {
+            // 3-level tightness heat zone centered on recommended contact point
+            val redRadiusPx = ballRadiusPx * (0.56f - 0.24f * clampedTightness)
+            val amberRadiusPx = ballRadiusPx * (0.42f - 0.20f * clampedTightness)
+            val greenRadiusPx = ballRadiusPx * (0.28f - 0.16f * clampedTightness)
+
+            drawCircle(
+                color = Color(0x36F87171),
+                radius = redRadiusPx,
+                center = contactCenter,
+            )
+            drawCircle(
+                color = Color(0x4AFBBF24),
+                radius = amberRadiusPx,
+                center = contactCenter,
+            )
+            drawCircle(
+                color = Color(0x5E4ADE80),
+                radius = greenRadiusPx,
+                center = contactCenter,
+            )
+            drawCircle(
+                color = Color(0xCC16A34A),
+                radius = greenRadiusPx,
+                center = contactCenter,
+                style = Stroke(width = max(1.2f, ballRadiusPx * 0.032f)),
+            )
+        }
+
+        // Crosshairs and 0.50R miscue-safe ring
+        val crosshairColor = Color(0x66475569)
+        val crosshairStroke = max(1.0f, ballRadiusPx * 0.025f)
+        drawLine(
+            color = crosshairColor,
+            start = Offset(center.x - ballRadiusPx * 0.86f, center.y),
+            end = Offset(center.x + ballRadiusPx * 0.86f, center.y),
+            strokeWidth = crosshairStroke,
+        )
+        drawLine(
+            color = crosshairColor,
+            start = Offset(center.x, center.y - ballRadiusPx * 0.86f),
+            end = Offset(center.x, center.y + ballRadiusPx * 0.86f),
+            strokeWidth = crosshairStroke,
+        )
+
+        val dash = max(3f, ballRadiusPx * 0.11f)
+        val gap = max(2.5f, ballRadiusPx * 0.09f)
+        drawCircle(
+            color = Color(0x880284C7),
+            radius = safeRadiusPx,
+            center = center,
+            style = Stroke(
+                width = max(1.1f, ballRadiusPx * 0.028f),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(dash, gap), 0f),
+            ),
+        )
+
+        if (showAxisLabels && ballRadiusPx >= 24f) {
+            val labelStyle = TextStyle(
+                color = Color(0xAA475569),
+                fontSize = 7.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            val axisMarkers = listOf(
+                "F" to Offset(center.x, center.y - ballRadiusPx * 0.74f),
+                "D" to Offset(center.x, center.y + ballRadiusPx * 0.74f),
+                "L" to Offset(center.x - ballRadiusPx * 0.74f, center.y),
+                "R" to Offset(center.x + ballRadiusPx * 0.74f, center.y),
+            )
+            for ((text, pos) in axisMarkers) {
+                val measured = textMeasurer.measure(text = text, style = labelStyle)
+                drawText(
+                    textLayoutResult = measured,
+                    topLeft = Offset(
+                        x = pos.x - measured.size.width * 0.5f,
+                        y = pos.y - measured.size.height * 0.5f,
+                    ),
+                )
+            }
+        }
+
+        // Outer ball contour
+        drawCircle(
+            color = Color(0xCC64748B),
+            radius = ballRadiusPx,
+            center = center,
+            style = Stroke(width = max(1.3f, ballRadiusPx * 0.04f)),
+        )
+
+        // Bold cue-tip strike point
+        val tipDotRadius = max(3.2f, ballRadiusPx * 0.14f)
+        drawCircle(
+            color = Color(0xFF0F172A),
+            radius = tipDotRadius + max(1.2f, ballRadiusPx * 0.03f),
+            center = contactCenter,
+        )
+        drawCircle(
+            color = Color(0xFFEF4444),
+            radius = tipDotRadius,
             center = contactCenter,
         )
     }

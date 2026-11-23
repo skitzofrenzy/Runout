@@ -2,6 +2,7 @@ package com.runout.engine
 
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.Ball
+import com.runout.engine.model.EightBallGroup
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
@@ -11,6 +12,7 @@ import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.GhostBallAiming
 import com.runout.engine.physics.TableCollisionSimulator
 import com.runout.engine.physics.TipOffset
+import com.runout.engine.planner.HeatZoneGenerator
 import com.runout.engine.planner.MultiShotPlanner
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -117,5 +119,96 @@ class TableCollisionAndPlaybackTest {
         )
         assertTrue(forcedFootRight.isNotEmpty())
         assertEquals(PocketId.FOOT_RIGHT, forcedFootRight.first().steps.first().pocketId)
+    }
+
+    @Test
+    fun penultimateShotOntoLastBallPrefersEasiestCleanPosition() {
+        val layout = TableLayout(
+            table = table,
+            balls = listOf(
+                Ball(number = 0, position = Vec2(0.75, 0.56)),
+                Ball(number = 7, position = Vec2(1.22, 0.90)),
+                Ball(number = 8, position = Vec2(1.88, 0.62)),
+            ),
+        )
+        val plans = MultiShotPlanner.planRunout(
+            layout = layout,
+            rulesState = GameRulesState(GameType.EIGHT_BALL, EightBallGroup.SOLIDS),
+            horizonShots = 2,
+        )
+        assertTrue(plans.isNotEmpty())
+        val topPlan = plans.first()
+        assertEquals(2, topPlan.steps.size, "Expected 2-shot runout (#7 then #8)")
+        assertEquals(7, topPlan.steps[0].targetBall.number)
+        assertEquals(8, topPlan.steps[1].targetBall.number)
+        assertTrue(
+            topPlan.steps[1].uncertainty.makeProbability >= 0.70,
+            "Penultimate shot should leave an easy, high-make final shot on #8 (was ${topPlan.steps[1].uncertainty.makeProbability})",
+        )
+    }
+
+    @Test
+    fun finalBallShotPrefersCleanLowSpinStroke() {
+        val layout = TableLayout(
+            table = table,
+            balls = listOf(
+                Ball(number = 0, position = Vec2(1.30, 0.64)),
+                Ball(number = 8, position = Vec2(2.05, 0.96)),
+            ),
+        )
+        val plans = MultiShotPlanner.planRunout(
+            layout = layout,
+            rulesState = GameRulesState(GameType.EIGHT_BALL, EightBallGroup.EIGHT_BALL),
+            horizonShots = 1,
+        )
+        assertTrue(plans.isNotEmpty())
+        val step = plans.first().steps.single()
+        assertEquals(8, step.targetBall.number)
+        assertTrue(
+            step.recommendedTip.magnitudeRatio <= 0.35,
+            "Final shot should choose a clean low-spin stroke (was ${step.recommendedTip.magnitudeRatio})",
+        )
+        assertTrue(
+            step.recommendedSpeedScale in 3..6,
+            "Final shot should use comfortable pocket speed (was ${step.recommendedSpeedScale})",
+        )
+    }
+
+    @Test
+    fun landingCloudAndHeatZoneStayWithinPlayableBounds() {
+        val layout = TableLayout(
+            table = table,
+            balls = listOf(
+                Ball(number = 0, position = Vec2(0.85, 0.22)),
+                Ball(number = 1, position = Vec2(1.22, 0.14)),
+                Ball(number = 9, position = Vec2(2.15, 0.35)),
+            ),
+        )
+        val plans = MultiShotPlanner.planRunout(
+            layout = layout,
+            rulesState = GameRulesState(GameType.NINE_BALL),
+            horizonShots = 2,
+        )
+        assertTrue(plans.isNotEmpty())
+        val step1 = plans.first().steps.first()
+        assertTrue(
+            table.isWithinPlayableBounds(step1.uncertainty.meanLandingPosition, table.ballRadiusMeters),
+            "Mean landing position must stay inside playable cloth bounds",
+        )
+        for (pt in step1.uncertainty.landingCloud) {
+            assertTrue(
+                table.isWithinPlayableBounds(pt, table.ballRadiusMeters),
+                "Every landing cloud sigma point ($pt) must stay inside playable cloth bounds",
+            )
+        }
+        val heatZone = HeatZoneGenerator.computeForNextBalls(layout, listOf(9))
+        for (cell in heatZone.cells) {
+            if (cell.value > 0.0) {
+                assertTrue(
+                    table.isWithinPlayableBounds(cell.centerMeters, table.ballRadiusMeters),
+                    "Every non-zero heat zone cell center (${cell.centerMeters}) must stay inside playable cloth bounds",
+                )
+            }
+        }
     }
 }
