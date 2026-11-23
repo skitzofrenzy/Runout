@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +50,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
@@ -62,14 +65,18 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.runout.app.camera.CaptureQualityReport
 import com.runout.app.camera.CapturedTablePhoto
+import com.runout.app.camera.ImportedPhotoFrame
 import com.runout.app.camera.PhotoCaptureEvaluator
 import com.runout.app.camera.PlatformCameraController
 import com.runout.app.camera.SampleCapturedPhotos
+import com.runout.app.camera.rememberPlatformPhotoPicker
+import com.runout.app.camera.toComposeImageBitmap
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.AssumedSurfacePreset
 import com.runout.engine.model.BallPaletteColor
@@ -132,6 +139,12 @@ private val GuideCyanColor = Color(0xFF38BDF8)
 
 private const val TARGET_RAW_PIXEL_MEDIAN_ERROR_MM: Double = 15.0
 
+private enum class PhotoWizardStep(val stepNumber: Int, val headline: String) {
+    SOURCE_PICKER(1, "Choose a Table Photo"),
+    REVIEW_TABLE(2, "Check Corners & Balls"),
+    CONFIRM_GAME(3, "Confirm Game & Group"),
+}
+
 private data class RawPixelDecodeState(
     val sourcePreset: CapturedTablePhoto,
     val requestedClothCategory: ClothHueCategory,
@@ -142,15 +155,18 @@ private data class RawPixelDecodeState(
 )
 
 /**
- * Interactive single-photo capture, 4-corner perspective rectification, ball identity review,
- * and game-type confirmation screen feeding directly into the Table & Planner workspace.
+ * Interactive 3-step photo table capture / import wizard:
+ * 1. Take Photo or Import from Gallery (or try a built-in sample)
+ * 2. Check & drag the 4 table cushion corners and tap any ball to fix its number
+ * 3. Confirm Game Type & 8-Ball Group (guarded by [PlanningReadinessValidator])
  */
 @Composable
 fun PhotoCaptureAndConfirmScreen(
     ballSet: BallSetProfile,
     lastPlayedGameType: GameType,
-    onConfirmScannedLayout: (TableLayout, GameRulesState) -> Unit,
+    onConfirmScannedLayout: (TableLayout, GameRulesState, BallSetProfile) -> Unit,
     modifier: Modifier = Modifier,
+    displayMode: AppDisplayMode = AppDisplayMode.SIMPLE,
 ) {
     val cameraController = remember { PlatformCameraController() }
     val presets = remember { SampleCapturedPhotos.allPresets() }
@@ -160,8 +176,41 @@ fun PhotoCaptureAndConfirmScreen(
             presets.firstOrNull() ?: cameraController.capturePresetPhoto("angled_9ft_9ball"),
         )
     }
+    var wizardStep by remember { mutableStateOf(PhotoWizardStep.SOURCE_PICKER) }
+    var importedImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    var pendingImportedFrame by remember { mutableStateOf<ImportedPhotoFrame?>(null) }
+    var importError by remember { mutableStateOf<String?>(null) }
+    var activeBallSet by remember(ballSet) { mutableStateOf(ballSet) }
     var selectedRawClothCategory by remember { mutableStateOf(ClothHueCategory.TOURNAMENT_BLUE) }
     var rawPixelDecodeState by remember { mutableStateOf<RawPixelDecodeState?>(null) }
+
+    val photoPicker = rememberPlatformPhotoPicker(
+        onPhotoImported = { imported ->
+            importError = null
+            pendingImportedFrame = imported
+        },
+        onError = { message ->
+            importError = message
+        },
+    )
+
+    LaunchedEffect(pendingImportedFrame, ballSet) {
+        val imported = pendingImportedFrame ?: return@LaunchedEffect
+        val bundle = PhotoCaptureEvaluator.createCapturedPhotoFromRawFrame(
+            id = imported.id,
+            title = imported.title,
+            subtitle = imported.subtitle,
+            frame = imported.frame,
+            tableSpec = selectedPhoto.tableSpec,
+            baseBallSet = ballSet,
+        )
+        importedImageBitmap = imported.frame.toComposeImageBitmap()
+        selectedPhoto = bundle.photo
+        activeBallSet = bundle.inferredBallSet
+        pendingImportedFrame = null
+        wizardStep = PhotoWizardStep.REVIEW_TABLE
+    }
+
     var overriddenQuadCornersPx by remember(selectedPhoto.id) {
         mutableStateOf(selectedPhoto.detectedQuadCornersPx)
     }
@@ -201,12 +250,12 @@ fun PhotoCaptureAndConfirmScreen(
         )
     }
 
-    val rectificationOutcome = remember(selectedPhoto, overriddenQuadCornersPx, ballSet) {
+    val rectificationOutcome = remember(selectedPhoto, overriddenQuadCornersPx, activeBallSet) {
         runCatching {
             PhotoCaptureEvaluator.processCapturedPhoto(
                 photo = selectedPhoto,
                 overriddenQuadCornersPx = overriddenQuadCornersPx,
-                ballSet = ballSet,
+                ballSet = activeBallSet,
             )
         }
     }
@@ -290,11 +339,11 @@ fun PhotoCaptureAndConfirmScreen(
             EightBallGroup.OPEN
         },
     )
-    val planningReadiness = remember(finalLayout, candidateRulesState, ballSet) {
+    val planningReadiness = remember(finalLayout, candidateRulesState, activeBallSet) {
         PlanningReadinessValidator.evaluate(
             layout = finalLayout,
             rulesState = candidateRulesState,
-            ballSet = ballSet,
+            ballSet = activeBallSet,
         )
     }
 
@@ -302,222 +351,405 @@ fun PhotoCaptureAndConfirmScreen(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = RunoutSpacing.Margin, vertical = RunoutSpacing.Card),
+        verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Section),
     ) {
-        PhotoCaptureHeaderBar(
-            platformName = cameraController.platformName,
-            stripsExifAndGpsInMemory = cameraController.stripsExifAndGpsInMemory,
-        )
-
-        PresetCaptureBar(
-            presets = presets,
-            selectedPresetIndex = selectedPresetIndex,
-            selectedPhoto = selectedPhoto,
-            onSelectPreset = { index ->
-                val chosen = presets[index]
-                selectedPresetIndex = index
-                selectedPhoto = cameraController.capturePresetPhoto(chosen.id)
-            },
-        )
-
-        val rawSourcePreset = presets.getOrElse(selectedPresetIndex) { selectedPhoto }
-        RawPixelFrameDecoderCard(
-            sourcePreset = rawSourcePreset,
-            selectedClothCategory = selectedRawClothCategory,
-            decodeState = rawPixelDecodeState,
-            isLoadedInPreview = selectedPhoto.id.startsWith("raw_pixel_"),
-            ballSet = ballSet,
-            onSelectClothCategory = { category ->
-                selectedRawClothCategory = category
-            },
-            onRunPixelDetector = {
-                val frame = SampleCapturedPhotos.renderPresetAsRawArgbFrame(
-                    preset = rawSourcePreset,
-                    clothCategory = selectedRawClothCategory,
-                    ballSet = ballSet,
-                )
-                val (summary, rectified) = PhotoCaptureEvaluator.processRawArgbFrame(
-                    frame = frame,
-                    tableSpec = rawSourcePreset.tableSpec,
-                    ballSet = ballSet,
-                )
-                val pixelMedianErrorMm = PhotoCaptureEvaluator.computeMedianPositionErrorMeters(
-                    rectified = rectified,
-                    groundTruth = rawSourcePreset.groundTruthBallPositionsMeters,
-                ) * METERS_TO_MM
-                rawPixelDecodeState = RawPixelDecodeState(
-                    sourcePreset = rawSourcePreset,
-                    requestedClothCategory = selectedRawClothCategory,
-                    frame = frame,
-                    summary = summary,
-                    rectification = rectified,
-                    medianErrorMm = pixelMedianErrorMm,
-                )
-            },
-            onUsePixelDetectedLayout = { decoded ->
-                val widthRatio = decoded.summary.width.toDouble() /
-                    decoded.sourcePreset.intrinsics.imageWidthPx.toDouble().coerceAtLeast(1.0)
-                selectedPhoto = CapturedTablePhoto(
-                    id = "raw_pixel_${decoded.sourcePreset.id}_${decoded.requestedClothCategory.name.lowercase()}",
-                    title = "${decoded.sourcePreset.title} (Raw 640×360 Pixel Decode)",
-                    subtitle = "Decoded from 640×360 ARGB pixels • ${decoded.summary.clothSurface.category.displayLabel()}",
-                    tableSpec = decoded.sourcePreset.tableSpec,
-                    intrinsics = CameraIntrinsicsSpec(
-                        focalLengthPx = decoded.sourcePreset.intrinsics.focalLengthPx * widthRatio,
-                        principalPointPx = Vec2(decoded.summary.width * 0.5, decoded.summary.height * 0.5),
-                        imageWidthPx = decoded.summary.width,
-                        imageHeightPx = decoded.summary.height,
-                    ),
-                    trueCameraPoseMeters = decoded.rectification.cameraPositionMeters,
-                    detectedQuadCornersPx = decoded.summary.detectedQuadCornersPx,
-                    rawDetections = decoded.summary.detectedCandidates,
-                    groundTruthBallPositionsMeters = decoded.sourcePreset.groundTruthBallPositionsMeters,
-                    sharpnessScore = decoded.summary.sharpnessScore,
-                    glareFraction = decoded.summary.glareFraction,
-                )
-            },
-        )
-
-        CaptureQualityCard(
-            qualityReport = qualityReport,
-            photo = selectedPhoto,
-        )
-
-        InteractiveFramingGuideCard(
-            photo = selectedPhoto,
-            quadCornersPx = overriddenQuadCornersPx,
-            activeCornerIndex = activeCornerIndex,
-            displayedBalls = displayedBallsWithIdentity,
-            ballSet = ballSet,
-            qualityReport = qualityReport,
-            isQuadGeometryInvalid = isQuadGeometryInvalid,
-            onCornersChanged = { updated -> overriddenQuadCornersPx = updated },
-            onActiveCornerChanged = { idx -> activeCornerIndex = idx },
-            onResetCorners = {
-                overriddenQuadCornersPx = selectedPhoto.detectedQuadCornersPx
-            },
-        )
-
-        if (activeRectification != null) {
-            RectificationAndIdentityCard(
-                rectification = activeRectification,
-                finalLayout = finalLayout,
-                medianErrorMm = medianErrorMm,
-                frozenBalls = effectiveFrozenBalls,
-                displayedBalls = displayedBallsWithIdentity,
-                candidateNumberOverrides = candidateNumberOverrides,
-                activeReassignCandidateId = activeReassignCandidateId,
-                ballSet = ballSet,
-                onToggleReassignCandidate = { candidateId ->
-                    activeReassignCandidateId = if (activeReassignCandidateId == candidateId) {
-                        null
-                    } else {
-                        candidateId
-                    }
-                },
-                onReassignBallNumber = { candidateId, newNumber ->
-                    candidateNumberOverrides = reassignWithUniqueSwap(
-                        identifiedBalls = activeRectification.identifiedBalls,
-                        currentOverrides = candidateNumberOverrides,
-                        targetCandidateId = candidateId,
-                        newNumber = newNumber,
-                    )
-                    activeReassignCandidateId = null
-                },
-                onResetAllIdentities = {
-                    candidateNumberOverrides = emptyMap()
-                    activeReassignCandidateId = null
-                },
-            )
-        }
-
-        AssumedSurfaceControlCard(
-            title = "Assumed Cloth Roll & Rail Density (Online Photo / Video)",
-            subtitle = "Select an assumed cloth/rail preset or fine-tune roll (μr) and bounce (ec) for uncalibrated photos or broadcast clips.",
-            clothParams = selectedClothParams,
-            presetLabels = PHOTO_SURFACE_PRESET_LABELS,
-            rollStepperTitle = "Cloth Roll (μr)",
-            railStepperTitle = "Rail Density / Bounce (ec)",
-            onUpdateClothParams = { updated -> selectedClothParams = updated },
-        )
-
-        GameTypeConfirmationCard(
-            suggestions = gameSuggestions,
-            selectedVariant = activeVariant,
-            selectedEightBallGroup = activeEightBallGroup,
-            ballSet = ballSet,
-            planningReadiness = planningReadiness,
-            onSelectVariant = { variant ->
-                selectedVariantOverride = variant
-            },
-            onSelectEightBallGroup = { group ->
-                confirmedEightBallGroup = group
-            },
-            canConfirm = activeRectification != null && !isQuadGeometryInvalid &&
-                (planningReadiness.isReady || planningReadiness.missingBallNumbers.isNotEmpty()),
-            onConfirm = {
-                onConfirmScannedLayout(
-                    finalLayout.copy(table = finalLayout.table.withClothParams(selectedClothParams)),
-                    candidateRulesState,
-                )
-            },
-        )
-    }
-}
-
-@Composable
-private fun PhotoCaptureHeaderBar(
-    platformName: String,
-    stripsExifAndGpsInMemory: Boolean,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-            text = "Photo Table Scan",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onBackground,
-        )
-        Text(
-            text = "Capture or load a table frame, refine the 4 cushion corners, review ball IDs, and open directly in the planner.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        // Step Progress Header
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-            ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = platformName,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    text = "Step ${wizardStep.stepNumber} of 3 • ${wizardStep.headline}",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = if (wizardStep == PhotoWizardStep.SOURCE_PICKER) {
+                        "Processed strictly in memory — location tags stripped"
+                    } else {
+                        selectedPhoto.title
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = SuccessGreenColor.copy(alpha = 0.14f),
-                border = BorderStroke(1.dp, SuccessGreenColor.copy(alpha = 0.45f)),
-            ) {
-                val badgeText = if (stripsExifAndGpsInMemory) {
-                    "In-memory processing only (EXIF/GPS stripped)"
-                } else {
-                    "Privacy check pending"
+            if (wizardStep != PhotoWizardStep.SOURCE_PICKER) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (qualityReport.isAcceptable) {
+                        SuccessGreenColor.copy(alpha = 0.14f)
+                    } else {
+                        WarningAmberColor.copy(alpha = 0.16f)
+                    },
+                ) {
+                    Text(
+                        text = if (qualityReport.isAcceptable) "Quality: Good" else "Check Angles",
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (qualityReport.isAcceptable) SuccessGreenColor else WarningAmberColor,
+                    )
                 }
-                Text(
-                    text = badgeText,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = SuccessGreenColor,
+            }
+        }
+
+        when (wizardStep) {
+            PhotoWizardStep.SOURCE_PICKER -> {
+                Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Card)) {
+                    Button(
+                        onClick = {
+                            importError = null
+                            photoPicker.launchCamera()
+                        },
+                        enabled = pendingImportedFrame == null,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp),
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RunoutVectorIcon(
+                                icon = RunoutIcon.CAMERA,
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(22.dp),
+                            )
+                            Text(
+                                text = "Take Table Photo",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            importError = null
+                            photoPicker.launchGallery()
+                        },
+                        enabled = pendingImportedFrame == null,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(54.dp),
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RunoutVectorIcon(
+                                icon = RunoutIcon.GALLERY,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp),
+                            )
+                            Text(
+                                text = "Import From Phone Gallery",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+
+                    if (pendingImportedFrame != null) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = RunoutColors.SurfaceMid),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(RunoutSpacing.Margin),
+                                horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
+                                Text(
+                                    text = "Detecting cushion corners and table balls...",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
+                        }
+                    }
+
+                    if (importError != null) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            color = ErrorRedColor.copy(alpha = 0.14f),
+                            border = BorderStroke(1.dp, ErrorRedColor.copy(alpha = 0.50f)),
+                        ) {
+                            Text(
+                                text = importError.orEmpty(),
+                                modifier = Modifier.padding(RunoutSpacing.Margin),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = ErrorRedColor,
+                            )
+                        }
+                    }
+                }
+
+                // Quick Framing Tips
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.surfaceVariant),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(RunoutSpacing.Margin),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = "Quick Photo Tips",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = "• Stand slightly behind one end so all 4 rail corners show.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            text = "• Hold steady and avoid bright overhead glare on the felt.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+
+                // Collapsed Built-In Samples & Raw Pixel Tester
+                CollapsibleSectionCard(
+                    title = "No table nearby? Try a built-in sample photo",
+                    summary = "Test detection with 4 sample pool layouts",
+                    initiallyExpanded = false,
+                ) {
+                    PresetCaptureBar(
+                        presets = presets,
+                        selectedPresetIndex = selectedPresetIndex,
+                        selectedPhoto = selectedPhoto,
+                        onSelectPreset = { index ->
+                            val chosen = presets[index]
+                            selectedPresetIndex = index
+                            selectedPhoto = cameraController.capturePresetPhoto(chosen.id)
+                            activeBallSet = ballSet
+                            importedImageBitmap = null
+                            wizardStep = PhotoWizardStep.REVIEW_TABLE
+                        },
+                    )
+
+                    if (displayMode == AppDisplayMode.PRO) {
+                        val rawSourcePreset = presets.getOrElse(selectedPresetIndex) { selectedPhoto }
+                        RawPixelFrameDecoderCard(
+                            sourcePreset = rawSourcePreset,
+                            selectedClothCategory = selectedRawClothCategory,
+                            decodeState = rawPixelDecodeState,
+                            isLoadedInPreview = selectedPhoto.id.startsWith("raw_pixel_"),
+                            ballSet = activeBallSet,
+                            onSelectClothCategory = { category ->
+                                selectedRawClothCategory = category
+                            },
+                            onRunPixelDetector = {
+                                val frame = SampleCapturedPhotos.renderPresetAsRawArgbFrame(
+                                    preset = rawSourcePreset,
+                                    clothCategory = selectedRawClothCategory,
+                                    ballSet = activeBallSet,
+                                )
+                                val (summary, rectified) = PhotoCaptureEvaluator.processRawArgbFrame(
+                                    frame = frame,
+                                    tableSpec = rawSourcePreset.tableSpec,
+                                    ballSet = activeBallSet,
+                                )
+                                val pixelMedianErrorMm = PhotoCaptureEvaluator.computeMedianPositionErrorMeters(
+                                    rectified = rectified,
+                                    groundTruth = rawSourcePreset.groundTruthBallPositionsMeters,
+                                ) * METERS_TO_MM
+                                rawPixelDecodeState = RawPixelDecodeState(
+                                    sourcePreset = rawSourcePreset,
+                                    requestedClothCategory = selectedRawClothCategory,
+                                    frame = frame,
+                                    summary = summary,
+                                    rectification = rectified,
+                                    medianErrorMm = pixelMedianErrorMm,
+                                )
+                            },
+                            onUsePixelDetectedLayout = { decoded ->
+                                val widthRatio = decoded.summary.width.toDouble() /
+                                    decoded.sourcePreset.intrinsics.imageWidthPx.toDouble().coerceAtLeast(1.0)
+                                selectedPhoto = CapturedTablePhoto(
+                                    id = "raw_pixel_${decoded.sourcePreset.id}_${decoded.requestedClothCategory.name.lowercase()}",
+                                    title = "${decoded.sourcePreset.title} (640×360 Pixel Decode)",
+                                    subtitle = "Decoded from ARGB pixels • ${decoded.summary.clothSurface.category.displayLabel()}",
+                                    tableSpec = decoded.sourcePreset.tableSpec,
+                                    intrinsics = CameraIntrinsicsSpec(
+                                        focalLengthPx = decoded.sourcePreset.intrinsics.focalLengthPx * widthRatio,
+                                        principalPointPx = Vec2(decoded.summary.width * 0.5, decoded.summary.height * 0.5),
+                                        imageWidthPx = decoded.summary.width,
+                                        imageHeightPx = decoded.summary.height,
+                                    ),
+                                    trueCameraPoseMeters = decoded.rectification.cameraPositionMeters,
+                                    detectedQuadCornersPx = decoded.summary.detectedQuadCornersPx,
+                                    rawDetections = decoded.summary.detectedCandidates,
+                                    groundTruthBallPositionsMeters = decoded.sourcePreset.groundTruthBallPositionsMeters,
+                                    sharpnessScore = decoded.summary.sharpnessScore,
+                                    glareFraction = decoded.summary.glareFraction,
+                                )
+                                importedImageBitmap = decoded.frame.toComposeImageBitmap()
+                                wizardStep = PhotoWizardStep.REVIEW_TABLE
+                            },
+                        )
+                    }
+                }
+            }
+
+            PhotoWizardStep.REVIEW_TABLE -> {
+                InteractiveFramingGuideCard(
+                    photo = selectedPhoto,
+                    sourceImageBitmap = importedImageBitmap,
+                    quadCornersPx = overriddenQuadCornersPx,
+                    activeCornerIndex = activeCornerIndex,
+                    displayedBalls = displayedBallsWithIdentity,
+                    ballSet = activeBallSet,
+                    qualityReport = qualityReport,
+                    isQuadGeometryInvalid = isQuadGeometryInvalid,
+                    onCornersChanged = { updated -> overriddenQuadCornersPx = updated },
+                    onActiveCornerChanged = { idx -> activeCornerIndex = idx },
+                    onResetCorners = {
+                        overriddenQuadCornersPx = selectedPhoto.detectedQuadCornersPx
+                    },
                 )
+
+                if (activeRectification != null) {
+                    RectificationAndIdentityCard(
+                        rectification = activeRectification,
+                        finalLayout = finalLayout,
+                        medianErrorMm = medianErrorMm,
+                        frozenBalls = effectiveFrozenBalls,
+                        displayedBalls = displayedBallsWithIdentity,
+                        candidateNumberOverrides = candidateNumberOverrides,
+                        activeReassignCandidateId = activeReassignCandidateId,
+                        ballSet = activeBallSet,
+                        displayMode = displayMode,
+                        onToggleReassignCandidate = { candidateId ->
+                            activeReassignCandidateId = if (activeReassignCandidateId == candidateId) {
+                                null
+                            } else {
+                                candidateId
+                            }
+                        },
+                        onReassignBallNumber = { candidateId, newNumber ->
+                            candidateNumberOverrides = reassignWithUniqueSwap(
+                                identifiedBalls = activeRectification.identifiedBalls,
+                                currentOverrides = candidateNumberOverrides,
+                                targetCandidateId = candidateId,
+                                newNumber = newNumber,
+                            )
+                            activeReassignCandidateId = null
+                        },
+                        onResetAllIdentities = {
+                            candidateNumberOverrides = emptyMap()
+                            activeReassignCandidateId = null
+                        },
+                    )
+                }
+
+                CollapsibleSectionCard(
+                    title = "Table Speed & Rail Bounce",
+                    summary = PHOTO_SURFACE_PRESET_LABELS[matchingAssumedSurfacePreset(selectedClothParams)] ?: "Custom Surface",
+                    initiallyExpanded = false,
+                ) {
+                    AssumedSurfaceControlCard(
+                        title = "Assumed Cloth Roll & Rail Density",
+                        subtitle = "Adjust cloth roll or cushion bounce if your photo comes from an unfamiliar table.",
+                        clothParams = selectedClothParams,
+                        presetLabels = PHOTO_SURFACE_PRESET_LABELS,
+                        rollStepperTitle = "Cloth Roll (μr)",
+                        railStepperTitle = "Rail Bounce (ec)",
+                        onUpdateClothParams = { updated -> selectedClothParams = updated },
+                    )
+                }
+
+                if (displayMode == AppDisplayMode.PRO || !qualityReport.isAcceptable) {
+                    CollapsibleSectionCard(
+                        title = "Capture Quality & Telemetry",
+                        summary = if (qualityReport.isAcceptable) {
+                            "Sharpness ${(qualityReport.sharpnessScore * 100.0).roundToInt()}% • Glare ${formatDecimal(qualityReport.glareFraction * 100.0, 1)}%"
+                        } else {
+                            qualityReport.warnings.firstOrNull() ?: "Check framing"
+                        },
+                        initiallyExpanded = !qualityReport.isAcceptable,
+                    ) {
+                        CaptureQualityCard(
+                            qualityReport = qualityReport,
+                            photo = selectedPhoto,
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
+                ) {
+                    OutlinedButton(
+                        onClick = { wizardStep = PhotoWizardStep.SOURCE_PICKER },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(52.dp),
+                    ) {
+                        Text("Back", fontWeight = FontWeight.SemiBold)
+                    }
+                    Button(
+                        onClick = { wizardStep = PhotoWizardStep.CONFIRM_GAME },
+                        enabled = activeRectification != null && !isQuadGeometryInvalid,
+                        modifier = Modifier
+                            .weight(2f)
+                            .height(52.dp),
+                    ) {
+                        Text("Next: Confirm Game", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            PhotoWizardStep.CONFIRM_GAME -> {
+                GameTypeConfirmationCard(
+                    suggestions = gameSuggestions,
+                    selectedVariant = activeVariant,
+                    selectedEightBallGroup = activeEightBallGroup,
+                    ballSet = activeBallSet,
+                    planningReadiness = planningReadiness,
+                    onSelectVariant = { variant ->
+                        selectedVariantOverride = variant
+                    },
+                    onSelectEightBallGroup = { group ->
+                        confirmedEightBallGroup = group
+                    },
+                    canConfirm = activeRectification != null && !isQuadGeometryInvalid &&
+                        (planningReadiness.isReady || planningReadiness.missingBallNumbers.isNotEmpty()),
+                    onConfirm = {
+                        onConfirmScannedLayout(
+                            finalLayout.copy(table = finalLayout.table.withClothParams(selectedClothParams)),
+                            candidateRulesState,
+                            activeBallSet,
+                        )
+                    },
+                )
+
+                OutlinedButton(
+                    onClick = { wizardStep = PhotoWizardStep.REVIEW_TABLE },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                ) {
+                    Text("Back to Corners & Balls", fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }
@@ -1117,6 +1349,7 @@ private fun InteractiveFramingGuideCard(
     onCornersChanged: (List<Vec2>) -> Unit,
     onActiveCornerChanged: (Int?) -> Unit,
     onResetCorners: () -> Unit,
+    sourceImageBitmap: ImageBitmap? = null,
 ) {
     val hasCustomCorners = quadCornersPx != photo.detectedQuadCornersPx
     val frameWidthPx = photo.intrinsics.imageWidthPx.toFloat().coerceAtLeast(1f)
@@ -1248,13 +1481,23 @@ private fun InteractiveFramingGuideCard(
                     y = (imagePt.y * scaleY).toFloat(),
                 )
 
-                // 1. Camera sensor backdrop and viewfinder framing guide
+                // 1. Camera sensor backdrop (draw real photo if imported, else schematic reticle)
                 drawRect(color = ViewfinderBackdropColor)
-                drawFramingGuideReticle(
-                    isAcceptable = qualityReport.isAcceptable,
-                    textMeasurer = textMeasurer,
-                    labelFontSp = with(density) { 10.dp.toSp() },
-                )
+                if (sourceImageBitmap != null) {
+                    drawImage(
+                        image = sourceImageBitmap,
+                        dstSize = IntSize(
+                            width = size.width.roundToInt().coerceAtLeast(1),
+                            height = size.height.roundToInt().coerceAtLeast(1),
+                        ),
+                    )
+                } else {
+                    drawFramingGuideReticle(
+                        isAcceptable = qualityReport.isAcceptable,
+                        textMeasurer = textMeasurer,
+                        labelFontSp = with(density) { 10.dp.toSp() },
+                    )
+                }
 
                 // 2. Table surface quadrilateral connecting HL, FL, FR, HR
                 if (quadCornersPx.size == 4) {
@@ -1268,7 +1511,7 @@ private fun InteractiveFramingGuideCard(
                     }
                     drawPath(
                         path = quadPath,
-                        color = Color(0x52137547),
+                        color = if (sourceImageBitmap != null) Color(0x18137547) else Color(0x52137547),
                     )
                     drawPath(
                         path = quadPath,
@@ -1591,6 +1834,7 @@ private fun RectificationAndIdentityCard(
     onToggleReassignCandidate: (Int) -> Unit,
     onReassignBallNumber: (candidateId: Int, newNumber: Int) -> Unit,
     onResetAllIdentities: () -> Unit,
+    displayMode: AppDisplayMode = AppDisplayMode.PRO,
 ) {
     val errorOnTarget = medianErrorMm <= TARGET_MEDIAN_ERROR_MM
     val sortedDisplayed = remember(displayedBalls) {
@@ -1615,7 +1859,11 @@ private fun RectificationAndIdentityCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "3D Rectification, Frozen Balls & Identity Review",
+                    text = if (displayMode == AppDisplayMode.PRO) {
+                        "3D Rectification, Frozen Balls & Identity Review"
+                    } else {
+                        "Detected Table & Balls (${sortedDisplayed.size})"
+                    },
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
@@ -1627,25 +1875,27 @@ private fun RectificationAndIdentityCard(
                 }
             }
 
-            // Camera height + median error metrics
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                QualityMetricTile(
-                    label = "Est. 3D Camera Height",
-                    value = "Z = ${formatDecimal(rectification.cameraPositionMeters.z, 2)} m",
-                    target = "X=${formatDecimal(rectification.cameraPositionMeters.x, 2)} m, Y=${formatDecimal(rectification.cameraPositionMeters.y, 2)} m",
-                    isGood = true,
-                    modifier = Modifier.weight(1f),
-                )
-                QualityMetricTile(
-                    label = "Median Ball-Centre Error",
-                    value = "${formatDecimal(medianErrorMm, 1)} mm",
-                    target = "Target <= ${formatDecimal(TARGET_MEDIAN_ERROR_MM, 1)} mm",
-                    isGood = errorOnTarget,
-                    modifier = Modifier.weight(1f),
-                )
+            if (displayMode == AppDisplayMode.PRO) {
+                // Camera height + median error metrics
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    QualityMetricTile(
+                        label = "Est. 3D Camera Height",
+                        value = "Z = ${formatDecimal(rectification.cameraPositionMeters.z, 2)} m",
+                        target = "X=${formatDecimal(rectification.cameraPositionMeters.x, 2)} m, Y=${formatDecimal(rectification.cameraPositionMeters.y, 2)} m",
+                        isGood = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    QualityMetricTile(
+                        label = "Median Ball-Centre Error",
+                        value = "${formatDecimal(medianErrorMm, 1)} mm",
+                        target = "Target <= ${formatDecimal(TARGET_MEDIAN_ERROR_MM, 1)} mm",
+                        isGood = errorOnTarget,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
 
             // Compact top-down rectified preview
@@ -1657,59 +1907,61 @@ private fun RectificationAndIdentityCard(
                 onMoveBall = null,
             )
 
-            // Frozen balls indicator
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(10.dp),
-                color = if (frozenBalls.isEmpty()) {
-                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                } else {
-                    WarningAmberColor.copy(alpha = 0.12f)
-                },
-                border = BorderStroke(
-                    1.dp,
-                    if (frozenBalls.isEmpty()) {
-                        MaterialTheme.colorScheme.surfaceVariant
+            if (frozenBalls.isNotEmpty() || displayMode == AppDisplayMode.PRO) {
+                // Frozen balls indicator
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (frozenBalls.isEmpty()) {
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
                     } else {
-                        WarningAmberColor.copy(alpha = 0.45f)
+                        WarningAmberColor.copy(alpha = 0.12f)
                     },
-                ),
-            ) {
-                Column(
-                    modifier = Modifier.padding(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        if (frozenBalls.isEmpty()) {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        } else {
+                            WarningAmberColor.copy(alpha = 0.45f)
+                        },
+                    ),
                 ) {
-                    Text(
-                        text = if (frozenBalls.isEmpty()) {
-                            "Frozen Balls: None detected"
-                        } else {
-                            "Frozen Balls Detected (${frozenBalls.size})"
-                        },
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (frozenBalls.isEmpty()) {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        } else {
-                            WarningAmberColor
-                        },
-                    )
-                    frozenBalls.forEach { status ->
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         Text(
-                            text = "• ${formatFrozenBallStatus(status)}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface,
+                            text = if (frozenBalls.isEmpty()) {
+                                "Frozen Balls: None detected"
+                            } else {
+                                "Touching / Cushion Balls (${frozenBalls.size})"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (frozenBalls.isEmpty()) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                WarningAmberColor
+                            },
                         )
+                        frozenBalls.forEach { status ->
+                            Text(
+                                text = "• ${formatFrozenBallStatus(status)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
                     }
                 }
             }
 
-            // Identified balls review list
+            // Identified balls review list (collapsed when nothing needs review in Simple Mode, or directly shown when few/flagged)
             val reviewCount = sortedDisplayed.count { (item, _) -> item.needsUserReview }
             Text(
                 text = if (reviewCount > 0) {
-                    "Identified Balls (${sortedDisplayed.size}) — $reviewCount flagged for review (tap any ball to reassign)"
+                    "Tap any highlighted ball to fix its number ($reviewCount flagged):"
                 } else {
-                    "Identified Balls (${sortedDisplayed.size}) — tap any ball to reassign number"
+                    "Tap any ball below to reassign its number:"
                 },
                 style = MaterialTheme.typography.labelLarge,
                 color = if (reviewCount > 0) WarningAmberColor else MaterialTheme.colorScheme.onSurfaceVariant,

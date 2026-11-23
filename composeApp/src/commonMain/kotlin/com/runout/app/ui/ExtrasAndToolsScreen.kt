@@ -105,6 +105,13 @@ private enum class ToolsSectionFilter(val label: String) {
     METER_AND_SCOREKEEPER("Break Meter & Match Tools"),
 }
 
+enum class ToolFocusDestination {
+    ALL,
+    SNOOKER_COACH,
+    BREAK_METER,
+    SCOREKEEPER_AND_CLOCK,
+}
+
 /**
  * Extras & Practice Coach screen hosting the Snooker Break & Safety Coach,
  * 8-Ball Walkthroughs, Interactive Tutorials & Scored Drill Library with Practice Log,
@@ -115,52 +122,65 @@ fun ExtrasAndToolsScreen(
     playerProfile: PlayerProfile,
     onLoadLayoutIntoPlanner: (TableLayout, GameRulesState) -> Unit,
     modifier: Modifier = Modifier,
+    focusedDestination: ToolFocusDestination = ToolFocusDestination.ALL,
 ) {
-    var activeSection by remember { mutableStateOf(ToolsSectionFilter.ALL) }
+    var activeSection by remember(focusedDestination) {
+        mutableStateOf(
+            when (focusedDestination) {
+                ToolFocusDestination.ALL -> ToolsSectionFilter.ALL
+                ToolFocusDestination.SNOOKER_COACH -> ToolsSectionFilter.SNOOKER_COACH
+                ToolFocusDestination.BREAK_METER,
+                ToolFocusDestination.SCOREKEEPER_AND_CLOCK,
+                -> ToolsSectionFilter.METER_AND_SCOREKEEPER
+            },
+        )
+    }
 
     Column(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = RunoutSpacing.Margin, vertical = RunoutSpacing.Card),
+        verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(
-                text = "Tools & Practice Coach",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-            Text(
-                text = "Snooker break & baulk-safety advisor, 8-Ball walkthroughs, interactive tutorials, scored drills with practice log, acoustic break-speed meter, match scorekeeper, and shot clock.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            ToolsSectionFilter.entries.forEach { section ->
-                val isSelected = activeSection == section
-                FilterChip(
-                    selected = isSelected,
-                    onClick = { activeSection = section },
-                    label = {
-                        Text(
-                            text = section.label,
-                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                        )
-                    },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
-                        selectedLabelColor = MaterialTheme.colorScheme.primary,
-                    ),
+        if (focusedDestination == ToolFocusDestination.ALL) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "Tools & Practice Coach",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground,
                 )
+                Text(
+                    text = "Snooker break & baulk-safety advisor, 8-Ball walkthroughs, interactive tutorials, scored drills with practice log, acoustic break-speed meter, match scorekeeper, and shot clock.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ToolsSectionFilter.entries.forEach { section ->
+                    val isSelected = activeSection == section
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { activeSection = section },
+                        label = {
+                            Text(
+                                text = section.label,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
+                            selectedLabelColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    )
+                }
             }
         }
 
@@ -184,7 +204,7 @@ fun ExtrasAndToolsScreen(
         }
 
         if (activeSection == ToolsSectionFilter.ALL || activeSection == ToolsSectionFilter.METER_AND_SCOREKEEPER) {
-            AcousticBreakAndMatchToolsCard()
+            AcousticBreakAndMatchToolsCard(focusedDestination = focusedDestination)
         }
     }
 }
@@ -1055,7 +1075,9 @@ private fun DrillItemCard(
 }
 
 @Composable
-private fun AcousticBreakAndMatchToolsCard() {
+private fun AcousticBreakAndMatchToolsCard(
+    focusedDestination: ToolFocusDestination = ToolFocusDestination.ALL,
+) {
     val audioController = remember { PlatformBreakAudioController() }
     val breakPresets = remember { TutorialsAndDrillsCatalog.sampleBreakAudioPresets() }
     var selectedPresetIndex by remember { mutableIntStateOf(0) }
@@ -1088,75 +1110,81 @@ private fun AcousticBreakAndMatchToolsCard() {
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // 1. Acoustic Break-Speed Meter
-            BreakSpeedMeterSection(
-                audioBackendName = audioController.audioBackendName,
-                inMemoryOnly = audioController.processesTransientPcmInMemoryOnly,
-                presets = breakPresets,
-                selectedPresetIndex = safePresetIndex,
-                capturedPreset = capturedPreset,
-                analysis = breakAnalysis,
-                onSelectPreset = { selectedPresetIndex = it },
-            )
+            if (focusedDestination == ToolFocusDestination.ALL || focusedDestination == ToolFocusDestination.BREAK_METER) {
+                // 1. Acoustic Break-Speed Meter
+                BreakSpeedMeterSection(
+                    audioBackendName = audioController.audioBackendName,
+                    inMemoryOnly = audioController.processesTransientPcmInMemoryOnly,
+                    presets = breakPresets,
+                    selectedPresetIndex = safePresetIndex,
+                    capturedPreset = capturedPreset,
+                    analysis = breakAnalysis,
+                    onSelectPreset = { selectedPresetIndex = it },
+                )
+            }
 
-            ToolsDivider()
+            if (focusedDestination == ToolFocusDestination.ALL) {
+                ToolsDivider()
+            }
 
-            // 2. Pool Race & Snooker Scorekeeper
-            ScorekeeperSection(
-                raceState = raceState,
-                onUpdateRace = { raceState = it },
-                snookerP1Score = snookerP1Score,
-                snookerP2Score = snookerP2Score,
-                snookerActivePlayer = snookerActivePlayer,
-                snookerCurrentBreak = snookerCurrentBreak,
-                snookerHighBreak = snookerHighBreak,
-                onSelectStriker = { striker ->
-                    if (snookerActivePlayer != striker) {
-                        snookerActivePlayer = striker
+            if (focusedDestination == ToolFocusDestination.ALL || focusedDestination == ToolFocusDestination.SCOREKEEPER_AND_CLOCK) {
+                // 2. Pool Race & Snooker Scorekeeper
+                ScorekeeperSection(
+                    raceState = raceState,
+                    onUpdateRace = { raceState = it },
+                    snookerP1Score = snookerP1Score,
+                    snookerP2Score = snookerP2Score,
+                    snookerActivePlayer = snookerActivePlayer,
+                    snookerCurrentBreak = snookerCurrentBreak,
+                    snookerHighBreak = snookerHighBreak,
+                    onSelectStriker = { striker ->
+                        if (snookerActivePlayer != striker) {
+                            snookerActivePlayer = striker
+                            snookerCurrentBreak = 0
+                        }
+                    },
+                    onPotSnookerPoints = { pts ->
+                        if (snookerActivePlayer == 1) {
+                            snookerP1Score += pts
+                        } else {
+                            snookerP2Score += pts
+                        }
+                        snookerCurrentBreak += pts
+                        if (snookerCurrentBreak > snookerHighBreak) {
+                            snookerHighBreak = snookerCurrentBreak
+                        }
+                    },
+                    onSnookerFoul = {
+                        if (snookerActivePlayer == 1) {
+                            snookerP2Score += 4
+                            snookerActivePlayer = 2
+                        } else {
+                            snookerP1Score += 4
+                            snookerActivePlayer = 1
+                        }
                         snookerCurrentBreak = 0
-                    }
-                },
-                onPotSnookerPoints = { pts ->
-                    if (snookerActivePlayer == 1) {
-                        snookerP1Score += pts
-                    } else {
-                        snookerP2Score += pts
-                    }
-                    snookerCurrentBreak += pts
-                    if (snookerCurrentBreak > snookerHighBreak) {
-                        snookerHighBreak = snookerCurrentBreak
-                    }
-                },
-                onSnookerFoul = {
-                    if (snookerActivePlayer == 1) {
-                        snookerP2Score += 4
-                        snookerActivePlayer = 2
-                    } else {
-                        snookerP1Score += 4
+                    },
+                    onEndSnookerBreak = {
+                        snookerCurrentBreak = 0
+                        snookerActivePlayer = if (snookerActivePlayer == 1) 2 else 1
+                    },
+                    onResetSnookerFrame = {
+                        snookerP1Score = 0
+                        snookerP2Score = 0
                         snookerActivePlayer = 1
-                    }
-                    snookerCurrentBreak = 0
-                },
-                onEndSnookerBreak = {
-                    snookerCurrentBreak = 0
-                    snookerActivePlayer = if (snookerActivePlayer == 1) 2 else 1
-                },
-                onResetSnookerFrame = {
-                    snookerP1Score = 0
-                    snookerP2Score = 0
-                    snookerActivePlayer = 1
-                    snookerCurrentBreak = 0
-                    snookerHighBreak = 0
-                },
-            )
+                        snookerCurrentBreak = 0
+                        snookerHighBreak = 0
+                    },
+                )
 
-            ToolsDivider()
+                ToolsDivider()
 
-            // 3. Shot Clock
-            ShotClockSection(
-                shotClock = shotClock,
-                onUpdateClock = { shotClock = it },
-            )
+                // 3. Shot Clock
+                ShotClockSection(
+                    shotClock = shotClock,
+                    onUpdateClock = { shotClock = it },
+                )
+            }
         }
     }
 }

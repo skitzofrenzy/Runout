@@ -67,12 +67,13 @@ private const val METERS_TO_MM: Double = 1000.0
 
 /**
  * Offline searchable Rules & FAQ browser across 8-Ball, UK 8-Ball (Blackball), 9-Ball, 10-Ball,
- * and Snooker, paired with concrete on-table examples and interactive 8-Ball walkthroughs.
+ * and Snooker, with collapsed accordion rule cards and a shortcut into the interactive 8-Ball guides.
  */
 @Composable
 fun RulesAndFaqScreen(
     modifier: Modifier = Modifier,
     onLoadExampleLayout: ((TableLayout, GameRulesState) -> Unit)? = null,
+    onOpenWalkthroughs: (() -> Unit)? = null,
 ) {
     var query by remember { mutableStateOf("") }
     var selectedGame by remember { mutableStateOf<RulesGame?>(null) }
@@ -81,7 +82,7 @@ fun RulesAndFaqScreen(
         RulesSearchEngine.search(query = query, gameFilter = selectedGame)
     }
     val walkthroughs = remember { TutorialsAndDrillsCatalog.eightBallWalkthroughs() }
-    val showEightBallWalkthroughs = selectedGame == null ||
+    val showWalkthroughShortcut = selectedGame == null ||
         selectedGame == RulesGame.EIGHT_BALL ||
         selectedGame == RulesGame.BLACKBALL
 
@@ -89,30 +90,16 @@ fun RulesAndFaqScreen(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = RunoutSpacing.Margin, vertical = RunoutSpacing.Card),
+        verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                text = "Rules & FAQ",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-            Text(
-                text = "Offline plain-language summaries with synonym search and official rulebook citations.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             label = { Text("Search rules & FAQs") },
-            placeholder = { Text("Try scratch, bih, push out, free ball, safety...") },
+            placeholder = { Text("Try scratch, bih, push out, free ball, kitchen...") },
             trailingIcon = {
                 if (query.isNotEmpty()) {
                     TextButton(onClick = { query = "" }) {
@@ -126,7 +113,7 @@ fun RulesAndFaqScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Element),
         ) {
             FilterChip(
                 selected = selectedGame == null,
@@ -157,7 +144,7 @@ fun RulesAndFaqScreen(
         }
 
         Text(
-            text = "Showing ${matchingEntries.size} ${if (matchingEntries.size == 1) "entry" else "entries"}",
+            text = "Showing ${matchingEntries.size} ${if (matchingEntries.size == 1) "rule" else "rules"} — tap any card to expand",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -172,7 +159,7 @@ fun RulesAndFaqScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(RunoutSpacing.Margin),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
@@ -194,29 +181,50 @@ fun RulesAndFaqScreen(
             }
         }
 
-        if (showEightBallWalkthroughs) {
-            Spacer(modifier = Modifier.height(4.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = "8-Ball Walkthroughs & Interactive Examples",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
-                Text(
-                    text = "Step-by-step on-table decisions showing how 8-Ball rules interact with shot selection, safety play, and cue-ball paths.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            walkthroughs.forEach { walkthrough ->
-                EightBallWalkthroughCard(
-                    walkthrough = walkthrough,
-                    loadButtonLabel = "Load Example on Table",
-                    onLoadClick = onLoadExampleLayout?.let { loader ->
-                        { loader(walkthrough.layout, walkthrough.rulesState) }
-                    },
-                )
+        if (showWalkthroughShortcut) {
+            if (onOpenWalkthroughs != null) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = RunoutColors.SurfaceMid),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(RunoutSpacing.Margin),
+                        verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element),
+                    ) {
+                        Text(
+                            text = "Prefer Visual 8-Ball Walkthroughs?",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = "Step through ${walkthroughs.size} interactive examples with 2D stage diagrams and a 3D frame scrubber in Learn.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            onClick = onOpenWalkthroughs,
+                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                        ) {
+                            Text("Open 8-Ball Walkthroughs", fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            } else {
+                Spacer(modifier = Modifier.height(4.dp))
+                walkthroughs.forEach { walkthrough ->
+                    EightBallWalkthroughCard(
+                        walkthrough = walkthrough,
+                        loadButtonLabel = "Load Example on Table",
+                        onLoadClick = onLoadExampleLayout?.let { loader ->
+                            { loader(walkthrough.layout, walkthrough.rulesState) }
+                        },
+                    )
+                }
             }
         }
 
@@ -237,6 +245,8 @@ fun RulesAndFaqScreen(
 
 @Composable
 private fun RuleEntryCard(entry: RuleEntry) {
+    var expanded by remember(entry.id) { mutableStateOf(false) }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -246,7 +256,8 @@ private fun RuleEntryCard(entry: RuleEntry) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
+                .clickable { expanded = !expanded }
+                .padding(RunoutSpacing.Margin),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(
@@ -254,34 +265,41 @@ private fun RuleEntryCard(entry: RuleEntry) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
-                ) {
-                    Text(
-                        text = entry.game.displayName,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+                    ) {
+                        Text(
+                            text = entry.game.displayName,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                    ) {
+                        Text(
+                            text = entry.category,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                ) {
-                    Text(
-                        text = entry.category,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                RunoutVectorIcon(
+                    icon = if (expanded) RunoutIcon.CHEVRON_UP else RunoutIcon.CHEVRON_DOWN,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
             }
 
             Text(
                 text = entry.title,
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
             )
@@ -293,59 +311,61 @@ private fun RuleEntryCard(entry: RuleEntry) {
                 color = MaterialTheme.colorScheme.tertiary,
             )
 
-            Text(
-                text = entry.plainAnswer,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
+            if (expanded) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                )
 
-            if (entry.exampleScenario.isNotBlank()) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                Text(
+                    text = entry.plainAnswer,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+
+                if (entry.exampleScenario.isNotBlank()) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
                     ) {
-                        Text(
-                            text = "On-Table Example",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Text(
-                            text = entry.exampleScenario,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = "On-Table Example",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                text = entry.exampleScenario,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
                     }
                 }
-            }
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-            )
-
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = "Source: ${entry.officialSourceTitle}",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = "${entry.officialSourceUrl}  •  Checked ${entry.lastCheckedDate}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "Source: ${entry.officialSourceTitle}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "${entry.officialSourceUrl}  •  Checked ${entry.lastCheckedDate}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                    )
+                }
             }
         }
     }

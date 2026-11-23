@@ -48,6 +48,12 @@ data class CapturedTablePhoto(
     val glareFraction: Double,
 )
 
+data class RawPhotoAnalysisBundle(
+    val photo: CapturedTablePhoto,
+    val summary: RawFrameDetectionSummary,
+    val inferredBallSet: BallSetProfile,
+)
+
 /**
  * Capture quality gating, planar homography + 3D ball-height rectification, and accuracy evaluation.
  */
@@ -171,6 +177,53 @@ object PhotoCaptureEvaluator {
             cameraPositionMeters = resolvedPose,
         )
         return summary to rectified
+    }
+
+    /**
+     * Converts a raw [ArgbImageFrame] (from camera capture or gallery import) into a rectified
+     * [CapturedTablePhoto] plus auto-detected corners, ball candidates, and inferred [BallSetProfile].
+     */
+    fun createCapturedPhotoFromRawFrame(
+        id: String,
+        title: String,
+        subtitle: String,
+        frame: ArgbImageFrame,
+        tableSpec: TableSpec = TableSpec.nineFootPool(),
+        baseBallSet: BallSetProfile = BallSetProfile.standardPool(),
+    ): RawPhotoAnalysisBundle {
+        val summary = RawImageTableDetector.analyzeArgbFrame(frame)
+        val (orientedCorners, autoPose) = RawImageTableDetector.orientQuadForHomography(
+            summary.detectedQuadCornersPx,
+            tableSpec,
+        )
+        val inferredBallSet = BallSetProfile.inferFromDetectedColors(
+            summary.detectedCandidates.map { it.dominantColor },
+            baseBallSet,
+        )
+        val intrinsics = CameraIntrinsicsSpec(
+            focalLengthPx = frame.width.toDouble() * 0.9,
+            principalPointPx = Vec2(frame.width * 0.5, frame.height * 0.5),
+            imageWidthPx = frame.width,
+            imageHeightPx = frame.height,
+        )
+        val photo = CapturedTablePhoto(
+            id = id,
+            title = title,
+            subtitle = subtitle,
+            tableSpec = tableSpec,
+            intrinsics = intrinsics,
+            trueCameraPoseMeters = autoPose,
+            detectedQuadCornersPx = orientedCorners,
+            rawDetections = summary.detectedCandidates,
+            groundTruthBallPositionsMeters = emptyMap(),
+            sharpnessScore = summary.sharpnessScore,
+            glareFraction = summary.glareFraction,
+        )
+        return RawPhotoAnalysisBundle(
+            photo = photo,
+            summary = summary,
+            inferredBallSet = inferredBallSet,
+        )
     }
 
     /**

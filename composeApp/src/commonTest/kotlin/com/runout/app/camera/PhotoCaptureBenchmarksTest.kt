@@ -265,6 +265,37 @@ class PhotoCaptureBenchmarksTest {
         )
     }
 
+    @Test
+    fun createCapturedPhotoFromRawFrameBuildsRectifiablePhotoAndInfersBallSet() {
+        val preset = SampleCapturedPhotos.angledNineFootNineBall()
+        val frame = SampleCapturedPhotos.renderPresetAsRawArgbFrame(
+            preset = preset,
+            clothCategory = ClothHueCategory.TOURNAMENT_BLUE,
+        )
+
+        val bundle = PhotoCaptureEvaluator.createCapturedPhotoFromRawFrame(
+            id = "gallery_test_1",
+            title = "Imported 9-Ball Table",
+            subtitle = "From photo library",
+            frame = frame,
+            tableSpec = preset.tableSpec,
+        )
+
+        assertEquals("gallery_test_1", bundle.photo.id)
+        assertEquals(4, bundle.photo.detectedQuadCornersPx.size)
+        assertEquals(preset.groundTruthBallPositionsMeters.size, bundle.photo.rawDetections.size)
+
+        val rectified = PhotoCaptureEvaluator.processCapturedPhoto(
+            photo = bundle.photo,
+            ballSet = bundle.inferredBallSet,
+        )
+        assertEquals(
+            preset.groundTruthBallPositionsMeters.keys,
+            rectified.layout.balls.map { it.number }.toSet(),
+        )
+        assertFalse(rectified.layout.hasOverlappingBalls())
+    }
+
     private fun medianOfSorted(sorted: List<Double>): Double {
         if (sorted.isEmpty()) return 0.0
         val mid = sorted.size / 2
