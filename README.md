@@ -2,13 +2,13 @@
 
 **An open-source pool and snooker trainer for Android and iOS: photo table detection, shot physics, and multi-shot position planning.**
 
-![Status: Milestones 0–5 complete](https://img.shields.io/badge/status-milestones%200%E2%80%935%20complete-brightgreen)
+![Status: Milestones 0–5 built](https://img.shields.io/badge/status-milestones%200%E2%80%935%20built-yellow)
 ![Platform: Android | iOS](https://img.shields.io/badge/platform-Android%20%7C%20iOS-3DDC84)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 Take a photo of the table and confirm the layout. Runout then shows which ball to play next, where to aim, how much speed and spin to use, and where the cue ball should stop to set up the next shots.
 
-> **Status: Milestones 0–5 built, not yet released.** The engine (physics, planner, vision geometry, calibration math, snooker planner) and the Android and iOS app code for all six roadmap milestones exist and are unit-tested (298 engine and 87 app tests). Several device features still run on bundled sample data: the break-speed meter does not open the microphone, table calibration and the tilt check use sample sessions and readings, iOS photo import is not implemented, and only the setup choices persist across restarts (the practice log and saved table profiles are in memory). There is no on-device ML detector and no Xcode project yet. What is and is not done is listed in [`docs/handover.md`](docs/handover.md); the design notes are in [`docs/`](docs/README.md).
+> **Status: Milestones 0–5 built, not yet released.** The engine (physics, planner, vision geometry, calibration math, snooker planner) and the Android and iOS app code for all six roadmap milestones exist and are unit-tested (398 engine and 145 app tests, all passing). Several device features still run on bundled sample data: the break-speed meter does not open the microphone, table calibration and the tilt check use sample sessions and readings, iOS photo import is not implemented, and only the setup choices persist across restarts (the practice log and saved table profiles are in memory). There is no on-device ML detector and no Xcode project yet. Built is not validated: nothing has been run on a physical device since the latest changes, iOS has not been built, and the photo-detection accuracy target of Milestone 2 has not been measured on real photos (it needs a held-out set of real photos; the unit tests use synthetic frames). What is and is not done is listed in [`docs/handover.md`](docs/handover.md); the design notes are in [`docs/`](docs/README.md).
 
 ## Features
 
@@ -21,9 +21,9 @@ Take a photo of the table and confirm the layout. Runout then shows which ball t
 
 ### Strategy
 
-- **Shot order:** plans 2–5 shots ahead, or a full run-out in deep-analysis mode, and walks through the plan one accepted shot at a time.
-- **Make probability:** the chance that an aim error of your skill level still drops the ball, from the pocket's real opening. The skill-level defaults are estimates until you calibrate.
-- **Heat zones:** shows where the cue ball should land to get position on the next 2–3 balls.
+- **Shot order:** plans 1 to 5 shots ahead (3 by default), or in deep-analysis mode as many shots as there are balls, at most six. Beyond the horizon only a one-shot look-ahead values where the cue ball stops. Runout walks through the plan one accepted shot at a time.
+- **Make probability:** the chance that an aim error of your skill level still drops the ball, from the pocket's real opening, and reduced when another ball stands beside the path of the cue ball or the object ball. The skill-level defaults are estimates until you calibrate.
+- **Heat zones:** shows where the cue ball should land to get position on the next ball (the one after it counts for a quarter as much).
 - **Speed and spin advice:** given in your own 1–10 speed scale, based on your stroke profile.
 - **Problem balls:** spots clusters and blocked balls, and suggests how and when to break them up.
 - **No direct pot:** when no ball can be potted, one recommendation: a two-ball combination, a one-rail kick to hit, or a basic safety.
@@ -50,11 +50,11 @@ Take a photo of the table and confirm the layout. Runout then shows which ball t
 | Milestone | Delivers |
 |---|---|
 | 0. Research and engine prototype *(done)* | Design notes, project skeleton, shot geometry and a one-shot planner with tests |
-| 1. MVP *(done)* | Manual table editor, shot lines, basic position play, rules and FAQ, player profile |
-| 2. Photo detection *(done)* | Table and ball detection, game type suggestion, confirm/correct screen |
-| 3. Strategy *(done)* | Spin physics, execution-error model, multi-shot beam planner, heat zones, problem balls |
-| 4. Calibration *(done)* | Video table calibration and table level check: fitting and analysis in the engine, screens on sample data |
-| 5. Extras *(done)* | Snooker break & safety strategy, 8 tutorials, 5 scored drills, practice log, scorekeeper, shot clock, break-speed estimator (sample audio only), UK 8-ball (blackball) & league variants |
+| 1. MVP *(built)* | Manual table editor, shot lines, basic position play, rules and FAQ, player profile |
+| 2. Photo detection *(built; accuracy target not yet measured on real photos)* | Table and ball detection, game type suggestion, confirm/correct screen |
+| 3. Strategy *(built)* | Spin physics, execution-error model, multi-shot beam planner, heat zones, problem balls |
+| 4. Calibration *(built)* | Video table calibration and table level check: fitting and analysis in the engine, screens on sample data |
+| 5. Extras *(built)* | Snooker break & safety strategy, 8 tutorials, 5 scored drills, practice log, scorekeeper, shot clock, break-speed estimator (sample audio only), UK 8-ball (blackball) & league variants |
 
 Details are in [docs/roadmap.md](docs/roadmap.md).
 

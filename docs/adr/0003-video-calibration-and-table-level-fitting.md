@@ -31,16 +31,16 @@ We adopt **Option 1B**, **Option 2B**, and **Option 3B** inside `:engine` (`com.
 
 1. **`VideoBallTracker.kt` (`com.runout.engine.calibration`):**
    - `normalizeFrameBrightness`: Rescales frame luma values to cancel 100/120 Hz lighting flicker.
-   - `trackBallTrajectory`: Runs a 2D `[x, y, vx, vy]` Kalman filter over timestamped `(tSeconds, positionMeters)` frame detections and extracts `TrackedTrajectoryEvent` markers (`SLIDE_TO_ROLL_TRANSITION`, `CUSHION_BOUNCE`, `BALL_STOP`).
+   - `trackBallTrajectory`: Runs a 2D `[x, y, vx, vy]` Kalman filter over timestamped `VideoFrameBallObservation` frame detections (`timestampSeconds`, `rawPositionMeters`) and extracts `TrackedTrajectoryEvent` markers (`TrajectoryEventType.SLIDE_TO_ROLL_TRANSITION`, `CUSHION_BOUNCE`, `BALL_STOP`).
 2. **`TableCalibrationFitter.kt` (`com.runout.engine.calibration`):**
-   - Fits `CalibratedTableParams` ($\mu_r$, $\mu_s$, $e_c$, cushion spin factor, and $\mu_b$) from lag, stun, cushion-rebound, bank-spin, and half-ball cut-throw drill trials using outlier-trimmed least squares, bisection and golden-section searches.
+   - Fits `CalibratedTableParams` (a `ClothParams` with $\mu_r$, $\mu_s$, $e_c$ and cushion friction $f_c$, plus $\mu_b$) from lag, stun, cushion-rebound, bank-spin, and half-ball cut-throw drill trials using outlier-trimmed least squares, bisection and golden-section searches.
    - Provides `evaluateHeldOutPredictionAccuracy` comparing predicted stopping positions and rebound angles on held-out shots between the fitted profile and default `ClothParams()`.
 3. **`TableLevelAndProfiles.kt` (`com.runout.engine.calibration`):**
    - Computes bias-cancelled $0^\circ / 180^\circ$ tilt readings across a $3 \times 3$ table grid (`TableSlopeMap`), refines sub-sensor slope from slow-roll drift (`estimateSlopeFromSlowRoll`), computes slope-adjusted rolling stopping positions (`predictSlowRollWithSlope`), and defines `SavedTableProfile` so players can store and switch between calibrated tables.
 4. **`TiltSensorContract.kt` (`com.runout.app.calibration`) & `CalibrationScreen.kt` (`com.runout.app.ui`):**
-   - `expect`/`actual` `PlatformTiltSensorController` (`SensorManager` on Android, `CMMotionManager` on iOS) plus interactive Compose UI for running calibration drills, inspecting the $3 \times 3$ slope map, and managing saved table profiles.
+   - `expect`/`actual` `PlatformTiltSensorController` (the Android and iOS actuals are named for `SensorManager` and `CMMotionManager`, but currently return the paired readings of bundled sample sessions; live sensor reads are not implemented) plus interactive Compose UI for running calibration drills, inspecting the $3 \times 3$ slope map, and managing saved table profiles.
 
 ## Consequences
 
-- **Verified predictive improvement:** `evaluateHeldOutPredictionAccuracy` quantitatively proves that parameters fitted from noisy calibration sessions reduce held-out shot prediction error by $> 60\%$ compared to uncalibrated defaults.
+- **Predictive improvement on synthetic drills:** `evaluateHeldOutPredictionAccuracy` shows that parameters fitted from noisy trials generated from a known table reduce the held-out stopping-distance error by more than 70 % compared with the uncalibrated defaults (a unit test asserts it). This has not been measured on a real table.
 - **Zero hardware lock-in in tests:** All tracking, fitting, and slope-cancellation math lives in pure KMP `:engine` (`commonMain`) and runs deterministically in JVM unit tests.

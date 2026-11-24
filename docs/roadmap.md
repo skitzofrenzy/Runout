@@ -2,6 +2,8 @@
 
 Milestones are ordered so that each one ships something usable on its own. Sizes are relative (S, M, L, XL) rather than dates, because this is a part-time project.
 
+**Where it stands:** Milestones 0 to 5 are built: the code and its unit tests exist (398 engine and 145 app tests pass). Built is not validated: nothing has been run on a physical device since the latest changes, iOS has not been built, and Milestone 2's accuracy target has not been measured on real photos. The [handover](handover.md) lists what runs on sample data.
+
 ## Milestone 0: Research and engine prototype *(done)* · M
 
 Goal: prove the core maths before building UI.
@@ -15,7 +17,7 @@ Goal: prove the core maths before building UI.
 
 **Done when:** the engine takes a table layout and returns a ranked list of shots with aim lines, covered by unit tests that run in CI.
 
-## Milestone 1: MVP *(done)* · L
+## Milestone 1: MVP *(built)* · L
 
 - Table editor: choose a table size and drag balls into place.
 - Game setup: 8-ball (solids or stripes), 9-ball and 10-ball; drag to match ball colours to numbers.
@@ -26,7 +28,7 @@ Goal: prove the core maths before building UI.
 
 **Done when:** a player can set up a layout by hand and get a sensible shot recommendation with lines.
 
-## Milestone 2: Photo detection *(done)* · L
+## Milestone 2: Photo detection *(built; accuracy target not yet measured)* · L
 
 - Capture screen with a framing guide.
 - Table detection and perspective correction, with draggable corners as a fallback.
@@ -36,18 +38,20 @@ Goal: prove the core maths before building UI.
 
 **Done when** (proposed targets): on a held-out set of real table photos, ball centres are within 1 cm of the true position (median) and photos need no more than one correction on average.
 
-## Milestone 3: Strategy *(done)* · XL
+**Status:** the capture, detection and confirm screens are built and unit-tested on synthetic frames, but this target has not been measured, because no held-out set of real photos exists yet. Far-rail positions from low-angle photos can be 7–9 cm out. The milestone is therefore built, not met.
+
+## Milestone 3: Strategy *(built)* · XL
 
 - Event-based physics with spin effects: throw, squirt, swerve and english off the cushion.
 - An execution-error model built from the player profile.
-- Multi-shot planner: 2–5 shots ahead, plus a deep-analysis mode for full run-outs.
-- Heat zones for the next 2–3 balls.
+- Multi-shot planner: 1–5 shots ahead (3 by default; beyond the horizon a one-shot look-ahead values the cue ball's stop), plus a deep-analysis mode of as many shots as there are balls, at most six.
+- Heat zones for the next ball, with the one after it weighted at a quarter.
 - Problem-ball detection and break-out suggestions.
 - Speed and spin advice in the player's own scale.
 
 **Done when:** in simulated racks with a fixed skill level, the planner runs out measurably more often than a greedy "easiest shot next" baseline.
 
-## Milestone 4: Calibration *(done)* · L
+## Milestone 4: Calibration *(built)* · L
 
 - Overhead video ball tracking and fitting in the engine (the screens run on bundled sample sessions).
 - Calibration drills for cloth speed, cushion rebound, cushion angle and throw.
@@ -56,7 +60,7 @@ Goal: prove the core maths before building UI.
 
 **Done when:** parameters fitted from a calibration session predict held-out shots on the same table better than the defaults.
 
-## Milestone 5: Extras *(done)*
+## Milestone 5: Extras *(built)*
 
 - Snooker strategy: red-to-colour break building with WPBSA colour re-spotting, endgame colour clearance, and baulk-return safety / snooker-deficit scoring.
 - Interactive tutorials and scored drills linked directly into the table planner.

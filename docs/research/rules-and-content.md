@@ -106,7 +106,7 @@ See [ADR-0004](../adr/0004-snooker-break-safety-planner-and-acoustic-break-speed
 ### 5. Assumed Cloth Roll & Rail Density Presets (`TableSpec.kt`, `PhotoCaptureAndConfirmScreen.kt`, `App.kt`)
 
 - **Four `AssumedSurfacePreset` profiles (`TableSpec.kt`):** Provides realistic assumed cloth-roll ($\mu_r$), sliding-friction ($\mu_s$), and rail-bounce ($e_c$) baselines when working from online photos/videos or uncalibrated tables:
-  - `PRO_BROADCAST_FAST` ($\mu_r = 0.0068$, $\mu_s = 0.165$, $e_c = 0.82$): Fast tournament worsted cloth and lively K55 rails.
+  - `PRO_BROADCAST_FAST` ($\mu_r = 0.0068$, $\mu_s = 0.165$, $e_c = 0.82$): Fast tournament worsted cloth and lively tournament-grade cushion rubber.
   - `STANDARD_POOL_HALL` ($\mu_r = 0.0100$, $\mu_s = 0.200$, $e_c = 0.75$): Balanced commercial hall cloth and standard rails.
   - `SLOW_BAR_BOX_HEAVY` ($\mu_r = 0.0145$, $\mu_s = 0.240$, $e_c = 0.66$): Slow napped bar cloth and softer/dead rails.
   - `SNOOKER_DIRECTIONAL` ($\mu_r = 0.0082$, $\mu_s = 0.180$, $e_c = 0.78$): Fine directional snooker cloth and steel-block rails.

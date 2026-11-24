@@ -77,9 +77,9 @@ The repository is structured into two primary Gradle modules plus the thin iOS h
 #### 1. `:engine` (Pure Kotlin Multiplatform domain module)
 
 - **Source sets:**
-  - `commonMain`: Table and pocket geometry, ball state machine, event-based physics simulator (quartic solver, sliding/rolling/spinning transitions, cue strike squirt/swerve, ball–ball throw, Han/Mathavan cushion models), execution-error sampler, expectimax strategy planner, heat-zone evaluator, game rule state machines (8-ball, 9-ball, 10-ball, snooker), and calibration parameter fitting (nonlinear least squares).
-  - `commonTest`: Platform-agnostic unit and property tests (analytic physics invariants such as the 5/7 stun rule and stopping distance $v^2 / (2 \mu_r g)$, pooltool reference comparisons, and planner regression layouts).
-  - `jvmTest`: Currently executes `commonTest` on the JVM via the `jvm()` target for fast desktop/CI feedback; a dedicated `jvmTest` benchmark suite (JMH/Kotlinx-benchmark microbenchmarks verifying the `< 0.1 ms` per-simulation budget) and large-scale self-play validation suites are planned as the engine expands in Milestones 1–3.
+  - `commonMain`: Table and pocket geometry, ball state machine, event-based physics simulator (quartic solver, sliding/rolling/spinning transitions, cue strike squirt/swerve, ball–ball throw, the Han cushion impulse model), execution-error sampler, expectimax strategy planner, heat-zone evaluator, game rule state machines (8-ball, 9-ball, 10-ball, snooker), and calibration parameter fitting (nonlinear least squares).
+  - `commonTest`: Platform-agnostic unit and property tests (analytic physics invariants such as the 5/7 stun rule and stopping distance $v^2 / (2 \mu_r g)$, and planner regression layouts; comparison against the pooltool reference simulator is planned and not done).
+  - `jvmTest`: Executes `commonTest` on the JVM via the `jvm()` target for fast desktop/CI feedback (`PlannerBenchmarkTest` times the planner and runs the self-play comparison with the greedy baseline). A JMH/Kotlinx-benchmark suite verifying the `< 0.1 ms` per-simulation budget, and timings on a phone, are not done.
 - **Constraints:**
   - **Zero UI, Android, or iOS imports.** Depend only on the Kotlin standard library and pure multiplatform math/coroutines utilities (`kotlinx.coroutines` for parallel beam-search workers and cooperative cancellation).
   - **SI units only:** All values inside `:engine` use metres, seconds, radians, and kilograms ([docs/README.md](../README.md#conventions)). Conversion to feet/inches, degrees, or player speed scales (1–10) happens exclusively at the `:composeApp` presentation boundary.
@@ -90,17 +90,17 @@ The repository is structured into two primary Gradle modules plus the thin iOS h
 - **Source sets:**
   - `commonMain`:
     - **UI (Compose Multiplatform):** Interactive 2D table `Canvas` (layout editor, shot paths, ghost ball, landing clouds, heat-zone overlays), camera framing overlay UI, calibration drill screens, rules/FAQ reader, scorekeeper, and shot clock.
-    - **Presentation & state:** Multiplatform ViewModels, navigation, and coroutine orchestration that dispatches `:engine` searches onto background dispatchers (`Dispatchers.Default`) with instant cancellation when the user drags a ball or adjusts spin.
-    - **Storage:** Room KMP with `BundledSQLiteDriver` (Apache-2.0) storing player, table, and ball-set profiles, practice logs, and FTS4/FTS5 full-text indexes for bundled Markdown rule summaries.
-    - **Platform abstractions (`expect` interfaces):** Clean contracts for `CameraCaptureController` (still capture + camera intrinsics + 60–240 fps calibration video frames), `VisionPipeline` (cloth segmentation, rail homography, ball detection/classification), `TiltSensorReader`, and `AudioBreakSpeedDetector`.
+    - **Presentation & state:** Compose state hoisted in `App.kt` (the table state is owned by `TableSession`), navigation in `navigation/`, and coroutine orchestration that dispatches `:engine` searches onto a background dispatcher (`Dispatchers.Default`, for example in `RollingPlanSession`) with a stop hook the UI uses when the person changes the layout. There are no ViewModel classes.
+    - **Storage:** Target design: Room KMP with its bundled SQLite driver (Apache-2.0) storing player, table, and ball-set profiles, practice logs, and FTS4/FTS5 full-text indexes for bundled Markdown rule summaries. Built so far: the setup choices and the accepted terms version go through `SetupPreferencesStore` (`SharedPreferences` on Android, `NSUserDefaults` on iOS); saved table profiles and practice logs are held in memory, and the rules are searched in memory by `RulesSearchEngine`. No database dependency is in the build yet.
+    - **Platform abstractions (`expect` classes):** Clean contracts for the camera (`PlatformCameraController`: still photo and camera intrinsics; `PlatformPhotoPicker`), `PlatformTiltSensorController` and `PlatformBreakAudioController`. Cloth segmentation, rail homography and ball detection run in pure Kotlin in `:engine` (`RawImageTableDetector`, `PerspectiveHomography`, `BallIdentificationAndAssignment`); the planned native vision wrapper (OpenCV and an Apache-2.0 detector) is not built, and neither is 60–240 fps video capture.
   - `androidMain`:
     - Android `Activity` host and permission handling.
-    - `actual` implementations backed by **CameraX / Camera2** (`LENS_INTRINSIC_calibration` for ball-height ray-plane correction, high-speed session for overhead video), **OpenCV Android SDK** (Apache-2.0 / 3-clause BSD), and **LiteRT** (Apache-2.0) with GPU/NNAPI delegate for the Apache-2.0 object detector.
-    - Android `SensorManager` (accelerometer/rotation vector) and `AudioRecord` implementations.
+    - Target `actual` implementations (not built: `PlatformPhotoPicker` currently uses the system camera app through `ActivityResultContracts.TakePicture` and the system photo picker, and `PlatformCameraController` returns bundled sample photos) backed by **CameraX / Camera2** (`LENS_INTRINSIC_calibration` for ball-height ray-plane correction, high-speed session for overhead video), **OpenCV Android SDK** (Apache-2.0 / 3-clause BSD), and **LiteRT** (Apache-2.0) with GPU/NNAPI delegate for the Apache-2.0 object detector.
+    - Target: Android `SensorManager` (accelerometer/rotation vector) and `AudioRecord` implementations. The current tilt and break-audio actuals return bundled sample data and read no sensor and no microphone.
   - `iosMain` (linked into the `iosApp/` host once the Xcode project is generated on macOS):
     - `MainViewController` hosting the Compose Multiplatform UI inside `iosApp/`.
-    - `actual` implementations backed by **AVFoundation** (`AVCaptureSession`, `AVCapturePhotoOutput` with `cameraCalibrationData.intrinsicMatrix` for ball-height correction, high-fps `AVCaptureVideoDataOutput`), **OpenCV iOS framework**, and **LiteRT for iOS / CoreML** running the same Apache-2.0 detector weights.
-    - **CoreMotion** (`CMMotionManager`) for table tilt readings and **AVAudioEngine** for break-speed acoustic timing.
+    - Target `actual` implementations (the iOS sources exist but have not been built or run) backed by **AVFoundation** (`AVCaptureSession`, `AVCapturePhotoOutput` with `cameraCalibrationData.intrinsicMatrix` for ball-height correction, high-fps `AVCaptureVideoDataOutput`), **OpenCV iOS framework**, and **LiteRT for iOS / CoreML** running the same Apache-2.0 detector weights.
+    - Target: **CoreMotion** (`CMMotionManager`) for table tilt readings and **AVAudioEngine** for break-speed acoustic timing; the current iOS tilt and break-audio actuals return bundled sample data.
 
 ```
 +-------------------------------------------------------------------+
@@ -122,6 +122,8 @@ The repository is structured into two primary Gradle modules plus the thin iOS h
 |  commonTest (JVM/iOS): Unit Tests; planned jvmTest Benchmarks     |
 +-------------------------------------------------------------------+
 ```
+
+The diagram shows the target architecture. The bullets above say, per layer, what exists today: the engine and the shared UI are built, while the native camera, vision, sensor, microphone and database layers are still target designs.
 
 ## Consequences
 

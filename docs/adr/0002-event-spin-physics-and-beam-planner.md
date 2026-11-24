@@ -7,9 +7,9 @@
 
 Milestone 3 extends Runout from a 1–2 ball geometric planner into a multi-shot run-out strategy engine that accounts for side and vertical spin (`english`), throw, squirt, swerve, cushion spin rebound, player execution uncertainty, position heat zones, and problem-ball break-outs:
 
-1. **Spin physics vs. runtime budget:** The strategy planner evaluates hundreds of candidate `(targetBall, pocket, speedScale, tipOffset)` combinations per rack state across 2–5 shots ahead. The design target for each candidate evaluation is well under `0.1 ms` on a single core (not measured on a phone; see the amendments for measured planner times) while faithfully capturing squirt, swerve, cut/spin-induced throw, and running/reverse english off the cushions.
+1. **Spin physics vs. runtime budget:** The strategy planner evaluates hundreds of candidate `(targetBall, pocket, speedScale, tipOffset)` combinations per rack state across up to 5 shots ahead (`1..5`, default 3). The design target for each candidate evaluation is well under `0.1 ms` on a single core (not measured on a phone; see the amendments for measured planner times) while faithfully capturing squirt, swerve, cut/spin-induced throw, and running/reverse english off the cushions.
 2. **Uncertainty integration:** Estimating make probability `P(make)` and the cue-ball landing spread requires propagating player execution errors in aim ($\sigma_\phi$), speed ($\sigma_v$), and tip contact ($\sigma_a, \sigma_b$). Unseeded random Monte Carlo introduces test non-determinism and requires 30–100 trials per candidate to converge.
-3. **Multi-shot lookahead & explainability:** Looking 2–5 balls ahead over continuous table coordinates branches exponentially unless pruned, cached on spatial position grids, and paired with explicit problem-ball / insurance-ball detection to produce human-readable tactical explanations.
+3. **Multi-shot lookahead & explainability:** Looking up to 5 balls ahead over continuous table coordinates branches exponentially unless pruned, cached on spatial position grids, and paired with explicit problem-ball / insurance-ball detection to produce human-readable tactical explanations.
 
 ## Options Considered
 
@@ -30,16 +30,16 @@ Milestone 3 extends Runout from a 1–2 ball geometric planner into a multi-shot
 We adopt **Option 1B**, **Option 2B**, and **Option 3B** inside the pure Kotlin Multiplatform `:engine` module (`com.runout.engine.physics` and `com.runout.engine.planner`):
 
 1. **`SpinPhysics.kt` (`com.runout.engine.physics`):**
-   - Models 2D cue-tip offset `TipOffset(sideRatio: Double, verticalRatio: Double, elevationDegrees: Double = 3.0)` clamped to the miscue-safe disk $\sqrt{(a/R)^2 + (b/R)^2} \le 0.50$.
+   - Models 2D cue-tip offset `TipOffset(sideRatio: Double, verticalRatio: Double, elevationRadians: Double)` (cue butt elevation, default about 3°) clamped to the miscue-safe disk $\sqrt{(a/R)^2 + (b/R)^2} \le 0.50$.
    - Computes shaft-dependent **squirt** angle, elevation-dependent **swerve** angle, and speed/friction/spin-dependent **throw** angle (cut-induced + spin-induced), returning a `SpinCompensatedAim` that shifts the ghost-ball aim point so the object ball enters the pocket center after throw and squirt/swerve.
    - Applies the Han (2005) cushion impulse to the ball's full state (velocity, spin about both horizontal axes and about the vertical axis), with cushion restitution, ball-cushion friction and nose height as table parameters; the ball leaves the cushion usually sliding, and the slide on the cloth then sets the line it rolls along (see the amendments below).
 2. **`ExecutionErrorModel.kt` (`com.runout.engine.planner`):**
    - Evaluates a candidate shot across a deterministic sigma-point perturbation ensemble scaled by `PlayerProfile` errors ($\sigma_\phi$, $\sigma_v$, $\sigma_a$, $\sigma_b$) and pocket acceptance windows (narrowed by steep approach angles and high arrival speeds).
-   - Outputs `ShotUncertaintyResult(makeProbability: Double, scratchProbability: Double, landingCloud: List<Vec2>, meanLandingPosition: Vec2, landingSpreadRadiusMeters: Double)`.
+   - Outputs a `ShotUncertaintyResult` (`makeProbability`, `scratchProbability`, the `nominalTrajectory`, the `landingCloud`, `meanLandingPosition` and `landingSpreadRadiusMeters`, with the simulated table state after the shot and whether the nominal stroke pots the target).
 3. **`HeatZoneMap.kt`, `ProblemBallAnalyzer.kt`, and `MultiShotPlanner.kt` (`com.runout.engine.planner`):**
-   - `HeatZoneMap`: Computes a `cols × rows` spatial grid of position values (`0.0..1.0`) for the next 1–3 legal target balls so both the beam search and the Compose `PoolTableCanvas` can query or render heat zones directly.
+   - `HeatZoneMap`: Computes a `cols × rows` spatial grid of position values (`0.0..1.0`) for the next one or two target balls (the second weighted at 0.25) so both the beam search and the Compose `PoolTableCanvas` can query or render heat zones directly.
    - `ProblemBallAnalyzer`: Flags `NO_CLEAR_POCKET`, `CLUSTERED_NEIGHBOURS`, and `FROZEN_TO_RAIL` problem balls, identifies the best open **insurance ball**, and detects candidate shots whose cue-ball path breaks out a problem ball.
-   - `MultiShotPlanner`: Performs expectimax beam search `2..5` shots ahead (plus `deepAnalysis` full-rack mode), produces multi-step `RunoutPlan` sequences with player-scale speed (`1–10`), tip-offset advice, landing clouds, heat zones, and plain-English tactical explanations, and includes `evaluateAgainstGreedyBaseline` to verify higher rack run-out rates than a greedy 1-shot baseline.
+   - `MultiShotPlanner`: Performs expectimax beam search over `horizonShots` shots (`1..5`, default 3; beam width 6), or with `deepAnalysis` as many shots as there are object balls, at most six, with beam width 9. Beyond the horizon only a one-shot look-ahead values the final cue-ball position. It produces multi-step `RunoutPlan` sequences with player-scale speed (`1–10`), tip-offset advice, landing clouds, heat zones, and plain-English tactical explanations, and includes `evaluateAgainstGreedyBaseline` to verify higher rack run-out rates than a greedy 1-shot baseline.
 
 ## Consequences
 
@@ -65,3 +65,10 @@ Option 2B used the sigma-point ensemble for everything, including P(make): a clo
 3. **The leaf looks one shot further.** The value of the last landing of a plan is no longer a static position map but the best next pot times the leave it gives on the ball after it, from a handful of traced strokes, cached per table and cell; in 8-ball problem balls still tied up lower it. Inside the horizon the next ply's real evaluation replaces it, as before.
 
 The beam search itself is unchanged: same plies, same beam widths, same pruning. Measured on the JVM, a 3-shot nine-ball plan takes 84-155 ms against 53-80 ms before on a full rack (runs on a shared machine, wide spread) and an 8-ball plan less (about 160 ms against about 260 ms); the leaf evaluates only the cells the search visits. Before the last ply the search also keeps up to two further cue-ball routes per target-pocket pair, because with near-certain pots a route can only be judged by the shots after it.
+
+## Amendment (2026-11-24): the reported probability, neighbouring balls and stopping the search
+
+- **The reported run-out probability now includes position.** `RunoutPlan.cumulativeRunoutProbability` is the product over the shots of P(make and no scratch), times, for every shot but the last, the share of the next shot's chance that survives the shot's landing cloud (`PlannedShotStep.positionHoldProbability`): P(make 1) × P(position held | made) × P(make 2 | nominal position) × … It used to be the product of makes alone, with the position term only in the ranking value. The ranking value is the same product as before, so the plans chosen do not change.
+- **A ball beside either path narrows the pocket window.** The make probability removes the object-ball directions along which it would touch another ball before the pocket, and the cue lines along which the cue ball would touch one before the object ball; before, only the centre line was checked.
+- **"Full-rack" deep analysis** is as many shots as there are balls, at most six.
+- **The search can be stopped** through an optional `shouldStop` hook and returns the best complete plans found so far; it has no clock and no iterative deepening. Branches whose make probability cannot lift them into the beam are skipped before they are simulated, which leaves the result unchanged; with the neighbouring-ball correction, an open 15-ball 8-ball table plans three shots in roughly half the time it took before.

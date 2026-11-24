@@ -15,11 +15,18 @@ Contact: nexovadigital.info@gmail.com, or the [issue tracker](https://github.com
 
 ## For implementers
 
-These texts are written to be shown in the app. They are drafts until the placeholders `[Proprietor's legal name]` and `[Effective date]` are filled in everywhere they appear.
+These texts are shown in the app and are built in. They are drafts until the placeholders `[Proprietor's legal name]` and `[Effective date]` are filled in everywhere they appear (set in `LegalConfig.kt`). The code is in `composeApp/src/commonMain/kotlin/com/runout/app/legal/`.
+
+### How the app uses them
+
+- **Bundling.** The build task `generateLegalDocuments` copies the terms, the privacy policy, the third-party notices and the two licence texts from this folder into the app (`LegalDocument` lists them), so the installed app carries the same text as the repository. A unit test (`BundledLegalDocumentsMatchSourceTest`) fails if the bundle and the source differ, and it also compares the quoted texts below with `LegalCopy` in `LegalDocuments.kt` character for character: change a quoted text here and in `LegalCopy` together.
+- **Placeholders.** `LegalConfig.applyPlaceholders` fills in the developer name, the effective date and the proprietor's legal name from `LegalConfig`; a value that is unset leaves its bracketed placeholder visible. The task `verifyLegalPlaceholders` stops release builds (`assembleRelease`, `bundleRelease`, `packageRelease`, `packageReleaseBundle` and the release iOS frameworks) while a placeholder would still show; debug builds and tests are not affected.
+- **Terms version.** `LegalConfig.TERMS_VERSION` is the version of the terms people accept. `TermsVersionPinTest` pins it to a hash of `terms-of-use.md`, so a change to the terms fails the test until the version is bumped (which makes the acknowledgement appear again) and the pin is updated.
+- **Reading.** Documents open in the app (`LegalDocumentScreen`, a small Markdown reader in `LegalMarkdown.kt`); relative links between bundled documents open inside the app.
 
 ### First-run acknowledgement
 
-Show it once, before the setup steps, as a full screen or a dialog that cannot be dismissed by tapping outside. The two links open the documents in the app or in the browser. Do not pre-tick or hide the agreement: the person must tap the agree button.
+`TermsAcknowledgementScreen` is a full screen shown once, before the setup steps, until the person agrees to the current terms version; it is not a dialog and cannot be dismissed from outside. The two links open the documents inside the screen, and Back from a document returns to the notice. The agreement is not pre-ticked: the person must tap **I agree**. The accepted version is stored with the setup choices (`SetupPreferencesStore`: `SharedPreferences` on Android, `NSUserDefaults` on iOS), and the screen shows again when `TERMS_VERSION` changes. **Not now** keeps the person on the screen with a short note, because the app cannot be used without agreeing. The privacy policy lists the stored acceptance under "Settings Runout remembers".
 
 > **Before you start**
 >
@@ -27,14 +34,12 @@ Show it once, before the setup steps, as a full screen or a dialog that cannot b
 >
 > By tapping "I agree" you accept the **Terms of Use** and confirm you have read the **Privacy Policy**.
 
-Buttons: **I agree** (primary) and **Not now** (closes the app or returns to the start screen without letting the person continue).
-
-Store the acceptance on the device with the version or effective date of the terms (a new key beside the existing setup preferences) and show the screen again when the terms change materially. When this screen ships, add "that you accepted the Terms of Use, and which version" to the "Settings Runout remembers" list in the [privacy policy](privacy-policy.md).
+The buttons are **I agree** (primary) and **Not now**; the quoted text above is the screen's text.
 
 ### About / Legal summary
 
-Place this on an "About" or "Legal" screen with links to the four documents and the licence texts.
+`AboutLegalScreen` ("About & Legal" in the side menu) shows this summary at the top (with the placeholders filled in from `LegalConfig`) and a list that opens each of the five bundled documents: the terms of use, the privacy policy, the third-party notices and the two licence texts. Back from a document returns to this screen.
 
 > Runout is a free training aid made by Nexova Digital and published as open source under the MIT License. Its shot lines, speeds and plans are estimates and come with no guarantee, so check anything it shows you before you rely on it. Runout does not collect your information: nothing leaves your device and there are no accounts, adverts or analytics. Rules summaries are original summaries, not the official rules. Runout is not affiliated with any governing body, league, tour or equipment maker. Read the Terms of Use, Privacy Policy and Third-party notices from the links below. Questions: nexovadigital.info@gmail.com.
 
-Also bundle the text of [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt) and [licenses/BSD-3-Clause-Skia.txt](licenses/BSD-3-Clause-Skia.txt) in the app, so that a copy of each licence travels with the installed app, and make the privacy policy reachable from inside the app.
+The text of [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt) and [licenses/BSD-3-Clause-Skia.txt](licenses/BSD-3-Clause-Skia.txt) is bundled, so a copy of each licence travels with the installed app, and the privacy policy is reachable from inside the app (from the acknowledgement screen and from About & Legal).

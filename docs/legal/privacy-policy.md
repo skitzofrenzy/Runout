@@ -28,7 +28,7 @@ Runout can start from a photo of a pool or snooker table.
 
 - You take the photo with your phone's own camera app, or you choose an existing picture with the system photo picker. Runout does not ask for camera or photo-library permission.
 - Runout reads the picture's orientation so that it appears the right way up. It does not read or keep the location or any other details stored in the picture.
-- The picture is analysed in the phone's memory to find the table and the balls. The temporary copy made for a new camera photo is deleted straight afterwards. Runout does not save, copy or share your pictures.
+- The picture is analysed in the phone's memory to find the table and the balls. The temporary copy made for a new camera photo is deleted as soon as it has been read; anything left behind by an interrupted capture is removed the next time the photo screen opens. Runout does not save, copy or share your pictures.
 - Runout does not try to recognise people. A photo may still show people in the background, so you may prefer to avoid including them.
 
 ### Settings Runout remembers
@@ -39,7 +39,7 @@ These choices are not linked to your name or to any account, and the developer c
 
 ### Other things Runout uses, without storing them
 
-- **Tilt sensor.** Runout can read your phone's tilt sensor to help check whether a table is level. This needs no permission, and the readings are used on screen and are not saved or shared.
+- **Tilt sensor and microphone.** In this version Runout does not read your phone's tilt sensor or its microphone. The table level check and the break-speed meter use built-in sample data.
 - **Everything else you enter.** Table layouts, drill scores, the scorekeeper, the shot clock and similar tools run on your device. Today they are not saved by Runout after you close it, and nothing is sent anywhere.
 
 ### Permissions

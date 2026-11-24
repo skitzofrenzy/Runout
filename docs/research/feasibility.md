@@ -18,7 +18,7 @@ How hard each feature is, the main risk, and how to reduce it.
 | Spin effects on the lines | Moderate | Effects vary with cue, cloth and balls | Physics model with parameters that can be calibrated ([physics](physics.md)) |
 | Ball detection from a photo | Moderate | Lighting, glare, occlusion, low camera angles; solids vs stripes | Trained detector, framing guide, confirm/correct screen ([computer vision](computer-vision.md)) |
 | Game type suggestion | Moderate | Mid-game layouts are ambiguous | Ranked suggestions; the player always confirms |
-| Strategy 2–3 shots ahead, heat zones | Hard | Compute time on a phone | Pruned search and cached position maps ([strategy engine](strategy-engine.md)) |
+| Strategy 1–5 shots ahead (3 by default), heat zones | Hard | Compute time on a phone | Pruned search and cached position maps ([strategy engine](strategy-engine.md)) |
 | Strategy 5+ shots ahead or a full run-out | Hard | The search grows exponentially | Beam search with a time budget in a deep-analysis mode |
 | Problem balls and break-outs | Hard | Cluster outcomes are chaotic | Simulate break-outs many times; heuristics for timing |
 | Snooker strategy | Very hard | Safety play dominates; many balls | Last milestone; shot lines and rules come first |
