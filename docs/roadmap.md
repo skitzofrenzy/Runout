@@ -49,10 +49,10 @@ Goal: prove the core maths before building UI.
 
 ## Milestone 4: Calibration *(done)* · L
 
-- Overhead video mode with ball tracking.
+- Overhead video ball tracking and fitting in the engine (the screens run on bundled sample sessions).
 - Calibration drills for cloth speed, cushion rebound, cushion angle and throw.
 - Table level check with the tilt sensor, and a slow-roll test.
-- Saved table profiles.
+- Saved table profiles (held in memory for now).
 
 **Done when:** parameters fitted from a calibration session predict held-out shots on the same table better than the defaults.
 
@@ -60,10 +60,10 @@ Goal: prove the core maths before building UI.
 
 - Snooker strategy: red-to-colour break building with WPBSA colour re-spotting, endgame colour clearance, and baulk-return safety / snooker-deficit scoring.
 - Interactive tutorials and scored drills linked directly into the table planner.
-- Tools: pool race and snooker scorekeeper, shot clock with per-rack extensions, practice log, and transient in-memory acoustic break speed from the microphone.
+- Tools: pool race and snooker scorekeeper, shot clock with per-rack extensions, practice log, and an acoustic break-speed estimator (the screen runs on sample audio; live microphone capture is not implemented).
 - Rule variants: UK eight-ball (blackball) and WPA/BCAPL vs. APA/bar-rule comparisons.
 
-**Done when:** a player can evaluate snooker break and safety lines, launch interactive tutorials or scored drills directly on the table planner, track scores, shot clock, and drill logs offline, and measure break speed from transient audio envelopes.
+**Done when:** a player can evaluate snooker break and safety lines, launch interactive tutorials or scored drills directly on the table planner, track scores, shot clock, and drill logs offline, and estimate break speed from audio envelopes (sample audio for now).
 
 ## Not planned for now
 

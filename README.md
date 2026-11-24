@@ -8,35 +8,37 @@
 
 Take a photo of the table and confirm the layout. Runout then shows which ball to play next, where to aim, how much speed and spin to use, and where the cue ball should stop to set up the next shots.
 
-> **Status: Milestones 0–5 complete.** All six roadmap milestones are built in `:engine` and `:composeApp`: SI shot geometry, analytic cue-ball physics, closed-form spin physics (squirt, swerve, cut/spin throw, and english cushion rebound), deterministic sigma-point execution-error modelling, multi-shot expectimax beam-search planning (2–5 shots + deep run-out mode), spatial position heat zones, problem-ball and breakout analysis, an interactive table editor with 2D cue-tip control and landing-cloud overlays, photo rectification with 3D ball-height correction, player/ball-set profiles, an offline searchable rules & FAQ library (including UK 8-Ball Blackball and APA/BCAPL rule comparisons), overhead video luma normalization and 2D Kalman ball tracking, 5-drill table parameter fitting ($\mu_r, \mu_s, e_c, k_{\text{spin}}, \mu_b$) with held-out shot validation, $0^\circ / 180^\circ$ bias-cancelled tilt-sensor and slow-roll level mapping, saved table profiles, WPBSA Snooker break-building and baulk-return safety planning, transient acoustic break-speed estimation, interactive tutorials and scored practice drills with a session log, and a match scorekeeper and shot clock. See [`docs/`](docs/README.md), [`ADR-0002`](docs/adr/0002-event-spin-physics-and-beam-planner.md), [`ADR-0003`](docs/adr/0003-video-calibration-and-table-level-fitting.md), [`ADR-0004`](docs/adr/0004-snooker-break-safety-planner-and-acoustic-break-speed.md), and [`docs/handover.md`](docs/handover.md).
+> **Status: Milestones 0–5 built, not yet released.** The engine (physics, planner, vision geometry, calibration math, snooker planner) and the Android and iOS app code for all six roadmap milestones exist and are unit-tested (298 engine and 87 app tests). Several device features still run on bundled sample data: the break-speed meter does not open the microphone, table calibration and the tilt check use sample sessions and readings, iOS photo import is not implemented, and only the setup choices persist across restarts (the practice log and saved table profiles are in memory). There is no on-device ML detector and no Xcode project yet. What is and is not done is listed in [`docs/handover.md`](docs/handover.md); the design notes are in [`docs/`](docs/README.md).
 
-## Planned features
+## Features
 
 ### Table and shot analysis
 
-- **Photo to layout:** detect the table and balls from a photo, then confirm or correct them on screen.
+- **Photo to layout:** pick or take a photo (Android), and Runout fits the table box to the cushion noses and finds the balls with classical pixel processing; you confirm or correct the layout on screen. Accuracy on low camera angles is limited. iOS photo import is not implemented yet.
 - **Game type detection:** suggests 8-ball, 9-ball, 10-ball or snooker from the balls on the table; you always confirm.
 - **Ball setup:** choose solids or stripes, or drag to match your ball set's colours to numbers for 9-ball and 10-ball.
-- **Shot lines:** aim line, cut angle, cue ball path and banks, adjusted for spin (throw, squirt and swerve).
+- **Shot lines:** aim line, ghost ball, cut angle, cue ball path and banks, adjusted for spin (throw, squirt and swerve). Every ball carries velocity and spin, so the cue ball's curve after contact, rail rebounds and pocket jaws come from one physics model. Tap a point on the cue-ball line to see what happens there.
 
 ### Strategy
 
-- **Shot order:** plans 2–5 shots ahead, or a full run-out in deep-analysis mode.
+- **Shot order:** plans 2–5 shots ahead, or a full run-out in deep-analysis mode, and walks through the plan one accepted shot at a time.
+- **Make probability:** the chance that an aim error of your skill level still drops the ball, from the pocket's real opening. The skill-level defaults are estimates until you calibrate.
 - **Heat zones:** shows where the cue ball should land to get position on the next 2–3 balls.
-- **Speed and spin advice:** given in your own scale, based on your stroke profile.
+- **Speed and spin advice:** given in your own 1–10 speed scale, based on your stroke profile.
 - **Problem balls:** spots clusters and blocked balls, and suggests how and when to break them up.
+- **No direct pot:** when no ball can be potted, one recommendation: a two-ball combination, a one-rail kick to hit, or a basic safety.
 
 ### Calibration
 
-- **Player profile:** a short questionnaire or calibration drills set your personal speed and spin scales.
-- **Table calibration:** record practice shots on video and Runout estimates cloth speed and cushion rebound.
-- **Table level (advanced):** check for an uneven table with the phone's tilt sensor and slow-roll tests.
+- **Player profile:** a short questionnaire sets your skill level, cue type and speed scale.
+- **Table calibration:** the fitting math for cloth speed, cushion rebound and throw from overhead video is implemented; the screen currently runs on bundled sample sessions, not recorded video.
+- **Table level (advanced):** the tilt-sensor and slow-roll analysis is implemented; the screen uses sample readings, not the phone's sensor.
 
 ### Learning and tools
 
-- **Rules and FAQ:** searchable, offline rules for 8-ball (WPA/BCAPL, APA, and bar-rule comparisons), UK 8-ball (blackball), 9-ball, 10-ball, and snooker.
+- **Rules and FAQ:** searchable, offline summaries (original text, not the official rules) for 8-ball (WPA/BCAPL, APA, and bar-rule comparisons), UK 8-ball (blackball), 9-ball, 10-ball, and snooker.
 - **Tutorials and drills:** 8 guided tutorials (aiming, stance, speed control, spin/throw, 90°/30° rules, pattern play, safeties, break) and 5 scored drills that load directly onto the table planner.
-- **Practice tools:** pool race and snooker scorekeeper, shot clock with per-rack extensions, practice log, and transient in-memory acoustic break-speed meter.
+- **Practice tools:** pool race and snooker scorekeeper, shot clock with per-rack extensions, and a practice log (kept in memory for the session). The break-speed meter has its estimator and screen, but runs on sample audio; microphone capture is not implemented.
 
 ## Games
 
@@ -51,23 +53,25 @@ Take a photo of the table and confirm the layout. Runout then shows which ball t
 | 1. MVP *(done)* | Manual table editor, shot lines, basic position play, rules and FAQ, player profile |
 | 2. Photo detection *(done)* | Table and ball detection, game type suggestion, confirm/correct screen |
 | 3. Strategy *(done)* | Spin physics, execution-error model, multi-shot beam planner, heat zones, problem balls |
-| 4. Calibration *(done)* | Video table calibration, table level check |
-| 5. Extras *(done)* | Snooker break & safety strategy, 8 tutorials, 5 scored drills, practice log, scorekeeper, shot clock, acoustic break-speed meter, UK 8-ball (blackball) & league variants |
+| 4. Calibration *(done)* | Video table calibration and table level check: fitting and analysis in the engine, screens on sample data |
+| 5. Extras *(done)* | Snooker break & safety strategy, 8 tutorials, 5 scored drills, practice log, scorekeeper, shot clock, break-speed estimator (sample audio only), UK 8-ball (blackball) & league variants |
 
 Details are in [docs/roadmap.md](docs/roadmap.md).
 
-## Planned tech stack
+## Tech stack
+
+Items marked *planned* are not in the project yet.
 
 | Area | Choice |
 |---|---|
 | App and UI | Kotlin Multiplatform (KMP), Compose Multiplatform (Android and iOS) |
-| Camera | CameraX / Camera2 (Android), AVFoundation (iOS) |
-| Table detection | OpenCV (Android and iOS) |
-| Ball detection | An Apache-2.0 object detector (YOLOX or EfficientDet-Lite) running on the phone with LiteRT (Android) and CoreML / LiteRT (iOS) |
+| Camera | Android photo picker and camera capture; AVFoundation on iOS *(planned)* |
+| Table and ball detection | Classical pixel processing in the engine (HSV cloth segmentation, cushion-nose fitting, ball blobs); OpenCV *(planned)* |
+| Ball detection model | An Apache-2.0 object detector (YOLOX or EfficientDet-Lite) on LiteRT (Android) and CoreML / LiteRT (iOS) *(planned)* |
 | Physics and planner | A pure Kotlin Multiplatform `engine` module (`commonMain`), unit-tested on the JVM; C++ only if profiling shows it's needed |
-| Storage | Room KMP (SQLite), with full-text search for the rules |
+| Storage | Setup choices in `SharedPreferences` / `NSUserDefaults`; Room KMP (SQLite) for the rest *(planned)* |
 
-See [ADR-0001](docs/adr/0001-cross-platform-kmp-compose.md) for why Kotlin Multiplatform and Compose Multiplatform were chosen over Flutter and separate native apps. Everything is planned to run on the phone, with no account or internet connection needed.
+See [ADR-0001](docs/adr/0001-cross-platform-kmp-compose.md) for why Kotlin Multiplatform and Compose Multiplatform were chosen over Flutter and separate native apps. Everything runs on the phone, with no account or internet connection needed.
 
 ## Documentation
 
@@ -94,3 +98,5 @@ The physics notes build on published work by Dr. Dave Alciatore and others, and 
 ## License
 
 [MIT](LICENSE) © 2026 skitzofrenzy
+
+Terms of use, privacy policy and third-party notices: [docs/legal](docs/legal/README.md).

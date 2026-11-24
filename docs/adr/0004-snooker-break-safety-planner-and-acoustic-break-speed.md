@@ -27,9 +27,9 @@ We implement Milestone 5 across `:engine` (`com.runout.engine.snooker` and `com.
    - Corrects raw time-of-flight $\Delta t_{\text{audio}}$ for microphone acoustic travel-time differential $\Delta t_{\text{flight}} = \Delta t_{\text{audio}} - \frac{d_{\text{mic,rack}} - d_{\text{mic,cue}}}{c_{\text{sound}}}$ ($c_{\text{sound}} = 343.0\text{ m/s}$), and adds the sliding-friction speed loss $\frac{1}{2} \mu_s g \Delta t_{\text{flight}}$ over travel distance $D$ (`estimateBreakSpeed`):
      $$v_0 = \frac{D}{\Delta t_{\text{flight}}} + \frac{1}{2} \mu_s g \, \Delta t_{\text{flight}}$$
 3. **`PracticeToolsContract.kt` (`com.runout.app.tools`), `TutorialsAndDrills.kt`, & `RulesContent.kt`:**
-   - Adds `expect`/`actual` `PlatformBreakAudioController` (in-memory PCM only, zero audio file persistence), `MatchScorekeeperState` (Pool races + Snooker scoreboard), `ShotClockState` (with extension tracking), `PracticeLogStore`, interactive tutorials & drills that load directly into `Table & Planner`, and `RulesGame.BLACKBALL` (UK 8-Ball) + APA/BCAPL rule comparisons.
+   - Adds `expect`/`actual` `PlatformBreakAudioController` (designed for in-memory PCM only, with no audio files; the current implementations return bundled sample presets and do not open a microphone), `MatchScorekeeperState` (Pool races + Snooker scoreboard), `ShotClockState` (with extension tracking), `PracticeLogStore`, interactive tutorials & drills that load directly into `Table & Planner`, and `RulesGame.BLACKBALL` (UK 8-Ball) + APA/BCAPL rule comparisons.
 
 ## Consequences
 
 - **Complete Roadmap Coverage (Milestones 0–5):** Every milestone in `docs/roadmap.md` is implemented in pure KMP `:engine` and `:composeApp` with deterministic JVM unit tests.
-- **Privacy & Offline Guarantee Preserved:** Microphone break-speed analysis operates strictly on transient PCM buffers in memory without recording or saving voice/audio files.
+- **Privacy & Offline Guarantee Preserved:** Microphone break-speed analysis is designed to operate strictly on transient PCM buffers in memory without recording or saving voice/audio files.

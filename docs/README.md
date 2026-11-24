@@ -8,6 +8,7 @@ Design notes and research for Runout. Nothing here is final: the notes change as
 - [Design guide](design_guide.md): UX/UI architecture, onboarding, navigation, progressive disclosure (`Simple` vs. `Pro`), visual tokens, and screen blueprints.
 - [Roadmap](roadmap.md): milestones, what each one delivers, and what is not planned.
 - [ADR-0001: Cross-platform KMP and Compose Multiplatform](adr/0001-cross-platform-kmp-compose.md): why Runout uses Kotlin Multiplatform and Compose Multiplatform for Android and iOS.
+- [Legal documents](legal/README.md): terms of use, privacy policy, third-party notices and the store-form checklist.
 
 ## Research
 
