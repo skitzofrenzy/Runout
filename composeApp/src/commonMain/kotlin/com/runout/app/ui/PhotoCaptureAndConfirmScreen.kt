@@ -86,6 +86,7 @@ import com.runout.engine.model.EightBallGroup
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
 import com.runout.engine.model.TableLayout
+import com.runout.engine.model.TableSpec
 import com.runout.engine.planner.PlanningReadinessResult
 import com.runout.engine.planner.PlanningReadinessValidator
 import com.runout.engine.vision.ArgbImageFrame
@@ -100,6 +101,7 @@ import com.runout.engine.vision.GameTypeSuggestion
 import com.runout.engine.vision.IdentifiedBallResult
 import com.runout.engine.vision.PerspectiveHomography
 import com.runout.engine.vision.RawFrameDetectionSummary
+import com.runout.engine.vision.RawImageTableDetector
 import com.runout.engine.vision.VisionRectificationResult
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -107,6 +109,7 @@ import kotlin.math.max
 import kotlin.math.round
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 private const val METERS_TO_MM: Double = 1000.0
@@ -169,6 +172,7 @@ fun PhotoCaptureAndConfirmScreen(
     onConfirmScannedLayout: (TableLayout, GameRulesState, BallSetProfile) -> Unit,
     modifier: Modifier = Modifier,
     displayMode: AppDisplayMode = AppDisplayMode.SIMPLE,
+    defaultTableSpec: TableSpec = TableSpec.nineFootPool(),
 ) {
     val cameraController = remember { PlatformCameraController() }
     val presets = remember { SampleCapturedPhotos.allPresets() }
@@ -180,6 +184,7 @@ fun PhotoCaptureAndConfirmScreen(
     }
     var wizardStep by remember { mutableStateOf(PhotoWizardStep.SOURCE_PICKER) }
     var importedImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    var importedRawFrame by remember { mutableStateOf<ArgbImageFrame?>(null) }
     var pendingImportedFrame by remember { mutableStateOf<ImportedPhotoFrame?>(null) }
     var importError by remember { mutableStateOf<String?>(null) }
     var activeBallSet by remember(ballSet) { mutableStateOf(ballSet) }
@@ -196,7 +201,7 @@ fun PhotoCaptureAndConfirmScreen(
         },
     )
 
-    LaunchedEffect(pendingImportedFrame, ballSet) {
+    LaunchedEffect(pendingImportedFrame, ballSet, defaultTableSpec) {
         val imported = pendingImportedFrame ?: return@LaunchedEffect
         val outcome = runCatching {
             withContext(Dispatchers.Default) {
@@ -205,7 +210,7 @@ fun PhotoCaptureAndConfirmScreen(
                     title = imported.title,
                     subtitle = imported.subtitle,
                     frame = imported.frame,
-                    tableSpec = selectedPhoto.tableSpec,
+                    tableSpec = defaultTableSpec,
                     baseBallSet = ballSet,
                 )
                 val previewBitmap = imported.frame.toComposeImageBitmap()
@@ -215,6 +220,7 @@ fun PhotoCaptureAndConfirmScreen(
         outcome.fold(
             onSuccess = { (bundle, previewBitmap) ->
                 importedImageBitmap = previewBitmap
+                importedRawFrame = imported.frame
                 selectedPhoto = bundle.photo
                 activeBallSet = bundle.inferredBallSet
                 importError = null
@@ -230,6 +236,27 @@ fun PhotoCaptureAndConfirmScreen(
 
     var overriddenQuadCornersPx by remember(selectedPhoto.id) {
         mutableStateOf(selectedPhoto.detectedQuadCornersPx)
+    }
+
+    LaunchedEffect(importedRawFrame, overriddenQuadCornersPx, selectedPhoto.id) {
+        val frame = importedRawFrame ?: return@LaunchedEffect
+        if (overriddenQuadCornersPx.size != 4) return@LaunchedEffect
+        if (overriddenQuadCornersPx == selectedPhoto.detectedQuadCornersPx) return@LaunchedEffect
+        delay(220)
+        val canonicalQuad = canonicalizeQuadTopLeftClockwise(overriddenQuadCornersPx)
+        val summary = withContext(Dispatchers.Default) {
+            runCatching {
+                RawImageTableDetector.analyzeArgbFrame(
+                    frame = frame,
+                    quadOverridePx = canonicalQuad,
+                )
+            }.getOrNull()
+        } ?: return@LaunchedEffect
+        selectedPhoto = selectedPhoto.copy(rawDetections = summary.detectedCandidates)
+        activeBallSet = BallSetProfile.inferFromDetectedColors(
+            summary.detectedCandidates.map { it.dominantColor },
+            ballSet,
+        )
     }
     var candidateNumberOverrides by remember(selectedPhoto.id) {
         mutableStateOf<Map<Int, Int>>(emptyMap())
@@ -559,6 +586,7 @@ fun PhotoCaptureAndConfirmScreen(
                             selectedPhoto = cameraController.capturePresetPhoto(chosen.id)
                             activeBallSet = ballSet
                             importedImageBitmap = null
+                            importedRawFrame = null
                             wizardStep = PhotoWizardStep.REVIEW_TABLE
                         },
                     )
@@ -620,6 +648,7 @@ fun PhotoCaptureAndConfirmScreen(
                                     glareFraction = decoded.summary.glareFraction,
                                 )
                                 importedImageBitmap = decoded.frame.toComposeImageBitmap()
+                                importedRawFrame = decoded.frame
                                 wizardStep = PhotoWizardStep.REVIEW_TABLE
                             },
                         )
@@ -2746,6 +2775,14 @@ private fun railBounceLabel(ec: Double): String = when {
     ec < 0.70 -> "Soft/Dead"
     ec <= 0.78 -> "Standard"
     else -> "Lively"
+}
+
+private fun canonicalizeQuadTopLeftClockwise(corners: List<Vec2>): List<Vec2> {
+    if (corners.size != 4) return corners
+    val byY = corners.sortedBy { it.y }
+    val topPair = byY.take(2).sortedBy { it.x }
+    val bottomPair = byY.drop(2).sortedBy { it.x }
+    return listOf(topPair[0], topPair[1], bottomPair[1], bottomPair[0])
 }
 
 private fun roundToDecimals(value: Double, decimals: Int): Double {

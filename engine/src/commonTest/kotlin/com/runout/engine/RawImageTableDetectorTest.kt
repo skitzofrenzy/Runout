@@ -460,4 +460,92 @@ class RawImageTableDetectorTest {
         assertTrue(tracked.points.isEmpty())
         assertTrue(tracked.events.isEmpty())
     }
+
+    @Test
+    fun brightNeutralGreyClothWithWarmWoodRailsDetectsAllNineWntBalls() {
+        val w = 640
+        val h = 520
+        val rawQuad = listOf(
+            Vec2(145.0, 155.0),
+            Vec2(455.0, 155.0),
+            Vec2(560.0, 475.0),
+            Vec2(55.0, 475.0),
+        )
+        val wntBalls = listOf(
+            ball(0, 0.95, 0.28),
+            ball(2, 2.02, 1.02),
+            ball(3, 1.84, 0.98),
+            ball(4, 0.72, 0.88),
+            ball(5, 2.32, 0.48),
+            ball(6, 0.56, 0.82),
+            ball(7, 2.28, 0.84),
+            ball(8, 0.76, 1.06),
+            ball(9, 1.98, 0.64),
+        )
+        val layout = TableLayout(table, wntBalls)
+        val (orientedQuad, endCamera) = RawImageTableDetector.orientQuadForHomography(rawQuad, table)
+        val homography = PerspectiveHomography.fromTableQuad(orientedQuad, table)
+
+        // Start from warm beige wood rails (~S=0.11, V=0.88) and bright Shark Grey cloth (~S=0.03, V=0.81).
+        val pixels = IntArray(w * h) { idx ->
+            val x = idx % w
+            val y = idx / w
+            if (RawImageTableDetector.pointInQuad(x.toDouble(), y.toDouble(), rawQuad)) {
+                0xFFD0CCD0.toInt()
+            } else {
+                0xFFE2D1C9.toInt()
+            }
+        }
+
+        val ballSet = BallSetProfile.wntTournamentBlackPool()
+        val paletteArgb = mapOf(
+            com.runout.engine.model.BallPaletteColor.WHITE to 0xFFFBFBFB.toInt(),
+            com.runout.engine.model.BallPaletteColor.YELLOW to 0xFFF0DC1E.toInt(),
+            com.runout.engine.model.BallPaletteColor.BLUE to 0xFF3CC4DC.toInt(),
+            com.runout.engine.model.BallPaletteColor.RED to 0xFFD82828.toInt(),
+            com.runout.engine.model.BallPaletteColor.PINK to 0xFFF08CA8.toInt(),
+            com.runout.engine.model.BallPaletteColor.PURPLE to 0xFF82508C.toInt(),
+            com.runout.engine.model.BallPaletteColor.GREEN to 0xFF28B464.toInt(),
+            com.runout.engine.model.BallPaletteColor.BROWN to 0xFF8E4218.toInt(),
+            com.runout.engine.model.BallPaletteColor.BLACK to 0xFF141414.toInt(),
+        )
+        for (b in layout.balls) {
+            val c = homography.ballCenterMetersToImage(b.position, b.radiusMeters, endCamera)
+            val r = 10.5
+            val color = paletteArgb.getValue(ballSet.colorForBall(b.number))
+            for (py in (c.y - r).toInt()..(c.y + r).toInt()) {
+                for (px in (c.x - r).toInt()..(c.x + r).toInt()) {
+                    if (px !in 0 until w || py !in 0 until h) continue
+                    val dx = px - c.x
+                    val dy = py - c.y
+                    val d2 = dx * dx + dy * dy
+                    if (d2 > r * r) continue
+                    pixels[py * w + px] = when {
+                        b.number == 0 -> 0xFFFBFBFB.toInt()
+                        b.number == 9 -> if (abs(dy) <= 0.40 * r) 0xFF1E1A16.toInt() else if (abs(dy) <= 0.72 * r) color else 0xFFFBFBFB.toInt()
+                        else -> if (d2 <= 0.12 * r * r) 0xFFFBFBFB.toInt() else color
+                    }
+                }
+            }
+        }
+
+        val frame = ArgbImageFrame(w, h, pixels)
+        val summary = RawImageTableDetector.analyzeArgbFrame(frame)
+        assertEquals(ClothHueCategory.SLATE_GREY, summary.clothSurface.category)
+        assertEquals(9, summary.detectedCandidates.size, "All 9 balls must be detected on bright neutral-grey cloth")
+        for (corner in summary.detectedQuadCornersPx) {
+            assertTrue(corner.y >= 135.0 && corner.y <= 495.0, "Quad corner leaked onto wood rails/arena: $corner")
+        }
+
+        val (detOriented, detCamera) = RawImageTableDetector.orientQuadForHomography(summary.detectedQuadCornersPx, table)
+        val detHomography = PerspectiveHomography.fromTableQuad(detOriented, table)
+        val rectified = BallIdentificationAndAssignment.rectifyAndIdentifyBalls(
+            candidates = summary.detectedCandidates,
+            homography = detHomography,
+            table = table,
+            ballSet = ballSet,
+            cameraPositionMeters = detCamera,
+        )
+        assertEquals(wntBalls.map { it.number }.toSet(), rectified.layout.balls.map { it.number }.toSet())
+    }
 }

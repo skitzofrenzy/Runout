@@ -81,6 +81,7 @@ private val ONBOARDING_GAME_CHOICES = listOf(
 fun OnboardingFlowScreen(
     initialLevel: ExperienceLevel,
     initialGame: GameType,
+    initialUseUkBlackball: Boolean = false,
     initialTableSpec: TableSpec,
     onComplete: (
         level: ExperienceLevel,
@@ -95,14 +96,15 @@ fun OnboardingFlowScreen(
     var step by remember { mutableIntStateOf(0) }
     var selectedLevel by remember { mutableStateOf(initialLevel) }
     var selectedGameIndex by remember {
-        val initialIdx = ONBOARDING_GAME_CHOICES.indexOfFirst { it.gameType == initialGame && !it.useUkBlackball }
-            .coerceAtLeast(0)
+        val initialIdx = ONBOARDING_GAME_CHOICES.indexOfFirst {
+            it.gameType == initialGame && it.useUkBlackball == initialUseUkBlackball
+        }.let { if (it >= 0) it else 0 }
         mutableIntStateOf(initialIdx)
     }
     var selectedTableIndex by remember {
         val initialIdx = ONBOARDING_TABLE_CHOICES.indexOfFirst {
             it.createSpec().name == initialTableSpec.name
-        }.coerceAtLeast(2)
+        }.let { if (it >= 0) it else 2 }
         mutableIntStateOf(initialIdx)
     }
 

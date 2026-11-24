@@ -77,6 +77,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.runout.app.calibration.SampleCalibrationSessions
+import com.runout.app.storage.SavedSetupPreferences
+import com.runout.app.storage.TableSizePreset
+import com.runout.app.storage.rememberSetupPreferencesStore
 import com.runout.app.tools.EightBallWalkthrough
 import com.runout.app.tools.InteractiveTutorial
 import com.runout.app.ui.AppDisplayMode
@@ -207,23 +210,45 @@ fun App() {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    var showOnboarding by remember { mutableStateOf(true) }
+    val setupStore = rememberSetupPreferencesStore()
+    val initialSavedSetup = remember(setupStore) { setupStore.load() }
+    val initialRulesState = initialSavedSetup?.toRulesState() ?: scenarios[0].rulesState
+    val initialPresetIdx = initialSavedSetup?.let { saved ->
+        scenarios.indexOfFirst { it.rulesState.gameType == saved.gameType }.takeIf { it >= 0 }
+    } ?: 0
+    val initialBaseScenario = scenarios[initialPresetIdx]
+    val initialLayout = if (initialSavedSetup != null) {
+        SampleLayouts.resizeTableLayout(
+            initialBaseScenario.layout,
+            initialSavedSetup.tableSizePreset.toTableSpec(),
+        )
+    } else {
+        initialBaseScenario.layout
+    }
+
+    var showOnboarding by remember { mutableStateOf(initialSavedSetup?.hasCompletedSetup != true) }
     var lastPrimaryTab by remember { mutableStateOf(PrimaryTab.HOME) }
     var activeRoute by remember { mutableStateOf<ActiveRoute>(ActiveRoute.MainTab(PrimaryTab.HOME)) }
     var learnSubTab by remember { mutableStateOf(LearnSubTab.WALKTHROUGHS) }
-    var displayMode by remember { mutableStateOf(AppDisplayMode.SIMPLE) }
+    var displayMode by remember { mutableStateOf(initialSavedSetup?.displayMode ?: AppDisplayMode.SIMPLE) }
     var hasActiveSession by remember { mutableStateOf(false) }
 
-    var selectedPresetIndex by remember { mutableIntStateOf(0) }
-    var currentLayout by remember { mutableStateOf(scenarios[0].layout) }
-    var rulesState by remember { mutableStateOf(scenarios[0].rulesState) }
-    var playerProfile by remember { mutableStateOf(PlayerProfile()) }
-    var ballSetProfile by remember { mutableStateOf(BallSetProfile.standardPool()) }
+    var selectedPresetIndex by remember { mutableIntStateOf(initialPresetIdx) }
+    var currentLayout by remember { mutableStateOf(initialLayout) }
+    var rulesState by remember { mutableStateOf(initialRulesState) }
+    var playerProfile by remember {
+        mutableStateOf(initialSavedSetup?.toPlayerProfile() ?: PlayerProfile())
+    }
+    var ballSetProfile by remember {
+        mutableStateOf(initialSavedSetup?.toBallSetProfile() ?: BallSetProfile.standardPool())
+    }
     var savedTableProfiles by remember { mutableStateOf(SampleCalibrationSessions.defaultSavedProfiles()) }
     var activeTableProfileId by remember { mutableStateOf<String?>(null) }
 
     var speedScaleOverride by remember { mutableStateOf<Int?>(null) }
-    var selectedHorizon by remember { mutableStateOf(PlanningHorizonOption.THREE_BALL) }
+    var selectedHorizon by remember {
+        mutableStateOf(initialSavedSetup?.toPlanningHorizon() ?: PlanningHorizonOption.THREE_BALL)
+    }
     var showHeatZone by remember { mutableStateOf(false) }
     var showLandingCloud by remember { mutableStateOf(true) }
     var customTipOffset by remember { mutableStateOf<TipOffset?>(null) }
@@ -509,42 +534,80 @@ fun App() {
         }
     }
 
+    fun persistSetupPreferences(
+        hasCompletedSetup: Boolean = !showOnboarding,
+        profile: PlayerProfile = playerProfile,
+        ballSet: BallSetProfile = ballSetProfile,
+        rules: GameRulesState = rulesState,
+        tableSpec: TableSpec = currentLayout.table,
+        mode: AppDisplayMode = displayMode,
+    ) {
+        setupStore.save(
+            SavedSetupPreferences(
+                hasCompletedSetup = hasCompletedSetup,
+                experienceLevel = profile.experienceLevel,
+                shaftType = profile.shaftType,
+                gameType = rules.gameType,
+                useUkBlackball = ballSet.isUkBlackball,
+                tableSizePreset = TableSizePreset.fromTableSpec(tableSpec),
+                displayMode = mode,
+            ),
+        )
+    }
+
     MaterialTheme(colorScheme = RunoutDarkColorScheme) {
         if (showOnboarding) {
             OnboardingFlowScreen(
                 initialLevel = playerProfile.experienceLevel,
                 initialGame = rulesState.gameType,
+                initialUseUkBlackball = ballSetProfile.isUkBlackball,
                 initialTableSpec = currentLayout.table,
                 onComplete = { level, gameType, tableSpec, useUkBlackball, preferredMode ->
-                    playerProfile = PlayerProfile.fromQuestionnaire(
+                    val nextProfile = PlayerProfile.fromQuestionnaire(
                         experience = level,
                         shaft = playerProfile.shaftType,
                         speedControlRating = if (level == ExperienceLevel.BEGINNER) 4 else 6,
                         spinRating = if (level == ExperienceLevel.ADVANCED) 8 else 5,
                     )
-                    ballSetProfile = if (useUkBlackball) {
+                    val nextBallSet = if (useUkBlackball) {
                         BallSetProfile.ukBlackballPool()
                     } else {
                         BallSetProfile.standardPool()
                     }
+                    val nextRules = if (gameType == GameType.EIGHT_BALL) {
+                        GameRulesState(GameType.EIGHT_BALL, EightBallGroup.OPEN)
+                    } else {
+                        GameRulesState(gameType)
+                    }
+                    val matchingPresetIdx = scenarios.indexOfFirst { it.rulesState.gameType == gameType }
+                        .let { if (it >= 0) it else 0 }
+
+                    playerProfile = nextProfile
+                    ballSetProfile = nextBallSet
                     displayMode = preferredMode
                     selectedHorizon = if (level == ExperienceLevel.BEGINNER) {
                         PlanningHorizonOption.TWO_BALL
                     } else {
                         PlanningHorizonOption.THREE_BALL
                     }
-                    currentLayout = SampleLayouts.resizeTableLayout(scenarios[0].layout, tableSpec)
-                    rulesState = if (gameType == GameType.EIGHT_BALL) {
-                        GameRulesState(GameType.EIGHT_BALL, EightBallGroup.OPEN)
-                    } else {
-                        GameRulesState(gameType)
-                    }
+                    selectedPresetIndex = matchingPresetIdx
+                    currentLayout = SampleLayouts.resizeTableLayout(scenarios[matchingPresetIdx].layout, tableSpec)
+                    rulesState = nextRules
                     hasActiveSession = false
                     showOnboarding = false
+                    persistSetupPreferences(
+                        hasCompletedSetup = true,
+                        profile = nextProfile,
+                        ballSet = nextBallSet,
+                        rules = nextRules,
+                        tableSpec = tableSpec,
+                        mode = preferredMode,
+                    )
                     navigateToTab(PrimaryTab.HOME)
                 },
                 onSkip = {
                     showOnboarding = false
+                    persistSetupPreferences(hasCompletedSetup = true)
                     navigateToTab(PrimaryTab.HOME)
                 },
             )
@@ -571,7 +634,10 @@ fun App() {
             if (showFullscreenLandscape) {
                 FullscreenTableScreen(
                     displayMode = displayMode,
-                    onDisplayModeChange = { displayMode = it },
+                    onDisplayModeChange = { nextMode ->
+                        displayMode = nextMode
+                        persistSetupPreferences(mode = nextMode)
+                    },
                     displayedLayout = displayedLayout,
                     rulesState = rulesState,
                     ballSetProfile = ballSetProfile,
@@ -667,7 +733,10 @@ fun App() {
                             )
                             SimpleProTogglePill(
                                 mode = displayMode,
-                                onModeChange = { displayMode = it },
+                                onModeChange = { nextMode ->
+                                    displayMode = nextMode
+                                    persistSetupPreferences(mode = nextMode)
+                                },
                             )
                         }
 
@@ -870,7 +939,10 @@ fun App() {
                                 ActiveRoute.MainTab(PrimaryTab.PLAN) -> {
                                     SimpleProTogglePill(
                                         mode = displayMode,
-                                        onModeChange = { displayMode = it },
+                                        onModeChange = { nextMode ->
+                                            displayMode = nextMode
+                                            persistSetupPreferences(mode = nextMode)
+                                        },
                                     )
                                     IconButton(
                                         onClick = {
@@ -1040,6 +1112,7 @@ fun App() {
                                     focusedStepIndex = 0
                                     selectedPlanIndex = 0
                                     selectedShotIndex = 0
+                                    persistSetupPreferences(rules = nextRules)
                                 },
                                 onOpenGameSetupSheet = { showGameSetupSheet = true },
                                 onOpenEditBallsSheet = { showEditBallsSheet = true },
@@ -1152,6 +1225,7 @@ fun App() {
                             ballSet = ballSetProfile,
                             lastPlayedGameType = rulesState.gameType,
                             displayMode = displayMode,
+                            defaultTableSpec = currentLayout.table,
                             onConfirmScannedLayout = { scannedLayout, scannedRules, scannedBallSet ->
                                 activeTableProfileId = null
                                 currentLayout = scannedLayout
@@ -1261,13 +1335,18 @@ fun App() {
                             table = currentLayout.table,
                             onUpdateProfile = { updated ->
                                 playerProfile = updated
-                                if (updated.experienceLevel == ExperienceLevel.BEGINNER) {
-                                    displayMode = AppDisplayMode.SIMPLE
-                                } else if (updated.experienceLevel == ExperienceLevel.ADVANCED) {
-                                    displayMode = AppDisplayMode.PRO
+                                val nextMode = when (updated.experienceLevel) {
+                                    ExperienceLevel.BEGINNER -> AppDisplayMode.SIMPLE
+                                    ExperienceLevel.ADVANCED -> AppDisplayMode.PRO
+                                    ExperienceLevel.INTERMEDIATE -> displayMode
                                 }
+                                displayMode = nextMode
+                                persistSetupPreferences(profile = updated, mode = nextMode)
                             },
-                            onUpdateBallSet = { ballSetProfile = it },
+                            onUpdateBallSet = { nextBallSet ->
+                                ballSetProfile = nextBallSet
+                                persistSetupPreferences(ballSet = nextBallSet)
+                            },
                         )
                     }
                 }
@@ -1321,14 +1400,16 @@ fun App() {
                     hasActiveSession = true
                 },
                 onResizeTable = { newSpec ->
+                    val resizedSpec = newSpec.withClothParams(currentLayout.table.cloth)
                     activeTableProfileId = null
                     currentLayout = SampleLayouts.resizeTableLayout(
                         layout = currentLayout,
-                        newSpec = newSpec.withClothParams(currentLayout.table.cloth),
+                        newSpec = resizedSpec,
                     )
                     sandboxTargetBallNumber = null
                     focusedStepIndex = 0
                     hasActiveSession = true
+                    persistSetupPreferences(tableSpec = resizedSpec)
                 },
                 onSelectRules = { nextRules ->
                     rulesState = nextRules
@@ -1338,6 +1419,7 @@ fun App() {
                     hasActiveSession = true
                     selectedPlanIndex = 0
                     selectedShotIndex = 0
+                    persistSetupPreferences(rules = nextRules)
                 },
                 onDismiss = { showGameSetupSheet = false },
             )
