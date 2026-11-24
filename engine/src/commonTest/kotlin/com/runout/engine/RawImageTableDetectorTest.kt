@@ -548,4 +548,133 @@ class RawImageTableDetectorTest {
         )
         assertEquals(wntBalls.map { it.number }.toSet(), rectified.layout.balls.map { it.number }.toSet())
     }
+
+    @Test
+    fun rescanLocalRegionDetectsMissedBallNearCornerAndSplitsCluster() {
+        val layout = TableLayout(
+            table = table,
+            balls = listOf(
+                ball(0, 0.45, 0.50),
+                ball(2, 1.20, 0.55),
+                ball(4, 1.26, 0.55),
+                ball(3, table.lengthMeters - 0.06, table.widthMeters - 0.06),
+            ),
+        )
+        val frame = RawImageTableDetector.renderSyntheticTablePhotoArgb(
+            layout = layout,
+            quadCornersPx = trapezoidQuad,
+            cameraPoseMeters = camera,
+            clothCategory = ClothHueCategory.TOURNAMENT_BLUE,
+            ballSet = BallSetProfile.standardPool(),
+            ballRadiusPx = 11,
+        )
+        val homography = PerspectiveHomography.fromTableQuad(trapezoidQuad, table)
+        val cueCenter = homography.ballCenterMetersToImage(layout.balls[0].position, table.ballRadiusMeters, camera)
+        val cornerBallCenter = homography.ballCenterMetersToImage(layout.balls[3].position, table.ballRadiusMeters, camera)
+        val clusterMidCenter = (
+            homography.ballCenterMetersToImage(layout.balls[1].position, table.ballRadiusMeters, camera) +
+                homography.ballCenterMetersToImage(layout.balls[2].position, table.ballRadiusMeters, camera)
+            ) * 0.5
+
+        val existing = listOf(
+            com.runout.engine.vision.DetectedBallCandidate(
+                id = 1,
+                imageCenterPx = cueCenter,
+                dominantColor = com.runout.engine.model.BallPaletteColor.WHITE,
+                whiteFraction = 0.95,
+            ),
+        )
+
+        val cornerScan = RawImageTableDetector.rescanLocalRegion(
+            frame = frame,
+            tapCenterPx = cornerBallCenter,
+            quadCornersPx = trapezoidQuad,
+            existingCandidates = existing,
+        )
+        assertTrue(!cornerScan.usedColorFallback, "Expected smart blob rescan to recover corner ball")
+        assertEquals(1, cornerScan.detectedCandidates.size)
+        assertEquals(com.runout.engine.model.BallPaletteColor.RED, cornerScan.detectedCandidates.first().dominantColor)
+
+        val clusterScan = RawImageTableDetector.rescanLocalRegion(
+            frame = frame,
+            tapCenterPx = clusterMidCenter,
+            quadCornersPx = trapezoidQuad,
+            existingCandidates = existing + cornerScan.detectedCandidates,
+        )
+        assertTrue(!clusterScan.usedColorFallback, "Expected cluster split rescan to detect both touching balls")
+        assertEquals(2, clusterScan.detectedCandidates.size)
+        val allNew = existing + cornerScan.detectedCandidates + clusterScan.detectedCandidates
+        assertEquals(allNew.map { it.id }.toSet().size, allNew.size, "IDs must remain unique")
+    }
+
+    @Test
+    fun rescanLocalRegionColorFallbackAndBallNumberPreselection() {
+        val w = 640
+        val h = 360
+        val blueCloth = 0xFF1E78B4.toInt()
+        val quad = listOf(
+            Vec2(40.0, 40.0),
+            Vec2(600.0, 40.0),
+            Vec2(620.0, 320.0),
+            Vec2(20.0, 320.0),
+        )
+        val pixels = IntArray(w * h) { idx ->
+            val x = idx % w
+            val y = idx / w
+            if (RawImageTableDetector.pointInQuad(x.toDouble(), y.toDouble(), quad)) blueCloth else 0xFF2B1B12.toInt()
+        }
+
+        // Paint sub-threshold (r=4.6 px < minAllowedR ~5.1 px) patches so rescanLocalRegion exercises Pass 2 color fallback
+        fun paintCircle(cx: Double, cy: Double, r: Double, colorAtDy: (Double) -> Int) {
+            for (y in (cy - r).toInt()..(cy + r).toInt()) {
+                for (x in (cx - r).toInt()..(cx + r).toInt()) {
+                    val dx = x - cx
+                    val dy = y - cy
+                    if (dx * dx + dy * dy <= r * r) {
+                        pixels[y * w + x] = colorAtDy(dy)
+                    }
+                }
+            }
+        }
+
+        val blackPos = Vec2(160.0, 140.0)
+        val ninePos = Vec2(280.0, 140.0)
+        val whitePos = Vec2(400.0, 140.0)
+        val redPos = Vec2(500.0, 140.0)
+        val subThresholdR = 3.6
+
+        paintCircle(blackPos.x, blackPos.y, subThresholdR) { 0xFF141414.toInt() }
+        paintCircle(ninePos.x, ninePos.y, subThresholdR) { dy -> if (abs(dy) <= 1.4) 0xFFF0DC1E.toInt() else 0xFFF5F7FA.toInt() }
+        paintCircle(whitePos.x, whitePos.y, subThresholdR) { 0xFFF5F7FA.toInt() }
+        paintCircle(redPos.x, redPos.y, subThresholdR) { 0xFFD22828.toInt() }
+
+        val frame = ArgbImageFrame(w, h, pixels)
+        val cloth = RawImageTableDetector.detectClothSurface(frame)
+        val ballSet = BallSetProfile.standardPool()
+
+        val blackRes = RawImageTableDetector.rescanLocalRegion(frame, blackPos, quad, emptyList(), clothOverride = cloth)
+        assertTrue(blackRes.usedColorFallback)
+        assertEquals(com.runout.engine.model.BallPaletteColor.BLACK, blackRes.detectedCandidates.single().dominantColor)
+        assertEquals(8, BallIdentificationAndAssignment.suggestBallNumberForCandidate(blackRes.detectedCandidates.single(), ballSet))
+
+        val nineRes = RawImageTableDetector.rescanLocalRegion(frame, ninePos, quad, blackRes.detectedCandidates, clothOverride = cloth)
+        assertTrue(nineRes.usedColorFallback)
+        val nineCand = nineRes.detectedCandidates.single()
+        assertEquals(com.runout.engine.model.BallPaletteColor.YELLOW, nineCand.dominantColor)
+        assertTrue(nineCand.whiteFraction >= 0.42, "White+Yellow stripe whiteFraction was ${nineCand.whiteFraction}")
+        assertEquals(9, BallIdentificationAndAssignment.suggestBallNumberForCandidate(nineCand, ballSet))
+
+        val whiteRes = RawImageTableDetector.rescanLocalRegion(frame, whitePos, quad, emptyList(), clothOverride = cloth)
+        assertTrue(whiteRes.usedColorFallback)
+        assertEquals(com.runout.engine.model.BallPaletteColor.WHITE, whiteRes.detectedCandidates.single().dominantColor)
+        assertEquals(0, BallIdentificationAndAssignment.suggestBallNumberForCandidate(whiteRes.detectedCandidates.single(), ballSet))
+
+        val redRes = RawImageTableDetector.rescanLocalRegion(frame, redPos, quad, emptyList(), clothOverride = cloth)
+        assertTrue(redRes.usedColorFallback)
+        val redCand = redRes.detectedCandidates.single()
+        assertEquals(com.runout.engine.model.BallPaletteColor.RED, redCand.dominantColor)
+        assertEquals(3, BallIdentificationAndAssignment.suggestBallNumberForCandidate(redCand, ballSet))
+        assertEquals(5, BallIdentificationAndAssignment.suggestBallNumberForCandidate(redCand, ballSet, excludedNumbers = setOf(3)))
+        assertEquals(11, BallIdentificationAndAssignment.suggestBallNumberForCandidate(redCand, ballSet, excludedNumbers = setOf(3, 5, 7)))
+    }
 }

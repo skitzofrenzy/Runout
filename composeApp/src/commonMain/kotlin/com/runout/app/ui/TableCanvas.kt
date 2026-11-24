@@ -10,7 +10,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -204,6 +207,9 @@ fun PoolTableCanvas(
     val latestOnSelectPocket by rememberUpdatedState(onSelectPocket)
     val latestOnTapCueBall by rememberUpdatedState(onTapCueBall)
 
+    var activeDraggedBallNumber by remember { mutableStateOf<Int?>(null) }
+    var activeDragCanvasPos by remember { mutableStateOf<Offset?>(null) }
+
     val dragModifier = if (onMoveBall != null) {
         Modifier.pointerInput(true) {
             var draggedBallNumber: Int? = null
@@ -230,17 +236,23 @@ fun PoolTableCanvas(
                         .minByOrNull { (_, dist) -> dist }
                         ?.first
                     if (hitBall != null) {
+                        val startCanvas = geom.toCanvasOffset(hitBall.position)
                         draggedBallNumber = hitBall.number
-                        dragPosPx = geom.toCanvasOffset(hitBall.position)
+                        dragPosPx = startCanvas
+                        activeDraggedBallNumber = hitBall.number
+                        activeDragCanvasPos = startCanvas
                         latestOnDragStateChanged?.invoke(true)
                     } else {
                         draggedBallNumber = null
+                        activeDraggedBallNumber = null
+                        activeDragCanvasPos = null
                     }
                 },
                 onDrag = { change, dragAmount ->
                     val ballNumber = draggedBallNumber ?: return@detectDragGestures
                     change.consume()
                     dragPosPx += dragAmount
+                    activeDragCanvasPos = dragPosPx
                     val activeLayout = latestLayout
                     val geom = computeTableCanvasGeometry(
                         canvasWidth = size.width.toFloat(),
@@ -252,12 +264,16 @@ fun PoolTableCanvas(
                 onDragEnd = {
                     if (draggedBallNumber != null) {
                         draggedBallNumber = null
+                        activeDraggedBallNumber = null
+                        activeDragCanvasPos = null
                         latestOnDragStateChanged?.invoke(false)
                     }
                 },
                 onDragCancel = {
                     if (draggedBallNumber != null) {
                         draggedBallNumber = null
+                        activeDraggedBallNumber = null
+                        activeDragCanvasPos = null
                         latestOnDragStateChanged?.invoke(false)
                     }
                 },
@@ -344,8 +360,9 @@ fun PoolTableCanvas(
 
         fun toCanvasOffset(siPos: Vec2): Offset = geom.toCanvasOffset(siPos)
 
-        // 1. Wooden rails and cushion border
-        val railOuterLeft = playLeft - railPaddingPx
+        fun DrawScope.renderTableLayer() {
+            // 1. Wooden rails and cushion border
+            val railOuterLeft = playLeft - railPaddingPx
         val railOuterTop = playTop - railPaddingPx
         val railOuterWidth = playWidth + 2f * railPaddingPx
         val railOuterHeight = playHeight + 2f * railPaddingPx
@@ -551,6 +568,41 @@ fun PoolTableCanvas(
                 playHeight = playHeight,
                 toCanvasOffset = ::toCanvasOffset,
             )
+        }
+        }
+
+        renderTableLayer()
+
+        // 9. Floating precision magnifying glass loupe while dragging a ball on the table
+        val dragNum = activeDraggedBallNumber
+        if (dragNum != null) {
+            val draggedBall = layout.balls.firstOrNull { it.number == dragNum }
+            val focusPos = draggedBall?.let { toCanvasOffset(it.position) } ?: activeDragCanvasPos
+            if (focusPos != null) {
+                val loupeR = minOf(with(density) { 56.dp.toPx() }, size.minDimension * 0.24f)
+                val clearance = with(density) { 42.dp.toPx() }
+                val loupeCenter = computeLoupeCenter(
+                    targetCanvasPos = focusPos,
+                    canvasSize = size,
+                    loupeRadiusPx = loupeR,
+                    fingerClearancePx = clearance,
+                )
+                val badge = if (dragNum == 0) "Cue Ball" else "Ball #$dragNum"
+                val badgeFontSp = with(density) { 10.dp.toSp() }
+                drawPrecisionLoupe(
+                    focusCanvasPos = focusPos,
+                    loupeCenter = loupeCenter,
+                    loupeRadiusPx = loupeR,
+                    zoom = 2.4f,
+                    accentColor = RunoutColors.PrimaryCyan,
+                    badgeLabel = badge,
+                    showCenterRedDot = true,
+                    showCrosshair = true,
+                    textMeasurer = textMeasurer,
+                    labelFontSp = badgeFontSp,
+                    drawZoomedScene = { renderTableLayer() },
+                )
+            }
         }
     }
 }
@@ -1564,6 +1616,8 @@ fun CueTipSelectorCanvas(
     val textMeasurer = rememberTextMeasurer()
     val latestTip by rememberUpdatedState(tipOffset)
     val latestOnUpdateTip by rememberUpdatedState(onUpdateTip)
+    val density = LocalDensity.current
+    var isDraggingTip by remember { mutableStateOf(false) }
 
     fun updateFromPointer(pointer: Offset, widthPx: Float, heightPx: Float) {
         val ballRadiusPx = (min(widthPx, heightPx) * 0.43f).coerceAtLeast(1f)
@@ -1599,146 +1653,178 @@ fun CueTipSelectorCanvas(
             .pointerInput(Unit) {
                 detectDragGestures(
                     onDragStart = { startOffset ->
+                        isDraggingTip = true
                         updateFromPointer(startOffset, size.width.toFloat(), size.height.toFloat())
                     },
                     onDrag = { change, _ ->
                         change.consume()
                         updateFromPointer(change.position, size.width.toFloat(), size.height.toFloat())
                     },
+                    onDragEnd = { isDraggingTip = false },
+                    onDragCancel = { isDraggingTip = false },
                 )
             },
     ) {
         val ballRadiusPx = min(size.width, size.height) * 0.43f
         val center = Offset(size.width * 0.5f, size.height * 0.5f)
         val safeRadiusPx = ballRadiusPx * TipOffset.MAX_SAFE_OFFSET_RATIO.toFloat()
-
-        // Outer cue-ball shadow & ivory sphere
-        drawCircle(
-            color = Color(0x4D000000),
-            radius = ballRadiusPx,
-            center = center + Offset(ballRadiusPx * 0.06f, ballRadiusPx * 0.08f),
-        )
-        drawCircle(
-            color = Color(0xFFF8FAFC),
-            radius = ballRadiusPx,
-            center = center,
-        )
-        drawCircle(
-            color = Color(0xFF94A3B8),
-            radius = ballRadiusPx,
-            center = center,
-            style = Stroke(width = max(1.5f, ballRadiusPx * 0.03f)),
-        )
-
-        // Safe-offset 0.50 R disk and boundary ring
-        drawCircle(
-            color = Color(0x140284C7),
-            radius = safeRadiusPx,
-            center = center,
-        )
-        val dash = max(5f, ballRadiusPx * 0.09f)
-        val gap = max(4f, ballRadiusPx * 0.07f)
-        drawCircle(
-            color = Color(0xFF0284C7),
-            radius = safeRadiusPx,
-            center = center,
-            style = Stroke(
-                width = max(1.6f, ballRadiusPx * 0.028f),
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(dash, gap), 0f),
-            ),
-        )
-
-        // Crosshairs
-        val crosshairColor = Color(0x70475569)
-        val crosshairStroke = max(1.2f, ballRadiusPx * 0.02f)
-        drawLine(
-            color = crosshairColor,
-            start = Offset(center.x - ballRadiusPx * 0.88f, center.y),
-            end = Offset(center.x + ballRadiusPx * 0.88f, center.y),
-            strokeWidth = crosshairStroke,
-        )
-        drawLine(
-            color = crosshairColor,
-            start = Offset(center.x, center.y - ballRadiusPx * 0.88f),
-            end = Offset(center.x, center.y + ballRadiusPx * 0.88f),
-            strokeWidth = crosshairStroke,
-        )
-        drawCircle(
-            color = Color(0xFF64748B),
-            radius = max(2f, ballRadiusPx * 0.035f),
-            center = center,
-        )
-
-        // Axis direction cues (F = Follow, D = Draw, L = Left, R = Right)
-        val labelStyle = TextStyle(
-            color = Color(0xFF475569),
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        val axisMarkers = listOf(
-            "F" to Offset(center.x, center.y - ballRadiusPx * 0.76f),
-            "D" to Offset(center.x, center.y + ballRadiusPx * 0.76f),
-            "L" to Offset(center.x - ballRadiusPx * 0.76f, center.y),
-            "R" to Offset(center.x + ballRadiusPx * 0.76f, center.y),
-        )
-        for ((text, pos) in axisMarkers) {
-            val measured = textMeasurer.measure(text = text, style = labelStyle)
-            drawText(
-                textLayoutResult = measured,
-                topLeft = Offset(
-                    x = pos.x - measured.size.width * 0.5f,
-                    y = pos.y - measured.size.height * 0.5f,
-                ),
-            )
-        }
-
-        // Planner-default contact ring marker when the user overrides tip position in Sandbox
-        if (defaultTipOffset != null) {
-            val diff = hypot(
-                defaultTipOffset.clampedSideRatio - tipOffset.clampedSideRatio,
-                defaultTipOffset.clampedVerticalRatio - tipOffset.clampedVerticalRatio,
-            )
-            if (diff > 0.04) {
-                val defCenter = Offset(
-                    x = center.x + (defaultTipOffset.clampedSideRatio.toFloat() * ballRadiusPx),
-                    y = center.y - (defaultTipOffset.clampedVerticalRatio.toFloat() * ballRadiusPx),
-                )
-                val defR = max(5f, ballRadiusPx * 0.13f)
-                drawCircle(
-                    color = Color(0x384ADE80),
-                    radius = defR * 1.45f,
-                    center = defCenter,
-                )
-                drawCircle(
-                    color = Color(0xFF4ADE80),
-                    radius = defR,
-                    center = defCenter,
-                    style = Stroke(width = max(1.8f, ballRadiusPx * 0.032f)),
-                )
-            }
-        }
-
-        // Red/blue cue-tip contact dot at (clampedSideRatio, clampedVerticalRatio)
         val contactCenter = Offset(
             x = center.x + (tipOffset.clampedSideRatio.toFloat() * ballRadiusPx),
             y = center.y - (tipOffset.clampedVerticalRatio.toFloat() * ballRadiusPx),
         )
-        val tipDotRadius = max(5f, ballRadiusPx * 0.13f)
-        drawCircle(
-            color = Color(0x382563EB),
-            radius = tipDotRadius * 1.65f,
-            center = contactCenter,
-        )
-        drawCircle(
-            color = Color(0xFF2563EB),
-            radius = tipDotRadius,
-            center = contactCenter,
-        )
-        drawCircle(
-            color = Color(0xFFDC2626),
-            radius = tipDotRadius * 0.56f,
-            center = contactCenter,
-        )
+
+        fun DrawScope.renderCueBallFace() {
+            // Outer cue-ball shadow & ivory sphere
+            drawCircle(
+                color = Color(0x4D000000),
+                radius = ballRadiusPx,
+                center = center + Offset(ballRadiusPx * 0.06f, ballRadiusPx * 0.08f),
+            )
+            drawCircle(
+                color = Color(0xFFF8FAFC),
+                radius = ballRadiusPx,
+                center = center,
+            )
+            drawCircle(
+                color = Color(0xFF94A3B8),
+                radius = ballRadiusPx,
+                center = center,
+                style = Stroke(width = max(1.5f, ballRadiusPx * 0.03f)),
+            )
+
+            // Safe-offset 0.50 R disk and boundary ring
+            drawCircle(
+                color = Color(0x140284C7),
+                radius = safeRadiusPx,
+                center = center,
+            )
+            val dash = max(5f, ballRadiusPx * 0.09f)
+            val gap = max(4f, ballRadiusPx * 0.07f)
+            drawCircle(
+                color = Color(0xFF0284C7),
+                radius = safeRadiusPx,
+                center = center,
+                style = Stroke(
+                    width = max(1.6f, ballRadiusPx * 0.028f),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(dash, gap), 0f),
+                ),
+            )
+
+            // Crosshairs
+            val crosshairColor = Color(0x70475569)
+            val crosshairStroke = max(1.2f, ballRadiusPx * 0.02f)
+            drawLine(
+                color = crosshairColor,
+                start = Offset(center.x - ballRadiusPx * 0.88f, center.y),
+                end = Offset(center.x + ballRadiusPx * 0.88f, center.y),
+                strokeWidth = crosshairStroke,
+            )
+            drawLine(
+                color = crosshairColor,
+                start = Offset(center.x, center.y - ballRadiusPx * 0.88f),
+                end = Offset(center.x, center.y + ballRadiusPx * 0.88f),
+                strokeWidth = crosshairStroke,
+            )
+            drawCircle(
+                color = Color(0xFF64748B),
+                radius = max(2f, ballRadiusPx * 0.035f),
+                center = center,
+            )
+
+            // Axis direction cues (F = Follow, D = Draw, L = Left, R = Right)
+            val labelStyle = TextStyle(
+                color = Color(0xFF475569),
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            val axisMarkers = listOf(
+                "F" to Offset(center.x, center.y - ballRadiusPx * 0.76f),
+                "D" to Offset(center.x, center.y + ballRadiusPx * 0.76f),
+                "L" to Offset(center.x - ballRadiusPx * 0.76f, center.y),
+                "R" to Offset(center.x + ballRadiusPx * 0.76f, center.y),
+            )
+            for ((text, pos) in axisMarkers) {
+                val measured = textMeasurer.measure(text = text, style = labelStyle)
+                drawText(
+                    textLayoutResult = measured,
+                    topLeft = Offset(
+                        x = pos.x - measured.size.width * 0.5f,
+                        y = pos.y - measured.size.height * 0.5f,
+                    ),
+                )
+            }
+
+            // Planner-default contact ring marker when the user overrides tip position in Sandbox
+            if (defaultTipOffset != null) {
+                val diff = hypot(
+                    defaultTipOffset.clampedSideRatio - tipOffset.clampedSideRatio,
+                    defaultTipOffset.clampedVerticalRatio - tipOffset.clampedVerticalRatio,
+                )
+                if (diff > 0.04) {
+                    val defCenter = Offset(
+                        x = center.x + (defaultTipOffset.clampedSideRatio.toFloat() * ballRadiusPx),
+                        y = center.y - (defaultTipOffset.clampedVerticalRatio.toFloat() * ballRadiusPx),
+                    )
+                    val defR = max(5f, ballRadiusPx * 0.13f)
+                    drawCircle(
+                        color = Color(0x384ADE80),
+                        radius = defR * 1.45f,
+                        center = defCenter,
+                    )
+                    drawCircle(
+                        color = Color(0xFF4ADE80),
+                        radius = defR,
+                        center = defCenter,
+                        style = Stroke(width = max(1.8f, ballRadiusPx * 0.032f)),
+                    )
+                }
+            }
+
+            // Red/blue cue-tip contact dot at (clampedSideRatio, clampedVerticalRatio)
+            val tipDotRadius = max(5f, ballRadiusPx * 0.13f)
+            drawCircle(
+                color = Color(0x382563EB),
+                radius = tipDotRadius * 1.65f,
+                center = contactCenter,
+            )
+            drawCircle(
+                color = Color(0xFF2563EB),
+                radius = tipDotRadius,
+                center = contactCenter,
+            )
+            drawCircle(
+                color = Color(0xFFDC2626),
+                radius = tipDotRadius * 0.56f,
+                center = contactCenter,
+            )
+        }
+
+        renderCueBallFace()
+
+        if (isDraggingTip) {
+            val loupeR = minOf(with(density) { 34.dp.toPx() }, size.minDimension * 0.29f)
+            val clearance = with(density) { 22.dp.toPx() }
+            val loupeCenter = computeLoupeCenter(
+                targetCanvasPos = contactCenter,
+                canvasSize = size,
+                loupeRadiusPx = loupeR,
+                fingerClearancePx = clearance,
+                preferOppositeCorner = true,
+            )
+            drawPrecisionLoupe(
+                focusCanvasPos = contactCenter,
+                loupeCenter = loupeCenter,
+                loupeRadiusPx = loupeR,
+                zoom = 2.2f,
+                accentColor = RunoutColors.PrimaryCyan,
+                badgeLabel = "Spin",
+                showCenterRedDot = false,
+                showCrosshair = true,
+                textMeasurer = textMeasurer,
+                labelFontSp = 8.sp,
+                drawZoomedScene = { renderCueBallFace() },
+            )
+        }
     }
 }
 

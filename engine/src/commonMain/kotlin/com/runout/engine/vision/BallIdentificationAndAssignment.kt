@@ -256,6 +256,22 @@ object BallIdentificationAndAssignment {
         }.sortedBy { it.ballNumber }
     }
 
+    /**
+     * Recommends the best-matching pool ball number (`0..15`) for [candidate] under [ballSet],
+     * preferring numbers not present in [excludedNumbers].
+     */
+    fun suggestBallNumberForCandidate(
+        candidate: DetectedBallCandidate,
+        ballSet: BallSetProfile = BallSetProfile.standardPool(),
+        excludedNumbers: Set<Int> = emptySet(),
+    ): Int {
+        val candidateNumbers = (0..15).filter { it !in excludedNumbers }
+            .ifEmpty { (0..15).toList() }
+        return candidateNumbers.minByOrNull { number ->
+            assignmentCost(candidate, number, ballSet)
+        } ?: 1
+    }
+
     private fun assignmentCost(
         candidate: DetectedBallCandidate,
         number: Int,

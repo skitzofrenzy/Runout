@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,6 +42,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -99,6 +101,7 @@ import com.runout.engine.vision.FrozenBallStatus
 import com.runout.engine.vision.GameTypeSuggester
 import com.runout.engine.vision.GameTypeSuggestion
 import com.runout.engine.vision.IdentifiedBallResult
+import com.runout.engine.vision.LocalTapRescanResult
 import com.runout.engine.vision.PerspectiveHomography
 import com.runout.engine.vision.RawFrameDetectionSummary
 import com.runout.engine.vision.RawImageTableDetector
@@ -110,6 +113,7 @@ import kotlin.math.round
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val METERS_TO_MM: Double = 1000.0
@@ -267,6 +271,16 @@ fun PhotoCaptureAndConfirmScreen(
     var activeCornerIndex by remember(selectedPhoto.id) {
         mutableStateOf<Int?>(null)
     }
+    var draggedCandidateId by remember(selectedPhoto.id) {
+        mutableStateOf<Int?>(null)
+    }
+    var rescanFeedbackMessage by remember(selectedPhoto.id) {
+        mutableStateOf<String?>(null)
+    }
+    var isRescanningArea by remember(selectedPhoto.id) {
+        mutableStateOf(false)
+    }
+    val coroutineScope = rememberCoroutineScope()
     var selectedVariantOverride by remember(selectedPhoto.id) {
         mutableStateOf<DetectedGameVariant?>(null)
     }
@@ -320,6 +334,114 @@ fun PhotoCaptureAndConfirmScreen(
         activeRectification?.identifiedBalls.orEmpty().map { item ->
             val effectiveNumber = candidateNumberOverrides[item.candidateId] ?: item.ball.number
             item to effectiveNumber
+        }
+    }
+
+    fun handleMoveBallCandidate(candidateId: Int, newImageCenterPx: Vec2) {
+        val clamped = Vec2(
+            x = newImageCenterPx.x.coerceIn(0.0, selectedPhoto.intrinsics.imageWidthPx.toDouble()),
+            y = newImageCenterPx.y.coerceIn(0.0, selectedPhoto.intrinsics.imageHeightPx.toDouble()),
+        )
+        selectedPhoto = selectedPhoto.copy(
+            rawDetections = selectedPhoto.rawDetections.map { cand ->
+                if (cand.id == candidateId) cand.copy(imageCenterPx = clamped) else cand
+            },
+        )
+    }
+
+    fun handleDeleteBallCandidate(candidateId: Int) {
+        val remainingPinned = displayedBallsWithIdentity
+            .filter { (item, _) -> item.candidateId != candidateId }
+            .associate { (item, num) -> item.candidateId to num }
+        selectedPhoto = selectedPhoto.copy(
+            rawDetections = selectedPhoto.rawDetections.filterNot { it.id == candidateId },
+        )
+        candidateNumberOverrides = remainingPinned
+        if (activeReassignCandidateId == candidateId) activeReassignCandidateId = null
+        if (draggedCandidateId == candidateId) draggedCandidateId = null
+    }
+
+    fun handleReassignBallCandidateNumber(candidateId: Int, newNumber: Int) {
+        val baseIdentified = activeRectification?.identifiedBalls ?: return
+        candidateNumberOverrides = reassignWithUniqueSwap(
+            identifiedBalls = baseIdentified,
+            currentOverrides = candidateNumberOverrides,
+            targetCandidateId = candidateId,
+            newNumber = newNumber,
+        )
+        activeReassignCandidateId = null
+    }
+
+    fun handleTapEmptyPhotoArea(tapImagePx: Vec2) {
+        if (isRescanningArea) return
+        val pinnedMap = displayedBallsWithIdentity.associate { (item, num) ->
+            item.candidateId to num
+        }
+        val usedNumbers = pinnedMap.values.toMutableSet()
+        val existing = selectedPhoto.rawDetections
+        val frame = importedRawFrame
+        val canonicalQuad = canonicalizeQuadTopLeftClockwise(overriddenQuadCornersPx)
+        val snapshotPhotoId = selectedPhoto.id
+
+        isRescanningArea = true
+        coroutineScope.launch {
+            try {
+                val result = withContext(Dispatchers.Default) {
+                    if (frame != null) {
+                        RawImageTableDetector.rescanLocalRegion(
+                            frame = frame,
+                            tapCenterPx = tapImagePx,
+                            quadCornersPx = canonicalQuad,
+                            existingCandidates = existing,
+                        )
+                    } else {
+                        val nextId = (existing.maxOfOrNull { it.id } ?: 0) + 1
+                        LocalTapRescanResult(
+                            detectedCandidates = listOf(
+                                DetectedBallCandidate(
+                                    id = nextId,
+                                    imageCenterPx = tapImagePx,
+                                    dominantColor = BallPaletteColor.WHITE,
+                                    whiteFraction = 0.85,
+                                    detectorConfidence = 0.70,
+                                ),
+                            ),
+                            usedColorFallback = true,
+                        )
+                    }
+                }
+                if (selectedPhoto.id != snapshotPhotoId) return@launch
+                val newAssigned = LinkedHashMap<Int, Int>()
+                for (cand in result.detectedCandidates) {
+                    val suggested = BallIdentificationAndAssignment.suggestBallNumberForCandidate(
+                        candidate = cand,
+                        ballSet = activeBallSet,
+                        excludedNumbers = usedNumbers,
+                    )
+                    newAssigned[cand.id] = suggested
+                    usedNumbers += suggested
+                }
+                selectedPhoto = selectedPhoto.copy(
+                    rawDetections = existing + result.detectedCandidates,
+                )
+                candidateNumberOverrides = pinnedMap + newAssigned
+                val firstNew = result.detectedCandidates.firstOrNull()
+                activeReassignCandidateId = firstNew?.id
+                if (firstNew != null) {
+                    val firstNum = newAssigned[firstNew.id] ?: 0
+                    val ballTitle = if (firstNum == 0) "Cue Ball (0)" else "Ball #$firstNum"
+                    rescanFeedbackMessage = if (!result.usedColorFallback) {
+                        val count = result.detectedCandidates.size
+                        val summary = if (count == 1) ballTitle else "$count balls (first: $ballTitle)"
+                        "Smart rescan detected $summary — drag to align or tap a number below."
+                    } else {
+                        val colorWord = firstNew.dominantColor.name.lowercase()
+                        "Added $ballTitle from detected $colorWord area — drag to center or tap a number."
+                    }
+                }
+            } finally {
+                isRescanningArea = false
+            }
         }
     }
 
@@ -662,12 +784,25 @@ fun PhotoCaptureAndConfirmScreen(
                     sourceImageBitmap = importedImageBitmap,
                     quadCornersPx = overriddenQuadCornersPx,
                     activeCornerIndex = activeCornerIndex,
+                    activeCandidateId = activeReassignCandidateId,
+                    draggedCandidateId = draggedCandidateId,
                     displayedBalls = displayedBallsWithIdentity,
                     ballSet = activeBallSet,
                     qualityReport = qualityReport,
                     isQuadGeometryInvalid = isQuadGeometryInvalid,
+                    rescanFeedbackMessage = rescanFeedbackMessage,
+                    isRescanningArea = isRescanningArea,
                     onCornersChanged = { updated -> overriddenQuadCornersPx = updated },
                     onActiveCornerChanged = { idx -> activeCornerIndex = idx },
+                    onMoveBallCandidate = ::handleMoveBallCandidate,
+                    onDraggedCandidateChanged = { id -> draggedCandidateId = id },
+                    onSelectBallCandidate = { id ->
+                        activeReassignCandidateId = if (activeReassignCandidateId == id) null else id
+                    },
+                    onTapEmptyPhotoArea = ::handleTapEmptyPhotoArea,
+                    onReassignBallNumber = ::handleReassignBallCandidateNumber,
+                    onDeleteBallCandidate = ::handleDeleteBallCandidate,
+                    onDismissFeedback = { rescanFeedbackMessage = null },
                     onResetCorners = {
                         overriddenQuadCornersPx = selectedPhoto.detectedQuadCornersPx
                     },
@@ -691,15 +826,8 @@ fun PhotoCaptureAndConfirmScreen(
                                 candidateId
                             }
                         },
-                        onReassignBallNumber = { candidateId, newNumber ->
-                            candidateNumberOverrides = reassignWithUniqueSwap(
-                                identifiedBalls = activeRectification.identifiedBalls,
-                                currentOverrides = candidateNumberOverrides,
-                                targetCandidateId = candidateId,
-                                newNumber = newNumber,
-                            )
-                            activeReassignCandidateId = null
-                        },
+                        onReassignBallNumber = ::handleReassignBallCandidateNumber,
+                        onDeleteBallCandidate = ::handleDeleteBallCandidate,
                         onResetAllIdentities = {
                             candidateNumberOverrides = emptyMap()
                             activeReassignCandidateId = null
@@ -1388,12 +1516,23 @@ private fun InteractiveFramingGuideCard(
     photo: CapturedTablePhoto,
     quadCornersPx: List<Vec2>,
     activeCornerIndex: Int?,
+    activeCandidateId: Int?,
+    draggedCandidateId: Int?,
     displayedBalls: List<Pair<IdentifiedBallResult, Int>>,
     ballSet: BallSetProfile,
     qualityReport: CaptureQualityReport,
     isQuadGeometryInvalid: Boolean,
+    rescanFeedbackMessage: String?,
+    isRescanningArea: Boolean,
     onCornersChanged: (List<Vec2>) -> Unit,
     onActiveCornerChanged: (Int?) -> Unit,
+    onMoveBallCandidate: (candidateId: Int, newImageCenterPx: Vec2) -> Unit,
+    onDraggedCandidateChanged: (Int?) -> Unit,
+    onSelectBallCandidate: (Int?) -> Unit,
+    onTapEmptyPhotoArea: (Vec2) -> Unit,
+    onReassignBallNumber: (candidateId: Int, newNumber: Int) -> Unit,
+    onDeleteBallCandidate: (candidateId: Int) -> Unit,
+    onDismissFeedback: () -> Unit,
     onResetCorners: () -> Unit,
     sourceImageBitmap: ImageBitmap? = null,
 ) {
@@ -1406,10 +1545,15 @@ private fun InteractiveFramingGuideCard(
     val density = LocalDensity.current
 
     val latestCorners by rememberUpdatedState(quadCornersPx)
+    val latestCandidates by rememberUpdatedState(photo.rawDetections)
     val latestFrameW by rememberUpdatedState(frameWidthPx)
     val latestFrameH by rememberUpdatedState(frameHeightPx)
     val latestOnCornersChanged by rememberUpdatedState(onCornersChanged)
     val latestOnActiveCornerChanged by rememberUpdatedState(onActiveCornerChanged)
+    val latestOnMoveBallCandidate by rememberUpdatedState(onMoveBallCandidate)
+    val latestOnDraggedCandidateChanged by rememberUpdatedState(onDraggedCandidateChanged)
+    val latestOnSelectBallCandidate by rememberUpdatedState(onSelectBallCandidate)
+    val latestOnTapEmptyPhotoArea by rememberUpdatedState(onTapEmptyPhotoArea)
 
     val cornerHomography = remember(quadCornersPx, photo.tableSpec) {
         runCatching {
@@ -1448,7 +1592,7 @@ private fun InteractiveFramingGuideCard(
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        text = "Drag HL / FL / FR / HR cushion corners to recompute perspective live",
+                        text = "Drag corners or balls (magnifying loupe) • Tap empty area to rescan/add ball",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1461,54 +1605,131 @@ private fun InteractiveFramingGuideCard(
                 }
             }
 
+            val tapModifier = Modifier.pointerInput(photo.id) {
+                detectTapGestures { tapOffset ->
+                    val canvasW = size.width.toFloat().coerceAtLeast(1f)
+                    val canvasH = size.height.toFloat().coerceAtLeast(1f)
+                    val scaleX = canvasW / latestFrameW
+                    val scaleY = canvasH / latestFrameH
+
+                    val hitCorner = latestCorners.any { c ->
+                        hypot(tapOffset.x - c.x.toFloat() * scaleX, tapOffset.y - c.y.toFloat() * scaleY) <= 34f
+                    }
+                    if (hitCorner) return@detectTapGestures
+
+                    val detRadiusPx = max(8f, minOf(canvasW, canvasH) * 0.030f)
+                    val ballHitRadius = max(28f, detRadiusPx * 1.9f)
+                    val hitBall = latestCandidates
+                        .map { cand ->
+                            val bx = cand.imageCenterPx.x.toFloat() * scaleX
+                            val by = cand.imageCenterPx.y.toFloat() * scaleY
+                            cand to hypot(tapOffset.x - bx, tapOffset.y - by)
+                        }
+                        .filter { (_, dist) -> dist <= ballHitRadius }
+                        .minByOrNull { (_, dist) -> dist }
+                        ?.first
+
+                    if (hitBall != null) {
+                        latestOnSelectBallCandidate(hitBall.id)
+                    } else {
+                        val tapImg = Vec2(
+                            x = (tapOffset.x.toDouble() / scaleX.toDouble()).coerceIn(0.0, latestFrameW.toDouble()),
+                            y = (tapOffset.y.toDouble() / scaleY.toDouble()).coerceIn(0.0, latestFrameH.toDouble()),
+                        )
+                        latestOnTapEmptyPhotoArea(tapImg)
+                    }
+                }
+            }
+
             val dragModifier = Modifier.pointerInput(photo.id) {
                 var draggedCorner: Int? = null
+                var draggedBallId: Int? = null
                 detectDragGestures(
                     onDragStart = { startOffset ->
                         val canvasW = size.width.toFloat().coerceAtLeast(1f)
                         val canvasH = size.height.toFloat().coerceAtLeast(1f)
                         val scaleX = canvasW / latestFrameW
                         val scaleY = canvasH / latestFrameH
-                        val hitRadiusPx = 44f
-                        val hitIdx = latestCorners.indices
+                        val hitCornerIdx = latestCorners.indices
                             .map { idx ->
                                 val c = latestCorners[idx]
                                 val cx = c.x.toFloat() * scaleX
                                 val cy = c.y.toFloat() * scaleY
                                 idx to hypot(startOffset.x - cx, startOffset.y - cy)
                             }
-                            .filter { (_, dist) -> dist <= hitRadiusPx }
+                            .filter { (_, dist) -> dist <= 40f }
                             .minByOrNull { (_, dist) -> dist }
                             ?.first
-                        draggedCorner = hitIdx
-                        latestOnActiveCornerChanged(hitIdx)
+
+                        if (hitCornerIdx != null) {
+                            draggedCorner = hitCornerIdx
+                            draggedBallId = null
+                            latestOnActiveCornerChanged(hitCornerIdx)
+                            latestOnDraggedCandidateChanged(null)
+                        } else {
+                            val detRadiusPx = max(8f, minOf(canvasW, canvasH) * 0.030f)
+                            val ballHitRadius = max(32f, detRadiusPx * 2.1f)
+                            val hitBall = latestCandidates
+                                .map { cand ->
+                                    val bx = cand.imageCenterPx.x.toFloat() * scaleX
+                                    val by = cand.imageCenterPx.y.toFloat() * scaleY
+                                    cand to hypot(startOffset.x - bx, startOffset.y - by)
+                                }
+                                .filter { (_, dist) -> dist <= ballHitRadius }
+                                .minByOrNull { (_, dist) -> dist }
+                                ?.first
+                            draggedCorner = null
+                            draggedBallId = hitBall?.id
+                            latestOnActiveCornerChanged(null)
+                            latestOnDraggedCandidateChanged(hitBall?.id)
+                            if (hitBall != null) {
+                                latestOnSelectBallCandidate(hitBall.id)
+                            }
+                        }
                     },
                     onDrag = { change, dragAmount ->
-                        val idx = draggedCorner ?: return@detectDragGestures
-                        change.consume()
                         val canvasW = size.width.toFloat().coerceAtLeast(1f)
                         val canvasH = size.height.toFloat().coerceAtLeast(1f)
                         val dxImg = dragAmount.x.toDouble() * (latestFrameW.toDouble() / canvasW.toDouble())
                         val dyImg = dragAmount.y.toDouble() * (latestFrameH.toDouble() / canvasH.toDouble())
-                        val current = latestCorners
-                        if (idx in current.indices) {
-                            val prev = current[idx]
-                            val updatedCorner = Vec2(
-                                x = (prev.x + dxImg).coerceIn(0.0, latestFrameW.toDouble()),
-                                y = (prev.y + dyImg).coerceIn(0.0, latestFrameH.toDouble()),
+                        val idx = draggedCorner
+                        val ballId = draggedBallId
+                        if (idx != null) {
+                            change.consume()
+                            val current = latestCorners
+                            if (idx in current.indices) {
+                                val prev = current[idx]
+                                val updatedCorner = Vec2(
+                                    x = (prev.x + dxImg).coerceIn(0.0, latestFrameW.toDouble()),
+                                    y = (prev.y + dyImg).coerceIn(0.0, latestFrameH.toDouble()),
+                                )
+                                val nextList = current.toMutableList()
+                                nextList[idx] = updatedCorner
+                                latestOnCornersChanged(nextList)
+                            }
+                        } else if (ballId != null) {
+                            change.consume()
+                            val prev = latestCandidates.firstOrNull { it.id == ballId } ?: return@detectDragGestures
+                            latestOnMoveBallCandidate(
+                                ballId,
+                                Vec2(
+                                    x = (prev.imageCenterPx.x + dxImg).coerceIn(0.0, latestFrameW.toDouble()),
+                                    y = (prev.imageCenterPx.y + dyImg).coerceIn(0.0, latestFrameH.toDouble()),
+                                ),
                             )
-                            val nextList = current.toMutableList()
-                            nextList[idx] = updatedCorner
-                            latestOnCornersChanged(nextList)
                         }
                     },
                     onDragEnd = {
                         draggedCorner = null
+                        draggedBallId = null
                         latestOnActiveCornerChanged(null)
+                        latestOnDraggedCandidateChanged(null)
                     },
                     onDragCancel = {
                         draggedCorner = null
+                        draggedBallId = null
                         latestOnActiveCornerChanged(null)
+                        latestOnDraggedCandidateChanged(null)
                     },
                 )
             }
@@ -1518,7 +1739,8 @@ private fun InteractiveFramingGuideCard(
                     .fillMaxWidth()
                     .aspectRatio(frameAspectRatio)
                     .clip(RoundedCornerShape(10.dp))
-                    .then(dragModifier),
+                    .then(dragModifier)
+                    .then(tapModifier),
             ) {
                 val scaleX = size.width / frameWidthPx
                 val scaleY = size.height / frameHeightPx
@@ -1527,138 +1749,191 @@ private fun InteractiveFramingGuideCard(
                     y = (imagePt.y * scaleY).toFloat(),
                 )
 
-                // 1. Camera sensor backdrop (draw real photo if imported, else schematic reticle)
-                drawRect(color = ViewfinderBackdropColor)
-                if (sourceImageBitmap != null) {
-                    drawImage(
-                        image = sourceImageBitmap,
-                        dstSize = IntSize(
-                            width = size.width.roundToInt().coerceAtLeast(1),
-                            height = size.height.roundToInt().coerceAtLeast(1),
-                        ),
-                    )
-                } else {
-                    drawFramingGuideReticle(
-                        isAcceptable = qualityReport.isAcceptable,
-                        textMeasurer = textMeasurer,
-                        labelFontSp = with(density) { 10.dp.toSp() },
-                    )
-                }
+                val detectionRadiusPx = max(8f, size.minDimension * 0.030f)
+                val ballFontSp = with(density) { (detectionRadiusPx * 0.95f).toSp() }
+                val handleLabelSp = with(density) { 10.dp.toSp() }
 
-                // 2. Table surface quadrilateral connecting HL, FL, FR, HR
-                if (quadCornersPx.size == 4) {
-                    val pts = quadCornersPx.map(::toCanvas)
-                    val quadPath = Path().apply {
-                        moveTo(pts[0].x, pts[0].y)
-                        lineTo(pts[1].x, pts[1].y)
-                        lineTo(pts[2].x, pts[2].y)
-                        lineTo(pts[3].x, pts[3].y)
-                        close()
+                fun DrawScope.drawFramingScene() {
+                    // 1. Camera sensor backdrop (draw real photo if imported, else schematic reticle)
+                    drawRect(color = ViewfinderBackdropColor)
+                    if (sourceImageBitmap != null) {
+                        drawImage(
+                            image = sourceImageBitmap,
+                            dstSize = IntSize(
+                                width = size.width.roundToInt().coerceAtLeast(1),
+                                height = size.height.roundToInt().coerceAtLeast(1),
+                            ),
+                        )
+                    } else {
+                        drawFramingGuideReticle(
+                            isAcceptable = qualityReport.isAcceptable,
+                            textMeasurer = textMeasurer,
+                            labelFontSp = handleLabelSp,
+                        )
                     }
-                    drawPath(
-                        path = quadPath,
-                        color = if (sourceImageBitmap != null) Color(0x18137547) else Color(0x52137547),
-                    )
-                    drawPath(
-                        path = quadPath,
-                        color = if (isQuadGeometryInvalid) ErrorRedColor else GuideCyanColor,
-                        style = Stroke(
-                            width = 2.5f,
-                            cap = StrokeCap.Round,
-                            join = StrokeJoin.Round,
-                        ),
-                    )
 
-                    // Project table head string and centre line onto the angled view when valid
-                    if (cornerHomography != null) {
-                        drawProjectedTableGuides(
-                            homography = cornerHomography,
-                            photo = photo,
-                            toCanvas = ::toCanvas,
+                    // 2. Table surface quadrilateral connecting HL, FL, FR, HR
+                    if (quadCornersPx.size == 4) {
+                        val pts = quadCornersPx.map(::toCanvas)
+                        val quadPath = Path().apply {
+                            moveTo(pts[0].x, pts[0].y)
+                            lineTo(pts[1].x, pts[1].y)
+                            lineTo(pts[2].x, pts[2].y)
+                            lineTo(pts[3].x, pts[3].y)
+                            close()
+                        }
+                        drawPath(
+                            path = quadPath,
+                            color = if (sourceImageBitmap != null) Color(0x18137547) else Color(0x52137547),
+                        )
+                        drawPath(
+                            path = quadPath,
+                            color = if (isQuadGeometryInvalid) ErrorRedColor else GuideCyanColor,
+                            style = Stroke(
+                                width = 2.5f,
+                                cap = StrokeCap.Round,
+                                join = StrokeJoin.Round,
+                            ),
+                        )
+
+                        // Project table head string and centre line onto the angled view when valid
+                        if (cornerHomography != null) {
+                            drawProjectedTableGuides(
+                                homography = cornerHomography,
+                                photo = photo,
+                                toCanvas = ::toCanvas,
+                            )
+                        }
+                    }
+
+                    // 3. Simulated glare spots indicator when glare exceeds threshold
+                    if (qualityReport.glareFraction > PhotoCaptureEvaluator.MAX_GLARE_FRACTION) {
+                        val glareCenter = Offset(size.width * 0.56f, size.height * 0.42f)
+                        drawCircle(
+                            color = Color(0x44FFF8E1),
+                            radius = size.minDimension * 0.14f,
+                            center = glareCenter,
+                        )
+                        drawCircle(
+                            color = WarningAmberColor.copy(alpha = 0.65f),
+                            radius = size.minDimension * 0.14f,
+                            center = glareCenter,
+                            style = Stroke(
+                                width = 1.6f,
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f),
+                            ),
+                        )
+                    }
+
+                    // 4. Detected balls in image space
+                    for (candidate in photo.rawDetections) {
+                        val center = toCanvas(candidate.imageCenterPx)
+                        val match = candidateLookup[candidate.id]
+                        val assignedNumber = match?.second
+                        val needsReview = match?.first?.needsUserReview == true
+                        drawImageSpaceBall(
+                            candidate = candidate,
+                            assignedNumber = assignedNumber,
+                            needsReview = needsReview,
+                            isSelected = activeCandidateId == candidate.id,
+                            isBeingDragged = draggedCandidateId == candidate.id,
+                            ballSet = ballSet,
+                            center = center,
+                            radiusPx = detectionRadiusPx,
+                            textMeasurer = textMeasurer,
+                            fontSizeSp = ballFontSp,
+                        )
+                    }
+
+                    // 5. Draggable corner handles (HL, FL, FR, HR)
+                    quadCornersPx.forEachIndexed { index, cornerPx ->
+                        val label = CORNER_LABELS.getOrElse(index) { "C$index" }
+                        val center = toCanvas(cornerPx)
+                        val isActive = activeCornerIndex == index
+                        val handleColor = if (isActive) WarningAmberColor else GuideCyanColor
+                        drawCircle(
+                            color = handleColor.copy(alpha = if (isActive) 0.34f else 0.20f),
+                            radius = if (isActive) 22f else 17f,
+                            center = center,
+                        )
+                        drawCircle(
+                            color = handleColor,
+                            radius = if (isActive) 10f else 8f,
+                            center = center,
+                        )
+                        drawCircle(
+                            color = ViewfinderBackdropColor,
+                            radius = 3.5f,
+                            center = center,
+                        )
+                        val tagLayout = textMeasurer.measure(
+                            text = label,
+                            style = TextStyle(
+                                color = handleColor,
+                                fontSize = handleLabelSp,
+                                fontWeight = FontWeight.Bold,
+                            ),
+                        )
+                        val tagX = (center.x + 12f).coerceIn(
+                            4f,
+                            (size.width - tagLayout.size.width - 4f).coerceAtLeast(4f),
+                        )
+                        val tagY = (center.y - tagLayout.size.height - 8f).coerceIn(
+                            4f,
+                            (size.height - tagLayout.size.height - 4f).coerceAtLeast(4f),
+                        )
+                        drawText(
+                            textLayoutResult = tagLayout,
+                            topLeft = Offset(tagX, tagY),
                         )
                     }
                 }
 
-                // 3. Simulated glare spots indicator when glare exceeds threshold
-                if (qualityReport.glareFraction > PhotoCaptureEvaluator.MAX_GLARE_FRACTION) {
-                    val glareCenter = Offset(size.width * 0.56f, size.height * 0.42f)
-                    drawCircle(
-                        color = Color(0x44FFF8E1),
-                        radius = size.minDimension * 0.14f,
-                        center = glareCenter,
-                    )
-                    drawCircle(
-                        color = WarningAmberColor.copy(alpha = 0.65f),
-                        radius = size.minDimension * 0.14f,
-                        center = glareCenter,
-                        style = Stroke(
-                            width = 1.6f,
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f),
-                        ),
-                    )
+                drawFramingScene()
+
+                // Floating magnifying glass loupe when dragging either a table corner or a ball
+                val loupeTarget: Triple<Offset, String, Color>? = when {
+                    activeCornerIndex != null && activeCornerIndex in quadCornersPx.indices -> {
+                        val label = CORNER_LABELS.getOrElse(activeCornerIndex) { "C$activeCornerIndex" }
+                        Triple(toCanvas(quadCornersPx[activeCornerIndex]), label, WarningAmberColor)
+                    }
+                    draggedCandidateId != null -> {
+                        val draggedCand = photo.rawDetections.firstOrNull { it.id == draggedCandidateId }
+                        draggedCand?.let { cand ->
+                            val num = candidateLookup[cand.id]?.second
+                            val label = when (num) {
+                                null -> "Ball"
+                                0 -> "Cue Ball"
+                                else -> "Ball #$num"
+                            }
+                            Triple(toCanvas(cand.imageCenterPx), label, GuideCyanColor)
+                        }
+                    }
+                    else -> null
                 }
 
-                // 4. Detected balls in image space
-                val detectionRadiusPx = max(8f, size.minDimension * 0.030f)
-                val ballFontSp = with(density) { (detectionRadiusPx * 0.95f).toSp() }
-                for (candidate in photo.rawDetections) {
-                    val center = toCanvas(candidate.imageCenterPx)
-                    val match = candidateLookup[candidate.id]
-                    val assignedNumber = match?.second
-                    val needsReview = match?.first?.needsUserReview == true
-                    drawImageSpaceBall(
-                        candidate = candidate,
-                        assignedNumber = assignedNumber,
-                        needsReview = needsReview,
-                        ballSet = ballSet,
-                        center = center,
-                        radiusPx = detectionRadiusPx,
+                if (loupeTarget != null) {
+                    val (focusPos, badge, accent) = loupeTarget
+                    val loupeR = minOf(with(density) { 56.dp.toPx() }, size.minDimension * 0.25f)
+                    val clearance = with(density) { 42.dp.toPx() }
+                    val loupeCenter = computeLoupeCenter(
+                        targetCanvasPos = focusPos,
+                        canvasSize = size,
+                        loupeRadiusPx = loupeR,
+                        fingerClearancePx = clearance,
+                    )
+                    drawPrecisionLoupe(
+                        focusCanvasPos = focusPos,
+                        loupeCenter = loupeCenter,
+                        loupeRadiusPx = loupeR,
+                        zoom = 2.5f,
+                        accentColor = accent,
+                        badgeLabel = badge,
+                        showCenterRedDot = true,
+                        showCrosshair = true,
                         textMeasurer = textMeasurer,
-                        fontSizeSp = ballFontSp,
-                    )
-                }
-
-                // 5. Draggable corner handles (HL, FL, FR, HR)
-                val handleLabelSp = with(density) { 10.dp.toSp() }
-                quadCornersPx.forEachIndexed { index, cornerPx ->
-                    val label = CORNER_LABELS.getOrElse(index) { "C$index" }
-                    val center = toCanvas(cornerPx)
-                    val isActive = activeCornerIndex == index
-                    val handleColor = if (isActive) WarningAmberColor else GuideCyanColor
-                    drawCircle(
-                        color = handleColor.copy(alpha = if (isActive) 0.34f else 0.20f),
-                        radius = if (isActive) 22f else 17f,
-                        center = center,
-                    )
-                    drawCircle(
-                        color = handleColor,
-                        radius = if (isActive) 10f else 8f,
-                        center = center,
-                    )
-                    drawCircle(
-                        color = ViewfinderBackdropColor,
-                        radius = 3.5f,
-                        center = center,
-                    )
-                    val tagLayout = textMeasurer.measure(
-                        text = label,
-                        style = TextStyle(
-                            color = handleColor,
-                            fontSize = handleLabelSp,
-                            fontWeight = FontWeight.Bold,
-                        ),
-                    )
-                    val tagX = (center.x + 12f).coerceIn(
-                        4f,
-                        (size.width - tagLayout.size.width - 4f).coerceAtLeast(4f),
-                    )
-                    val tagY = (center.y - tagLayout.size.height - 8f).coerceIn(
-                        4f,
-                        (size.height - tagLayout.size.height - 4f).coerceAtLeast(4f),
-                    )
-                    drawText(
-                        textLayoutResult = tagLayout,
-                        topLeft = Offset(tagX, tagY),
+                        labelFontSp = handleLabelSp,
+                        drawZoomedScene = { drawFramingScene() },
                     )
                 }
             }
@@ -1669,6 +1944,109 @@ private fun InteractiveFramingGuideCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = ErrorRedColor,
                 )
+            }
+
+            if (isRescanningArea || rescanFeedbackMessage != null) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.40f)),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (isRescanningArea) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Text(
+                                text = "Scanning tapped area for missed balls...",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f),
+                            )
+                        } else if (rescanFeedbackMessage != null) {
+                            Text(
+                                text = rescanFeedbackMessage,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = onDismissFeedback) {
+                                Text("Hide")
+                            }
+                        }
+                    }
+                }
+            }
+
+            val selectedMatch = activeCandidateId?.let { id ->
+                displayedBalls.firstOrNull { (item, _) -> item.candidateId == id }
+            }
+            if (selectedMatch != null) {
+                val (selectedItem, effectiveNum) = selectedMatch
+                val rawCand = photo.rawDetections.firstOrNull { it.id == selectedItem.candidateId }
+                val colorHint = rawCand?.dominantColor?.name?.lowercase()?.replaceFirstChar { it.uppercase() } ?: "Auto"
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    border = BorderStroke(1.dp, GuideCyanColor.copy(alpha = 0.55f)),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                MiniBallSwatch(ballNumber = effectiveNum, ballSet = ballSet)
+                                Column {
+                                    Text(
+                                        text = if (effectiveNum == 0) "Selected: Cue Ball (0)" else "Selected: Ball #$effectiveNum",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Text(
+                                        text = "Detected color: $colorHint • Drag on photo to align",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                TextButton(onClick = { onDeleteBallCandidate(selectedItem.candidateId) }) {
+                                    Text("Remove", color = ErrorRedColor)
+                                }
+                                TextButton(onClick = { onSelectBallCandidate(null) }) {
+                                    Text("Done")
+                                }
+                            }
+                        }
+
+                        BallNumberSelectionGrid(
+                            selectedNumber = effectiveNum,
+                            ballSet = ballSet,
+                            onSelectNumber = { num -> onReassignBallNumber(selectedItem.candidateId, num) },
+                        )
+                    }
+                }
             }
         }
     }
@@ -1791,12 +2169,88 @@ private fun DrawScope.drawImageSpaceBall(
     candidate: DetectedBallCandidate,
     assignedNumber: Int?,
     needsReview: Boolean,
+    isSelected: Boolean,
+    isBeingDragged: Boolean,
     ballSet: BallSetProfile,
     center: Offset,
     radiusPx: Float,
     textMeasurer: TextMeasurer,
     fontSizeSp: TextUnit,
 ) {
+    val baseColor = if (assignedNumber != null) {
+        ballBaseColor(assignedNumber, ballSet)
+    } else {
+        ballPaletteToComposeColor(candidate.dominantColor)
+    }
+    val whiteBase = Color(0xFFF8FAFC)
+    val isStripe = assignedNumber != null && assignedNumber in 9..15
+
+    if (isBeingDragged) {
+        // Ghost ball ring keeping the original underlying photo unobstructed with a red center dot
+        drawCircle(
+            color = GuideCyanColor.copy(alpha = 0.24f),
+            radius = radiusPx * 1.48f,
+            center = center,
+            style = Stroke(width = 2.0f),
+        )
+        drawCircle(
+            color = baseColor.copy(alpha = 0.80f),
+            radius = radiusPx * 1.04f,
+            center = center,
+            style = Stroke(
+                width = 2.6f,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(5f, 3.5f), 0f),
+            ),
+        )
+        if (isStripe) {
+            drawCircle(
+                color = whiteBase.copy(alpha = 0.85f),
+                radius = radiusPx * 0.82f,
+                center = center,
+                style = Stroke(
+                    width = 1.6f,
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f), 0f),
+                ),
+            )
+        }
+        drawCircle(color = Color(0xEE0F172A), radius = 3.8f, center = center)
+        drawCircle(color = whiteBase, radius = 3.0f, center = center)
+        drawCircle(color = Color(0xFFEF4444), radius = 2.1f, center = center)
+
+        if (assignedNumber != null) {
+            val tagText = if (assignedNumber == 0) "Cue" else "#$assignedNumber"
+            val tagLayout = textMeasurer.measure(
+                text = tagText,
+                style = TextStyle(
+                    color = whiteBase,
+                    fontSize = fontSizeSp,
+                    fontWeight = FontWeight.Bold,
+                ),
+            )
+            val tagOffset = Offset(
+                x = (center.x + radiusPx * 0.95f).coerceIn(
+                    2f,
+                    (size.width - tagLayout.size.width - 4f).coerceAtLeast(2f),
+                ),
+                y = (center.y - radiusPx * 0.95f - tagLayout.size.height).coerceIn(
+                    2f,
+                    (size.height - tagLayout.size.height - 2f).coerceAtLeast(2f),
+                ),
+            )
+            drawRoundRect(
+                color = Color(0xDC0F172A),
+                topLeft = tagOffset - Offset(3f, 1.5f),
+                size = Size(tagLayout.size.width + 6f, tagLayout.size.height + 3f),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f),
+            )
+            drawText(
+                textLayoutResult = tagLayout,
+                topLeft = tagOffset,
+            )
+        }
+        return
+    }
+
     if (needsReview) {
         drawCircle(
             color = WarningAmberColor.copy(alpha = 0.28f),
@@ -1810,14 +2264,14 @@ private fun DrawScope.drawImageSpaceBall(
             style = Stroke(width = 2f),
         )
     }
-
-    val baseColor = if (assignedNumber != null) {
-        ballBaseColor(assignedNumber, ballSet)
-    } else {
-        ballPaletteToComposeColor(candidate.dominantColor)
+    if (isSelected) {
+        drawCircle(
+            color = GuideCyanColor,
+            radius = radiusPx * 1.32f,
+            center = center,
+            style = Stroke(width = 2.4f),
+        )
     }
-    val whiteBase = Color(0xFFF8FAFC)
-    val isStripe = assignedNumber != null && assignedNumber in 9..15
 
     drawCircle(
         color = Color(0x66000000),
@@ -1879,6 +2333,7 @@ private fun RectificationAndIdentityCard(
     ballSet: BallSetProfile,
     onToggleReassignCandidate: (Int) -> Unit,
     onReassignBallNumber: (candidateId: Int, newNumber: Int) -> Unit,
+    onDeleteBallCandidate: (candidateId: Int) -> Unit,
     onResetAllIdentities: () -> Unit,
     displayMode: AppDisplayMode = AppDisplayMode.PRO,
 ) {
@@ -2125,66 +2580,92 @@ private fun RectificationAndIdentityCard(
 
                         if (isExpanded) {
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(
-                                    text = "Reassign ball number (1–15; picking an active number swaps the two balls):",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                (1..15).chunked(5).forEach { rowNumbers ->
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    ) {
-                                        rowNumbers.forEach { number ->
-                                            val isCurrent = number == effectiveNumber
-                                            Surface(
-                                                modifier = Modifier
-                                                    .weight(1f)
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .clickable { onReassignBallNumber(item.candidateId, number) },
-                                                shape = RoundedCornerShape(8.dp),
-                                                color = if (isCurrent) {
-                                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
-                                                } else {
-                                                    MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
-                                                },
-                                                border = BorderStroke(
-                                                    width = if (isCurrent) 1.5.dp else 1.dp,
-                                                    color = if (isCurrent) {
-                                                        MaterialTheme.colorScheme.primary
-                                                    } else {
-                                                        MaterialTheme.colorScheme.surfaceVariant
-                                                    },
-                                                ),
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 7.dp),
-                                                    horizontalArrangement = Arrangement.Center,
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                ) {
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .size(9.dp)
-                                                            .clip(CircleShape)
-                                                            .background(ballBaseColor(number, ballSet)),
-                                                    )
-                                                    Spacer(modifier = Modifier.width(5.dp))
-                                                    Text(
-                                                        text = "$number",
-                                                        style = MaterialTheme.typography.labelMedium,
-                                                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
-                                                        color = if (isCurrent) {
-                                                            MaterialTheme.colorScheme.primary
-                                                        } else {
-                                                            MaterialTheme.colorScheme.onSurface
-                                                        },
-                                                    )
-                                                }
-                                            }
-                                        }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = "Assign number (Cue or 1–15; active numbers swap):",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    TextButton(onClick = { onDeleteBallCandidate(item.candidateId) }) {
+                                        Text("Remove", color = ErrorRedColor)
                                     }
                                 }
+                                BallNumberSelectionGrid(
+                                    selectedNumber = effectiveNumber,
+                                    ballSet = ballSet,
+                                    onSelectNumber = { num -> onReassignBallNumber(item.candidateId, num) },
+                                )
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BallNumberSelectionGrid(
+    selectedNumber: Int,
+    ballSet: BallSetProfile,
+    onSelectNumber: (Int) -> Unit,
+) {
+    val allNumbers = remember { listOf(0) + (1..15).toList() }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        allNumbers.chunked(4).forEach { rowNumbers ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                rowNumbers.forEach { number ->
+                    val isCurrent = number == selectedNumber
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onSelectNumber(number) },
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isCurrent) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                        } else {
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                        },
+                        border = BorderStroke(
+                            width = if (isCurrent) 1.5.dp else 1.dp,
+                            color = if (isCurrent) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            },
+                        ),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 7.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(9.dp)
+                                    .clip(CircleShape)
+                                    .background(ballBaseColor(number, ballSet)),
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = if (number == 0) "Cue" else "$number",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                                color = if (isCurrent) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                            )
                         }
                     }
                 }
