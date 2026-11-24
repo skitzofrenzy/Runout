@@ -30,6 +30,9 @@ data class PostShotTableSimulation(
     val cueBallTrajectory: CueBallTrajectory,
     val disturbedBalls: List<DisplacedBallPath>,
     val resultingLayout: TableLayout,
+    val targetBallTrajectory: DisplacedBallPath? = null,
+    val targetBallPotted: Boolean = true,
+    val cueBallStoppedBeforeImpact: Boolean = false,
 )
 
 /**
@@ -37,7 +40,7 @@ data class PostShotTableSimulation(
  * cue-ball-to-cluster collisions, chain impacts, cushion rebounds, and evolved table layouts.
  */
 object TableCollisionSimulator {
-    private const val BALL_RESTITUTION: Double = 0.93
+    private const val BALL_RESTITUTION: Double = MotionPhysics.BALL_BALL_RESTITUTION
     private const val MIN_SPEED_MPS: Double = 1e-4
     private const val MIN_DISPLACEMENT_RECORD_METERS: Double = 0.002
 
@@ -50,6 +53,7 @@ object TableCollisionSimulator {
         var active: Boolean = true,
         var pocketedIn: PocketId? = null,
         var railBounces: Int = 0,
+        var ballCollisions: Int = 0,
         val path: MutableList<Vec2> = mutableListOf(initialPos),
     )
 
@@ -90,22 +94,85 @@ object TableCollisionSimulator {
         aim: GhostBallAim,
         cueSpeedMps: Double,
         tip: TipOffset,
-        maxEvents: Int = 20,
+        maxEvents: Int = 24,
     ): PostShotTableSimulation {
         val table = layout.table
         val preset = tip.toSpinPreset()
-        val postState = SpinPhysics.computePostImpactCueState(aim, cueSpeedMps, tip, table)
         val cueRadius = layout.cueBall()?.radiusMeters ?: table.ballRadiusMeters
+        val preImpact = SpinPhysics.computePreImpactCueState(
+            cueSpeedMps = cueSpeedMps,
+            tip = tip,
+            cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+            table = table,
+        )
+        if (preImpact.state == SpinPhysics.ImpactSpinState.STOPPED_SHORT) {
+            val cueStop = clampToBounds(
+                pos = aim.cueBallPos + aim.aimDirection * preImpact.travelledDistanceMeters,
+                table = table,
+                radius = cueRadius,
+            )
+            val scratchAtStop = detectPocketAtPoint(cueStop, table.pockets)?.id
+            val cueTrajectory = CueBallTrajectory(
+                spin = preset,
+                points = listOf(aim.cueBallPos, cueStop),
+                initialDeflectionAngleRad = 0.0,
+                hitsScratchPocket = scratchAtStop,
+            )
+            val evolvedBalls = layout.balls.map { ball ->
+                if (ball.isCueBall) ball.copy(position = cueStop) else ball
+            }
+            return PostShotTableSimulation(
+                cueBallTrajectory = cueTrajectory,
+                disturbedBalls = emptyList(),
+                resultingLayout = TableLayout(table = table, balls = evolvedBalls),
+                targetBallTrajectory = DisplacedBallPath(
+                    ballNumber = targetBall.number,
+                    points = listOf(targetBall.position),
+                    pocketedIn = null,
+                ),
+                targetBallPotted = false,
+                cueBallStoppedBeforeImpact = true,
+            )
+        }
+
+        val postState = SpinPhysics.computePostImpactCueState(aim, cueSpeedMps, tip, table)
+        val muR = table.cloth.rollingResistanceMuR.coerceAtLeast(1e-4)
+        val decel = muR * MotionPhysics.GRAVITY_M_S2
+
+        val vOb0 = MotionPhysics.transferredObjectBallInitialSpeedMps(
+            cueImpactSpeedMps = preImpact.impactSpeedMps,
+            cutAngleRad = aim.cutAngleRadians,
+            restitution = BALL_RESTITUTION,
+        )
+        val obMaxDist = MotionPhysics.objectBallStoppingDistanceMeters(
+            initialObjectSpeedMps = vOb0,
+            muS = table.cloth.slidingFrictionMuS,
+            muR = muR,
+        )
+        val vObEff = MotionPhysics.initialRollingSpeedForDistance(obMaxDist, muR)
+        val initialTargetVel = if (vObEff > MIN_SPEED_MPS) {
+            aim.objectBallDirection * vObEff
+        } else {
+            Vec2.ZERO
+        }
+        val aimedPocket = detectPocketAtPoint(aim.pocketAimPos, table.pockets)
 
         val remaining = layout.balls.filter { !it.isCueBall && it.number != targetBall.number }
         val startCuePos = clampToBounds(aim.ghostBallCenter, table, cueRadius)
-        val simBalls = ArrayList<SimBall>(remaining.size + 1)
+        val simBalls = ArrayList<SimBall>(remaining.size + 2)
         simBalls += SimBall(
             number = 0,
             radius = cueRadius,
             initialPos = startCuePos,
             pos = startCuePos,
             vel = postState.initialVelocity,
+        )
+        simBalls += SimBall(
+            number = targetBall.number,
+            radius = targetBall.radiusMeters,
+            initialPos = targetBall.position,
+            pos = targetBall.position,
+            vel = initialTargetVel,
         )
         for (ball in remaining) {
             simBalls += SimBall(
@@ -117,11 +184,9 @@ object TableCollisionSimulator {
             )
         }
 
-        val muR = table.cloth.rollingResistanceMuR.coerceAtLeast(1e-4)
-        val decel = muR * MotionPhysics.GRAVITY_M_S2
         var cueScratchPocket: PocketId? = detectPocketAtPoint(startCuePos, table.pockets)?.id
 
-        if (cueScratchPocket == null && postState.effectiveInitialSpeedMps > MIN_SPEED_MPS) {
+        if (cueScratchPocket == null && (postState.effectiveInitialSpeedMps > MIN_SPEED_MPS || vObEff > MIN_SPEED_MPS)) {
             for (step in 0 until maxEvents.coerceAtLeast(1)) {
                 val movingIndices = simBalls.indices.filter { idx ->
                     simBalls[idx].active && simBalls[idx].vel.length() > MIN_SPEED_MPS
@@ -155,6 +220,17 @@ object TableCollisionSimulator {
                     val dir = sb.vel / speed
                     val stopDist = (speed * speed) / (2.0 * decel)
 
+                    if (idx == 1 && sb.railBounces == 0 && sb.ballCollisions == 0 && aimedPocket != null) {
+                        val distToPocketCenter = sb.pos.distanceTo(aimedPocket.center)
+                        val dropDist = (distToPocketCenter - aimedPocket.acceptanceRadiusMeters * 0.75)
+                            .coerceAtLeast(0.0)
+                        if (stopDist >= dropDist) {
+                            val tDrop = timeToTravelDistance(speed, dropDist.coerceAtMost(stopDist), decel).coerceAtLeast(1e-6)
+                            consider(SimEvent.PocketDrop(tDrop, idx, aimedPocket))
+                        }
+                        continue
+                    }
+
                     val railHit = intersectRails(sb.pos, dir, table, sb.radius)
                     val pocketCheckDist = if (stopDist >= railHit.distance) railHit.distance + sb.radius else stopDist
 
@@ -179,6 +255,13 @@ object TableCollisionSimulator {
                         }
                         val ballB = simBalls[j]
                         if (!ballB.active) continue
+                        val isPrimaryContactPair = (i == 0 && j == 1) || (i == 1 && j == 0)
+                        if (isPrimaryContactPair &&
+                            ballA.railBounces == 0 && ballB.railBounces == 0 &&
+                            ballA.ballCollisions == 0 && ballB.ballCollisions == 0
+                        ) {
+                            continue
+                        }
                         val tColl = findBallCollisionTime(ballA, ballB, decel)
                         if (tColl != null) {
                             consider(SimEvent.BallCollision(tColl, i, j))
@@ -221,7 +304,6 @@ object TableCollisionSimulator {
                         appendPathPoint(sb.path, event.pocket.center)
                         if (sb.number == 0) {
                             cueScratchPocket = event.pocket.id
-                            break
                         }
                     }
 
@@ -276,6 +358,8 @@ object TableCollisionSimulator {
                             if (ballA.vel.length() <= MIN_SPEED_MPS) ballA.vel = Vec2.ZERO
                             if (ballB.vel.length() <= MIN_SPEED_MPS) ballB.vel = Vec2.ZERO
                         }
+                        ballA.ballCollisions++
+                        ballB.ballCollisions++
                     }
                 }
             }
@@ -329,15 +413,21 @@ object TableCollisionSimulator {
             }
         }
 
-        val cueSim = simBalls.first()
+        val cueSim = simBalls[0]
+        val targetSim = simBalls[1]
         val cueTrajectory = CueBallTrajectory(
             spin = preset,
             points = cueSim.path.toList(),
             initialDeflectionAngleRad = postState.initialDeflectionAngleRad,
             hitsScratchPocket = cueScratchPocket,
         )
+        val targetTrajectory = DisplacedBallPath(
+            ballNumber = targetSim.number,
+            points = targetSim.path.toList(),
+            pocketedIn = targetSim.pocketedIn,
+        )
 
-        val disturbed = simBalls.drop(1).mapNotNull { sb ->
+        val disturbed = simBalls.drop(2).mapNotNull { sb ->
             val displaced = sb.pos.distanceTo(sb.initialPos) > MIN_DISPLACEMENT_RECORD_METERS
             if (!displaced && sb.pocketedIn == null) {
                 null
@@ -367,6 +457,9 @@ object TableCollisionSimulator {
             cueBallTrajectory = cueTrajectory,
             disturbedBalls = disturbed,
             resultingLayout = TableLayout(table = table, balls = evolvedBalls),
+            targetBallTrajectory = targetTrajectory,
+            targetBallPotted = targetSim.pocketedIn != null,
+            cueBallStoppedBeforeImpact = false,
         )
     }
 

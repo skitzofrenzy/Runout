@@ -33,6 +33,7 @@ data class ShotUncertaintyResult(
     val landingSpreadRadiusMeters: Double,
     val postShotSimulation: PostShotTableSimulation? = null,
     val nominalLandingPosition: Vec2 = meanLandingPosition,
+    val targetBallPotted: Boolean = true,
 )
 
 /**
@@ -119,7 +120,10 @@ object ExecutionErrorModel {
         )
 
         val muR = table.cloth.rollingResistanceMuR.coerceAtLeast(1e-4)
+        val muS = table.cloth.slidingFrictionMuS.coerceAtLeast(1e-4)
         val g = MotionPhysics.GRAVITY_M_S2
+        val dropDist = (aim.objectToPocketDistanceMeters - pocket.acceptanceRadiusMeters * 0.75)
+            .coerceAtLeast(0.02)
         val contactDist = cueBallRadius + targetBall.radiusMeters
         val contactGain = (1.0 + aim.cueToGhostDistanceMeters / (2.0 * targetBall.radiusMeters).coerceAtLeast(0.05)) * 0.18
         val cosCut = cos(aim.cutAngleRadians).coerceAtLeast(0.22)
@@ -231,14 +235,20 @@ object ExecutionErrorModel {
                 cueToGhostDistanceMeters = perturbedAim.cueToGhostDistanceMeters,
                 table = table,
             )
-            val vObjInitial = preImpact.impactSpeedMps * cos(abs(perturbedCut)).coerceAtLeast(0.05) * 0.96
-            val objMaxDist = MotionPhysics.rollingStoppingDistanceMeters(vObjInitial, muR, g)
-            val reachesPocket = preImpact.impactSpeedMps > 0.03 &&
-                objMaxDist >= aim.objectToPocketDistanceMeters * 0.92
+            val vObjInitial = MotionPhysics.transferredObjectBallInitialSpeedMps(
+                cueImpactSpeedMps = preImpact.impactSpeedMps,
+                cutAngleRad = perturbedCut,
+            )
+            val objMaxDist = MotionPhysics.objectBallStoppingDistanceMeters(vObjInitial, muS, muR, g)
+            val reachesPocket = preImpact.state != SpinPhysics.ImpactSpinState.STOPPED_SHORT &&
+                preImpact.impactSpeedMps > 0.03 &&
+                objMaxDist >= dropDist
             if (reachesPocket) {
                 weightedReachFrac += point.weight
-                val arrivalSpeed = sqrt(
-                    max(0.0, vObjInitial * vObjInitial - 2.0 * muR * g * aim.objectToPocketDistanceMeters),
+                val arrivalSpeed = MotionPhysics.initialRollingSpeedForDistance(
+                    distanceMeters = (objMaxDist - dropDist).coerceAtLeast(0.0),
+                    muR = muR,
+                    g = g,
                 )
                 val pointHalfAngle = pocketAcceptanceHalfAngleRadians(
                     objectBallPos = targetBall.position,
@@ -275,9 +285,15 @@ object ExecutionErrorModel {
             cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
             table = table,
         )
-        val nomVObj = nomPreImpact.impactSpeedMps * cos(abs(aim.cutAngleRadians)).coerceAtLeast(0.05) * 0.96
-        val nomArrivalSpeed = sqrt(
-            max(0.0, nomVObj * nomVObj - 2.0 * muR * g * aim.objectToPocketDistanceMeters),
+        val nomVObj = MotionPhysics.transferredObjectBallInitialSpeedMps(
+            cueImpactSpeedMps = nomPreImpact.impactSpeedMps,
+            cutAngleRad = aim.cutAngleRadians,
+        )
+        val nomObjMaxDist = MotionPhysics.objectBallStoppingDistanceMeters(nomVObj, muS, muR, g)
+        val nomArrivalSpeed = MotionPhysics.initialRollingSpeedForDistance(
+            distanceMeters = (nomObjMaxDist - dropDist).coerceAtLeast(0.0),
+            muR = muR,
+            g = g,
         )
         val nomHalfAngle = pocketAcceptanceHalfAngleRadians(
             objectBallPos = targetBall.position,
@@ -287,8 +303,10 @@ object ExecutionErrorModel {
         )
         val sigmaThetaObj = sigmaAim * contactGain / cosCut
         val gaussianMakeProb = exp(-0.5 * (sigmaThetaObj / nomHalfAngle).pow(2))
+        val targetPottedNominally = nominalSimulation.targetBallPotted &&
+            !nominalSimulation.cueBallStoppedBeforeImpact
 
-        val makeProbability = if (!aim.isShotPlayable) {
+        val makeProbability = if (!aim.isShotPlayable || weightedReachFrac <= 1e-6) {
             0.02
         } else {
             val rawMake = gaussianMakeProb * weightedReachFrac * (0.55 + 0.45 * weightedEnsembleMake)
@@ -312,6 +330,7 @@ object ExecutionErrorModel {
             landingSpreadRadiusMeters = spreadRadius,
             postShotSimulation = nominalSimulation,
             nominalLandingPosition = nominalStop,
+            targetBallPotted = targetPottedNominally,
         )
     }
 }

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -52,8 +53,10 @@ import com.runout.engine.model.EightBallGroup
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
+import com.runout.engine.model.PocketSpec
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
+import com.runout.engine.physics.AimGeometry
 import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
@@ -679,6 +682,9 @@ fun CueBallSandboxPanel(
     onClose: () -> Unit,
     compactVertical: Boolean = false,
     cueToObjectDistanceMeters: Double? = null,
+    activeAim: AimGeometry? = null,
+    activePocket: PocketSpec? = null,
+    activeTargetBallNumber: Int? = lockedTargetBallNumber,
     playerProfile: PlayerProfile = PlayerProfile(),
     tableSpec: TableSpec = TableSpec.nineFootPool(),
     modifier: Modifier = Modifier,
@@ -687,16 +693,36 @@ fun CueBallSandboxPanel(
     val formattedSpeed = PlayerProfile.formatSpeedUnits(snappedSpeed)
     val speedWord = sandboxSpeedLabel(snappedSpeed)
     val spinMixSummary = activeTip.describeSpinLabel(short = compactVertical)
-    val impactTransitionNote = remember(activeTip, snappedSpeed, cueToObjectDistanceMeters, playerProfile, tableSpec) {
-        cueToObjectDistanceMeters?.let { dist ->
-            SpinPhysics.describeImpactTransition(
+    val cueSpeedMps = playerProfile.speedForUnits(snappedSpeed)
+    val shotCoachingNote = remember(
+        activeTip,
+        snappedSpeed,
+        cueToObjectDistanceMeters,
+        activeAim,
+        activePocket,
+        activeTargetBallNumber,
+        playerProfile,
+        tableSpec,
+    ) {
+        when {
+            activeAim != null && activePocket != null -> SpinPhysics.describeShotPowerAndSpin(
                 tip = activeTip,
-                cueSpeedMps = playerProfile.speedForUnits(snappedSpeed),
-                cueToGhostDistanceMeters = dist,
+                cueSpeedMps = cueSpeedMps,
+                aim = activeAim,
+                pocket = activePocket,
+                table = tableSpec,
+                targetBallNumber = activeTargetBallNumber,
+            )
+            cueToObjectDistanceMeters != null -> SpinPhysics.describeImpactTransition(
+                tip = activeTip,
+                cueSpeedMps = cueSpeedMps,
+                cueToGhostDistanceMeters = cueToObjectDistanceMeters,
                 table = tableSpec,
             )
+            else -> null
         }
     }
+    val isUnderpoweredShot = shotCoachingNote?.contains("stops short", ignoreCase = true) == true
 
     val spinPresets = listOf(
         "Auto" to null,
@@ -729,13 +755,18 @@ fun CueBallSandboxPanel(
                 .padding(if (compactVertical) 10.dp else 12.dp),
             verticalArrangement = Arrangement.spacedBy(if (compactVertical) 8.dp else 10.dp),
         ) {
-            // Header
+            // Fixed-height header so mode/ball transitions never shift the cue ball canvas
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(38.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.Center,
+                ) {
                     Text(
                         text = "Cue Ball Sandbox",
                         style = MaterialTheme.typography.titleSmall,
@@ -744,14 +775,21 @@ fun CueBallSandboxPanel(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (lockedTargetBallNumber != null) {
-                        Text(
-                            text = "Testing #${lockedTargetBallNumber} live",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            maxLines = 1,
-                        )
-                    }
+                    Text(
+                        text = when {
+                            lockedTargetBallNumber != null -> "Testing Ball #$lockedTargetBallNumber live"
+                            activeTargetBallNumber != null -> "Ball #$activeTargetBallNumber • drag tip or speed"
+                            else -> "Drag tip or speed to test live"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (lockedTargetBallNumber != null) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -771,6 +809,7 @@ fun CueBallSandboxPanel(
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.SemiBold,
                             color = if (hasOverrides) RunoutColors.WarningAmber else RunoutColors.SuccessGreen,
+                            maxLines = 1,
                         )
                     }
                     TextButton(
@@ -794,20 +833,29 @@ fun CueBallSandboxPanel(
                         onUpdateTip = { onUpdateTip(it) },
                         modifier = Modifier.size(116.dp),
                     )
-                    Text(
-                        text = "Spin: $spinMixSummary",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (impactTransitionNote != null) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(78.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
                         Text(
-                            text = impactTransitionNote,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = "Spin: $spinMixSummary",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
                             maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = shotCoachingNote ?: "Drag tip or speed to preview live cue & ball travel",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isUnderpoweredShot) {
+                                RunoutColors.WarningAmber
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            maxLines = 3,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
@@ -821,34 +869,52 @@ fun CueBallSandboxPanel(
                 }
             } else {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(156.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    CueTipSelectorCanvas(
-                        tipOffset = activeTip,
-                        defaultTipOffset = if (customTipOffset != null) defaultTip else null,
-                        onUpdateTip = { onUpdateTip(it) },
-                        modifier = Modifier.size(126.dp),
-                    )
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    Box(
+                        modifier = Modifier.fillMaxHeight(),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            text = "Spin: $spinMixSummary",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.primary,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
+                        CueTipSelectorCanvas(
+                            tipOffset = activeTip,
+                            defaultTipOffset = if (customTipOffset != null) defaultTip else null,
+                            onUpdateTip = { onUpdateTip(it) },
+                            modifier = Modifier.size(128.dp),
                         )
-                        if (impactTransitionNote != null) {
+                    }
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(),
+                        verticalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(84.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
                             Text(
-                                text = impactTransitionNote,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                text = "Spin: $spinMixSummary",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
                                 maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = shotCoachingNote ?: "Drag tip or speed to preview live cue & ball travel",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isUnderpoweredShot) {
+                                    RunoutColors.WarningAmber
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                maxLines = 3,
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
@@ -863,12 +929,14 @@ fun CueBallSandboxPanel(
                 }
             }
 
-            // Quick spin presets (graded + mixed combinations)
+            // Quick spin presets (fixed height so chip selection never alters card size)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .height(if (compactVertical) 38.dp else 42.dp)
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 spinPresets.forEach { (label, tip) ->
                     val isSelected = if (tip == null) {
@@ -881,30 +949,32 @@ fun CueBallSandboxPanel(
                     FilterChip(
                         selected = isSelected,
                         onClick = { onUpdateTip(tip) },
-                        modifier = Modifier.defaultMinSize(minHeight = if (compactVertical) 36.dp else 40.dp),
-                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.height(if (compactVertical) 36.dp else 40.dp),
+                        label = { Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1) },
                     )
                 }
             }
 
-            // Auto speed + Reset to Plan Defaults
+            // Auto speed + Reset to Plan Defaults (fixed height)
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(if (compactVertical) 40.dp else 44.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 FilterChip(
                     selected = speedUnitsOverride == null,
                     onClick = { onUpdateSpeedUnits(null) },
-                    modifier = Modifier.defaultMinSize(minHeight = if (compactVertical) 38.dp else 44.dp),
-                    label = { Text("Auto Speed", style = MaterialTheme.typography.labelSmall) },
+                    modifier = Modifier.height(if (compactVertical) 38.dp else 44.dp),
+                    label = { Text("Auto Speed", style = MaterialTheme.typography.labelSmall, maxLines = 1) },
                 )
                 OutlinedButton(
                     onClick = onResetDefaults,
                     enabled = hasOverrides,
                     modifier = Modifier
                         .weight(1f)
-                        .defaultMinSize(minHeight = if (compactVertical) 38.dp else 44.dp),
+                        .height(if (compactVertical) 38.dp else 44.dp),
                 ) {
                     Text(
                         text = if (compactVertical) "Reset Defaults" else "Reset to Plan Defaults",
@@ -928,11 +998,15 @@ private fun SpeedHalfStepControlBlock(
     onUpdateSpeedUnits: (Double?) -> Unit,
 ) {
     Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(68.dp),
+        verticalArrangement = Arrangement.SpaceBetween,
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(24.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -941,6 +1015,9 @@ private fun SpeedHalfStepControlBlock(
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -960,6 +1037,7 @@ private fun SpeedHalfStepControlBlock(
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
                     )
                 }
                 Surface(
@@ -976,12 +1054,14 @@ private fun SpeedHalfStepControlBlock(
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
                     )
                 }
                 Text(
                     text = if (isAuto) "Auto" else "Manual",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (isAuto) MaterialTheme.colorScheme.secondary else RunoutColors.WarningAmber,
+                    maxLines = 1,
                 )
             }
         }
@@ -992,13 +1072,15 @@ private fun SpeedHalfStepControlBlock(
             },
             valueRange = 0.5f..10.0f,
             steps = 18,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(42.dp),
         )
     }
 }
 
 private fun sandboxSpeedLabel(units: Double): String = when {
-    units <= 1.5 -> "Touch / Lag"
+    units <= 1.5 -> "Touch"
     units <= 3.0 -> "Gentle"
     units <= 5.5 -> "Medium"
     units <= 7.5 -> "Firm"

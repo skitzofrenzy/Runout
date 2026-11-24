@@ -287,6 +287,7 @@ fun App() {
     var customPocketOverride by remember { mutableStateOf<PocketId?>(null) }
     var showCueSandboxPanel by remember { mutableStateOf(false) }
     var sandboxTargetBallNumber by remember { mutableStateOf<Int?>(null) }
+    var sandboxPocketId by remember { mutableStateOf<PocketId?>(null) }
     var defaultTipForActiveShot by remember { mutableStateOf<TipOffset?>(null) }
     var defaultSpeedForActiveShot by remember { mutableStateOf<Double?>(null) }
     var focusedStepIndex by remember { mutableIntStateOf(0) }
@@ -336,6 +337,7 @@ fun App() {
         speedUnitsOverride,
         customPocketOverride,
         sandboxTargetBallNumber,
+        sandboxPocketId,
         planningReadiness.isReady,
         isDraggingBall,
     ) {
@@ -358,7 +360,7 @@ fun App() {
         val tipSnapshot = customTipOffset
         val speedSnapshot = speedUnitsOverride
         val targetSnapshot = sandboxTargetBallNumber
-        val pocketSnapshot = customPocketOverride
+        val pocketSnapshot = customPocketOverride ?: sandboxPocketId
         val allowScratchSandbox = tipSnapshot != null || speedSnapshot != null
         val (plans, shots) = withContext(Dispatchers.Default) {
             val computedPlans = MultiShotPlanner.planRunout(
@@ -430,6 +432,7 @@ fun App() {
         if (safeFocusedStepIndex > 0) focusedStepIndex = 0
         if (customPocketOverride != null) customPocketOverride = null
         sandboxTargetBallNumber = null
+        sandboxPocketId = null
         hasActiveSession = true
     }
 
@@ -438,18 +441,26 @@ fun App() {
         speedUnitsOverride = null
         customPocketOverride = null
         sandboxTargetBallNumber = null
+        sandboxPocketId = null
         focusedStepIndex = 0
         selectedPlanIndex = 0
         selectedShotIndex = 0
     }
 
     fun handleUpdateSandboxTip(nextTip: TipOffset?) {
-        if (nextTip != null && sandboxTargetBallNumber == null) {
-            sandboxTargetBallNumber = activePlan?.steps?.firstOrNull()?.targetBall?.number
+        if (nextTip != null) {
+            val activeFirst = activePlan?.steps?.firstOrNull()
+            if (sandboxTargetBallNumber == null) {
+                sandboxTargetBallNumber = activeFirst?.targetBall?.number
+            }
+            if (sandboxPocketId == null && customPocketOverride == null) {
+                sandboxPocketId = activeFirst?.pocketId
+            }
         }
         customTipOffset = nextTip
         if (nextTip == null && speedUnitsOverride == null && customPocketOverride == null) {
             sandboxTargetBallNumber = null
+            sandboxPocketId = null
         }
         focusedStepIndex = 0
         selectedPlanIndex = 0
@@ -457,12 +468,19 @@ fun App() {
 
     fun handleUpdateSandboxSpeed(nextUnits: Double?) {
         val snapped = nextUnits?.let(PlayerProfile::snapSpeedUnits)
-        if (snapped != null && sandboxTargetBallNumber == null) {
-            sandboxTargetBallNumber = activePlan?.steps?.firstOrNull()?.targetBall?.number
+        if (snapped != null) {
+            val activeFirst = activePlan?.steps?.firstOrNull()
+            if (sandboxTargetBallNumber == null) {
+                sandboxTargetBallNumber = activeFirst?.targetBall?.number
+            }
+            if (sandboxPocketId == null && customPocketOverride == null) {
+                sandboxPocketId = activeFirst?.pocketId
+            }
         }
         speedUnitsOverride = snapped
         if (snapped == null && customTipOffset == null && customPocketOverride == null) {
             sandboxTargetBallNumber = null
+            sandboxPocketId = null
         }
         focusedStepIndex = 0
         selectedPlanIndex = 0
@@ -501,6 +519,7 @@ fun App() {
             focusedStepIndex = 0
             customPocketOverride = null
             sandboxTargetBallNumber = null
+            sandboxPocketId = null
             selectedPlanIndex = 0
             selectedShotIndex = 0
             hasActiveSession = true
@@ -521,6 +540,7 @@ fun App() {
         speedUnitsOverride = null
         customPocketOverride = null
         sandboxTargetBallNumber = null
+        sandboxPocketId = null
         defaultTipForActiveShot = null
         defaultSpeedForActiveShot = null
         focusedStepIndex = 0
@@ -1715,6 +1735,13 @@ fun RunoutPracticeScreen(
                                 ?: 4.5
                             val cueToGhostMeters = activeStep?.compensatedAim?.geometricAim?.cueToGhostDistanceMeters
                                 ?: selectedShot?.aim?.cueToGhostDistanceMeters
+                            val resolvedAim = activeStep?.compensatedAim?.geometricAim
+                                ?: selectedShot?.aim
+                            val resolvedPocket = activeStep?.pocketId?.let { currentLayout.table.pocketById(it) }
+                                ?: selectedShot?.pocket
+                            val resolvedTargetNumber = sandboxTargetBallNumber
+                                ?: activeStep?.targetBall?.number
+                                ?: selectedShot?.targetBall?.number
                             CueBallSandboxPanel(
                                 activeTip = resolvedTip,
                                 defaultTip = defaultTipForShot ?: activeStep?.recommendedTip,
@@ -1729,6 +1756,9 @@ fun RunoutPracticeScreen(
                                 onClose = onCloseCueSandbox,
                                 compactVertical = false,
                                 cueToObjectDistanceMeters = cueToGhostMeters,
+                                activeAim = resolvedAim,
+                                activePocket = resolvedPocket,
+                                activeTargetBallNumber = resolvedTargetNumber,
                                 playerProfile = playerProfile,
                                 tableSpec = currentLayout.table,
                             )
@@ -1736,8 +1766,10 @@ fun RunoutPracticeScreen(
                     }
 
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(36.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
@@ -1754,18 +1786,21 @@ fun RunoutPracticeScreen(
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
                         )
                         if (hasSandboxOverrides) {
                             FilterChip(
                                 selected = true,
                                 onClick = onResetSandboxDefaults,
-                                modifier = Modifier.defaultMinSize(minHeight = 36.dp),
+                                modifier = Modifier.height(34.dp),
                                 label = {
                                     Text(
                                         text = "Reset Defaults",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
                                     )
                                 },
                             )
@@ -1775,6 +1810,7 @@ fun RunoutPracticeScreen(
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.secondary,
+                                maxLines = 1,
                             )
                         }
                     }
@@ -2718,7 +2754,9 @@ private fun CueTipEnglishCard(
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = 166.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -2729,32 +2767,52 @@ private fun CueTipEnglishCard(
             )
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                Text(
-                    text = displayedTip.describeSpinLabel(short = false),
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text = "Offset: ${formatSignedTwoDecimals(displayedTip.clampedSideRatio)}R side, ${formatSignedTwoDecimals(displayedTip.clampedVerticalRatio)}R vert",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                if (recommendedStep != null) {
-                    val transitionText = SpinPhysics.describeImpactTransition(
-                        tip = displayedTip,
-                        cueSpeedMps = recommendedStep.cueSpeedMps,
-                        cueToGhostDistanceMeters = recommendedStep.compensatedAim.geometricAim.cueToGhostDistanceMeters,
-                        table = TableSpec.nineFootPool(),
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(84.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = displayedTip.describeSpinLabel(short = false),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = transitionText,
+                        text = "Offset: ${formatSignedTwoDecimals(displayedTip.clampedSideRatio)}R side, ${formatSignedTwoDecimals(displayedTip.clampedVerticalRatio)}R vert",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                    if (recommendedStep != null) {
+                        val pocketSpec = TableSpec.nineFootPool().pocketById(recommendedStep.pocketId)
+                        val transitionText = SpinPhysics.describeShotPowerAndSpin(
+                            tip = displayedTip,
+                            cueSpeedMps = recommendedStep.cueSpeedMps,
+                            aim = recommendedStep.compensatedAim.geometricAim,
+                            pocket = pocketSpec,
+                            table = TableSpec.nineFootPool(),
+                            targetBallNumber = recommendedStep.targetBall.number,
+                        )
+                        Text(
+                            text = transitionText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (transitionText.contains("stops short", ignoreCase = true)) {
+                                RunoutColors.WarningAmber
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 if (compAim != null) {
                     CompensationMetricRow("Squirt", "${formatSignedDegrees(compAim.squirtAngleRadians)}°")

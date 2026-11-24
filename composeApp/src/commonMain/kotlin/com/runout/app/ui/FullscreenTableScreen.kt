@@ -298,6 +298,13 @@ fun FullscreenTableScreen(
                         ?: 4.5
                     val cueToGhostMeters = activeStep?.compensatedAim?.geometricAim?.cueToGhostDistanceMeters
                         ?: selectedShot?.aim?.cueToGhostDistanceMeters
+                    val resolvedAim = activeStep?.compensatedAim?.geometricAim
+                        ?: selectedShot?.aim
+                    val resolvedPocket = activeStep?.pocketId?.let { displayedLayout.table.pocketById(it) }
+                        ?: selectedShot?.pocket
+                    val resolvedTargetNumber = sandboxTargetBallNumber
+                        ?: activeStep?.targetBall?.number
+                        ?: selectedShot?.targetBall?.number
                     CueBallSandboxPanel(
                         activeTip = resolvedTip,
                         defaultTip = defaultTipForShot ?: activeStep?.recommendedTip,
@@ -312,6 +319,9 @@ fun FullscreenTableScreen(
                         onClose = onCloseCueSandbox,
                         compactVertical = true,
                         cueToObjectDistanceMeters = cueToGhostMeters,
+                        activeAim = resolvedAim,
+                        activePocket = resolvedPocket,
+                        activeTargetBallNumber = resolvedTargetNumber,
                         playerProfile = playerProfile,
                         tableSpec = displayedLayout.table,
                     )

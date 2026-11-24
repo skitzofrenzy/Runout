@@ -643,6 +643,7 @@ object MultiShotPlanner {
             tip = tip,
             playerProfile = profile,
         )
+        if (!allowHighScratch && !uncertainty.targetBallPotted) return null
         if (!allowHighScratch && uncertainty.scratchProbability >= MAX_SCRATCH_PROBABILITY) return null
         return ShotEvaluation(compensated, uncertainty, cueSpeed, preImpact)
     }
@@ -895,8 +896,13 @@ object MultiShotPlanner {
         }
         val nextBalls = baseLayout.balls.map { if (it.isCueBall) it.copy(position = finalCuePos) else it }
         val nextLayout = TableLayout(table, nextBalls)
-        val nextRules = rulesAfterPotting(rules, target)
-        val nextTargets = if (isGameOver(rules, target)) emptyList() else nextRules.legalTargetBalls(nextLayout)
+        val targetPotted = simulation?.targetBallPotted != false && simulation?.cueBallStoppedBeforeImpact != true
+        val nextRules = if (targetPotted) rulesAfterPotting(rules, target) else rules
+        val nextTargets = when {
+            !targetPotted -> emptyList()
+            isGameOver(rules, target) -> emptyList()
+            else -> nextRules.legalTargetBalls(nextLayout)
+        }
         return AdvancedState(nextLayout, nextRules, nextTargets)
     }
 
@@ -931,23 +937,28 @@ object MultiShotPlanner {
         playerProfile: PlayerProfile,
     ): HeatZoneMap? {
         val first = steps.firstOrNull() ?: return null
-        val afterFirst = first.resultingLayout ?: TableLayout(
-            initialLayout.table,
-            initialLayout.balls.filter { it.number != first.targetBall.number },
-        )
+        val hypotheticalAfterFirst = if (first.uncertainty.targetBallPotted) {
+            first.resultingLayout ?: TableLayout(
+                initialLayout.table,
+                initialLayout.balls.filter { it.number != first.targetBall.number },
+            )
+        } else {
+            val base = first.resultingLayout ?: initialLayout
+            TableLayout(base.table, base.balls.filter { it.number != first.targetBall.number })
+        }
         val targetNumbers = if (steps.size >= 2) {
             steps.drop(1).take(2).map { it.targetBall.number }
         } else if (isGameOver(initialRules, first.targetBall)) {
             emptyList()
         } else {
             rulesAfterPotting(initialRules, first.targetBall)
-                .legalTargetBalls(afterFirst)
+                .legalTargetBalls(hypotheticalAfterFirst)
                 .take(2)
                 .map { it.number }
         }
         if (targetNumbers.isEmpty()) return null
         return HeatZoneGenerator.computeForNextBalls(
-            layout = afterFirst,
+            layout = hypotheticalAfterFirst,
             targetBallNumbers = targetNumbers,
             playerProfile = playerProfile,
             cols = 32,
@@ -980,14 +991,20 @@ object MultiShotPlanner {
 
             val nextStep = steps.getOrNull(index + 1)
             val spinText = describeTip(step.recommendedTip)
-            reasons += if (nextStep != null && isGameOver(rules, nextStep.targetBall)) {
-                "Use $spinText to set up a clean, easy final shot on ball #${nextStep.targetBall.number}."
-            } else if (nextStep != null) {
-                "Use $spinText so the cue ball lands in the high-percentage zone for ball #${nextStep.targetBall.number}."
-            } else if (node.terminal) {
-                "Use $spinText; this is the last ball, so only a safe finish matters."
-            } else {
-                "Use $spinText to keep the cue ball in a good zone for the next ball."
+            val postSim = step.uncertainty.postShotSimulation
+            reasons += when {
+                postSim?.cueBallStoppedBeforeImpact == true ->
+                    "Stroke is too soft (${speedLabel}/10): the cue ball stops short before reaching ball #$ballNumber."
+                !step.uncertainty.targetBallPotted ->
+                    "Collision transfer at speed ${speedLabel}/10 leaves ball #$ballNumber short of the ${step.pocketId.displayName} pocket."
+                nextStep != null && isGameOver(rules, nextStep.targetBall) ->
+                    "Use $spinText to set up a clean, easy final shot on ball #${nextStep.targetBall.number}."
+                nextStep != null ->
+                    "Use $spinText so the cue ball lands in the high-percentage zone for ball #${nextStep.targetBall.number}."
+                node.terminal ->
+                    "Use $spinText; this is the last ball, so only a safe finish matters."
+                else ->
+                    "Use $spinText to keep the cue ball in a good zone for the next ball."
             }
 
             if (rules.gameType == GameType.EIGHT_BALL && step.targetBall.isEightBall) {

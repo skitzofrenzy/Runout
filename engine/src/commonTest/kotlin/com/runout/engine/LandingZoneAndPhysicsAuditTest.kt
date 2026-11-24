@@ -478,4 +478,125 @@ class LandingZoneAndPhysicsAuditTest {
         assertTrue(plans.isNotEmpty())
         assertEquals(3.5, plans.first().steps.first().recommendedSpeedUnits, 1e-9)
     }
+
+    @Test
+    fun softStrokeCueBallStopsShortBeforeReachingObjectBall() {
+        val profile = PlayerProfile()
+        val pocket = table.pocketById(PocketId.FOOT_RIGHT)
+        val obj = Ball(1, Vec2(2.15, 0.98), r)
+        val cue = Ball(0, Vec2(0.30, 0.30), r)
+        val layout = TableLayout(table, listOf(cue, obj))
+        val aim = GhostBallAiming.computeAimGeometry(cue, obj, pocket, layout.balls, table = table)
+        assertTrue(aim.isShotPlayable)
+
+        // Speed 0.5 with max draw across ~2.0m table distance loses all kinetic energy before contact
+        val ultraSoftSpeed = profile.speedForUnits(0.5)
+        val maxDraw = TipOffset(sideRatio = 0.0, verticalRatio = -0.45)
+        val sim = TableCollisionSimulator.simulatePostImpact(
+            layout = layout,
+            targetBall = obj,
+            aim = aim,
+            cueSpeedMps = ultraSoftSpeed,
+            tip = maxDraw,
+        )
+
+        assertTrue(sim.cueBallStoppedBeforeImpact, "Cue ball must stop short before reaching ghost ball")
+        assertFalse(sim.targetBallPotted, "Target ball cannot pot if cue ball never reached it")
+        val targetAfter = sim.resultingLayout.ballByNumber(1)
+        assertNotNull(targetAfter, "Target ball must remain on table unmoved")
+        assertEquals(obj.position.x, targetAfter.position.x, 1e-6)
+        assertEquals(obj.position.y, targetAfter.position.y, 1e-6)
+        val cueStop = sim.cueBallTrajectory.points.last()
+        assertTrue(
+            cueStop.distanceTo(cue.position) < aim.cueToGhostDistanceMeters - 0.10,
+            "Cue ball stopping point $cueStop must be strictly short of ghost center ${aim.ghostBallCenter}",
+        )
+    }
+
+    @Test
+    fun collisionPowerTransferLeavesObjectBallShortOnSoftCutWhileFirmStrokePotsIt() {
+        val profile = PlayerProfile()
+        val pocket = table.pocketById(PocketId.FOOT_RIGHT)
+        // Object ball 1.65 m from Foot Right corner with a thin ~50-degree cut from nearby cue ball
+        val obj = Ball(9, Vec2(1.08, 0.48), r)
+        val dirToPocket = (pocket.center - obj.position).normalized()
+        val ghost = obj.position - dirToPocket * (2.0 * r)
+        val cutAimDir = dirToPocket.rotate(0.92) // ~52.7 deg cut so cos|cut| ~ 0.606 transfers partial speed
+        val cue = Ball(0, ghost - cutAimDir * 0.28, r)
+        val layout = TableLayout(table, listOf(cue, obj))
+        val aim = GhostBallAiming.computeAimGeometry(cue, obj, pocket, layout.balls, table = table)
+        assertTrue(aim.isShotPlayable, "Thin cut should be geometrically playable")
+
+        // Soft speed 1.0 reaches the nearby object ball (0.28m away), but transferred speed (cos 53°)
+        // plus initial 5/7 skid friction leaves ball #9 well short of the 1.65m distant pocket!
+        val softSandboxPlans = MultiShotPlanner.planRunout(
+            layout = layout,
+            rulesState = GameRulesState(GameType.NINE_BALL),
+            playerProfile = profile,
+            customFirstShotTargetBallNumber = 9,
+            customFirstShotPocketId = PocketId.FOOT_RIGHT,
+            customFirstShotSpeedUnits = 1.0,
+            customFirstShotTip = TipOffset(0.0, 0.0),
+            allowHighScratchFirstShot = true,
+        )
+        assertTrue(softSandboxPlans.isNotEmpty(), "Sandbox must preview soft underpowered shot")
+        val softStep = softSandboxPlans.first().steps.single()
+        val softSim = assertNotNull(softStep.uncertainty.postShotSimulation)
+        assertFalse(softSim.cueBallStoppedBeforeImpact, "Cue ball at 0.28m reaches ball #9")
+        assertFalse(softSim.targetBallPotted, "Transferred speed on soft 53° cut must NOT reach 1.65m pocket")
+        assertFalse(softStep.uncertainty.targetBallPotted)
+        assertTrue(softStep.uncertainty.makeProbability <= 0.10, "Underpowered shot make% must drop near zero")
+
+        val stoppedNine = assertNotNull(
+            softSim.resultingLayout.ballByNumber(9),
+            "Stopped-short object ball #9 must remain on resultingLayout",
+        )
+        val obTravelled = stoppedNine.position.distanceTo(obj.position)
+        assertTrue(obTravelled > 0.10, "Ball #9 should move forward after impact, moved $obTravelled m")
+        assertTrue(
+            stoppedNine.position.distanceTo(pocket.center) > pocket.acceptanceRadiusMeters * 2.0,
+            "Ball #9 should stop well short of the pocket jaws",
+        )
+        val targetPathEnd = assertNotNull(softSim.targetBallTrajectory).points.last()
+        assertEquals(stoppedNine.position.x, targetPathEnd.x, 1e-4)
+        assertEquals(stoppedNine.position.y, targetPathEnd.y, 1e-4)
+
+        val note = SpinPhysics.describeShotPowerAndSpin(
+            tip = TipOffset(0.0, 0.0),
+            cueSpeedMps = profile.speedForUnits(1.0),
+            aim = aim,
+            pocket = pocket,
+            table = table,
+            targetBallNumber = 9,
+        )
+        assertTrue(note.contains("stops short", ignoreCase = true), "Coaching note should flag short roll: $note")
+
+        // Default planner (allowHighScratchFirstShot = false) must reject the underpowered 1.0 speed
+        val filteredAuto = MultiShotPlanner.planRunout(
+            layout = layout,
+            rulesState = GameRulesState(GameType.NINE_BALL),
+            playerProfile = profile,
+            customFirstShotPocketId = PocketId.FOOT_RIGHT,
+            customFirstShotSpeedUnits = 1.0,
+            allowHighScratchFirstShot = false,
+        )
+        assertTrue(filteredAuto.isEmpty(), "Auto planner must never recommend a shot that stops short of the pocket")
+
+        // Firm speed 5.5 on the exact same cut transfers enough momentum to pot ball #9 cleanly
+        val firmPlans = MultiShotPlanner.planRunout(
+            layout = layout,
+            rulesState = GameRulesState(GameType.NINE_BALL),
+            playerProfile = profile,
+            customFirstShotTargetBallNumber = 9,
+            customFirstShotPocketId = PocketId.FOOT_RIGHT,
+            customFirstShotSpeedUnits = 5.5,
+            customFirstShotTip = TipOffset(0.0, 0.0),
+            allowHighScratchFirstShot = true,
+        )
+        assertTrue(firmPlans.isNotEmpty())
+        val firmStep = firmPlans.first().steps.single()
+        val firmSim = assertNotNull(firmStep.uncertainty.postShotSimulation)
+        assertTrue(firmSim.targetBallPotted, "Firm speed 5.5 must transfer enough speed to pot ball #9")
+        assertNull(firmSim.resultingLayout.ballByNumber(9), "Potted ball #9 must be removed from resultingLayout")
+    }
 }

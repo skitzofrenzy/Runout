@@ -339,6 +339,7 @@ object SpinPhysics {
         val impactSpinFactorK: Double,
         val initialSpinFactorK: Double,
         val state: ImpactSpinState,
+        val travelledDistanceMeters: Double = 0.0,
     )
 
     private const val PRE_IMPACT_SKID_FRICTION_FACTOR: Double = 0.50
@@ -368,7 +369,7 @@ object SpinPhysics {
     ): PreImpactCueState {
         val k0 = initialSpinFactorForTip(tip)
         if (cueSpeedMps <= 1e-6) {
-            return PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT)
+            return PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT, 0.0)
         }
         val dist = cueToGhostDistanceMeters.coerceAtLeast(0.0)
         if (dist <= 1e-6) {
@@ -378,7 +379,7 @@ object SpinPhysics {
                 k0 < 0.92 -> ImpactSpinState.PARTIAL_FORWARD_ROLL
                 else -> ImpactSpinState.NATURAL_FORWARD_ROLL
             }
-            return PreImpactCueState(cueSpeedMps, k0, k0, startState)
+            return PreImpactCueState(cueSpeedMps, k0, k0, startState, 0.0)
         }
 
         val g = MotionPhysics.GRAVITY_M_S2
@@ -391,9 +392,10 @@ object SpinPhysics {
             abs(k0 - 1.0) <= 1e-4 -> {
                 val vImpactSq = v0 * v0 - 2.0 * muR * g * dist
                 if (vImpactSq <= 1e-5) {
-                    PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT)
+                    val stopDist = ((v0 * v0) / (2.0 * muR * g)).coerceIn(0.0, dist)
+                    PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT, stopDist)
                 } else {
-                    PreImpactCueState(sqrt(vImpactSq), 1.0, k0, ImpactSpinState.NATURAL_FORWARD_ROLL)
+                    PreImpactCueState(sqrt(vImpactSq), 1.0, k0, ImpactSpinState.NATURAL_FORWARD_ROLL, dist)
                 }
             }
 
@@ -403,11 +405,12 @@ object SpinPhysics {
                 val stunEnvelopeMeters = 0.68 * v0 * v0
                 val vImpactSq = v0 * v0 - 3.0 * muR * g * dist
                 if (vImpactSq <= 1e-5) {
-                    PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT)
+                    val stopDist = ((v0 * v0) / (3.0 * muR * g)).coerceIn(0.0, dist)
+                    PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT, stopDist)
                 } else {
                     val vImpact = sqrt(vImpactSq)
                     if (dist <= stunEnvelopeMeters) {
-                        PreImpactCueState(vImpact, 0.0, k0, ImpactSpinState.STUN_SLIDE)
+                        PreImpactCueState(vImpact, 0.0, k0, ImpactSpinState.STUN_SLIDE, dist)
                     } else {
                         val rollProgress = ((dist - stunEnvelopeMeters) / (0.65 * v0 * v0).coerceAtLeast(0.15))
                             .coerceIn(0.0, 1.0)
@@ -416,7 +419,7 @@ object SpinPhysics {
                         } else {
                             ImpactSpinState.PARTIAL_FORWARD_ROLL
                         }
-                        PreImpactCueState(vImpact, rollProgress, k0, state)
+                        PreImpactCueState(vImpact, rollProgress, k0, state, dist)
                     }
                 }
             }
@@ -434,14 +437,15 @@ object SpinPhysics {
                         kImpact < 0.92 -> ImpactSpinState.PARTIAL_FORWARD_ROLL
                         else -> ImpactSpinState.NATURAL_FORWARD_ROLL
                     }
-                    PreImpactCueState(vImpact, kImpact, k0, state)
+                    PreImpactCueState(vImpact, kImpact, k0, state, dist)
                 } else {
                     val remDist = dist - dRoll
                     val vImpactSq = vRoll * vRoll - 2.0 * muR * g * remDist
                     if (vImpactSq <= 1e-5) {
-                        PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT)
+                        val stopDist = (dRoll + (vRoll * vRoll) / (2.0 * muR * g)).coerceIn(0.0, dist)
+                        PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT, stopDist)
                     } else {
-                        PreImpactCueState(sqrt(vImpactSq), 1.0, k0, ImpactSpinState.NATURAL_FORWARD_ROLL)
+                        PreImpactCueState(sqrt(vImpactSq), 1.0, k0, ImpactSpinState.NATURAL_FORWARD_ROLL, dist)
                     }
                 }
             }
@@ -453,14 +457,15 @@ object SpinPhysics {
                     val vImpact = sqrt(v0 * v0 + 2.0 * muPre * g * dist)
                     val rwImpact = k0 * v0 - 2.5 * (vImpact - v0)
                     val kImpact = (rwImpact / vImpact).coerceIn(1.0, 1.35)
-                    PreImpactCueState(vImpact, kImpact, k0, ImpactSpinState.NATURAL_FORWARD_ROLL)
+                    PreImpactCueState(vImpact, kImpact, k0, ImpactSpinState.NATURAL_FORWARD_ROLL, dist)
                 } else {
                     val remDist = dist - dRoll
                     val vImpactSq = vRoll * vRoll - 2.0 * muR * g * remDist
                     if (vImpactSq <= 1e-5) {
-                        PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT)
+                        val stopDist = (dRoll + (vRoll * vRoll) / (2.0 * muR * g)).coerceIn(0.0, dist)
+                        PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT, stopDist)
                     } else {
-                        PreImpactCueState(sqrt(vImpactSq), 1.0, k0, ImpactSpinState.NATURAL_FORWARD_ROLL)
+                        PreImpactCueState(sqrt(vImpactSq), 1.0, k0, ImpactSpinState.NATURAL_FORWARD_ROLL, dist)
                     }
                 }
             }
@@ -480,8 +485,10 @@ object SpinPhysics {
         val pre = computePreImpactCueState(cueSpeedMps, tip, cueToGhostDistanceMeters, table)
         val distTenths = ((cueToGhostDistanceMeters * 10.0).toInt() / 10.0)
         return when (pre.state) {
-            ImpactSpinState.STOPPED_SHORT ->
-                "Too soft for ${distTenths}m — cue ball stops short before object ball"
+            ImpactSpinState.STOPPED_SHORT -> {
+                val stopTenths = ((pre.travelledDistanceMeters * 10.0).toInt() / 10.0)
+                "White ball stops short at ${stopTenths}m (needs ${distTenths}m to contact)"
+            }
             ImpactSpinState.BACKSPIN_DRAW ->
                 "Holds backspin across ${distTenths}m → draws back off contact"
             ImpactSpinState.STUN_SLIDE -> if (pre.initialSpinFactorK < -0.25) {
@@ -503,6 +510,44 @@ object SpinPhysics {
                     "Arrives in smooth natural forward roll (~30° line)"
             }
         }
+    }
+
+    /**
+     * Full Sandbox coaching telemetry combining pre-impact spin evolution AND collision power
+     * transfer to [targetBallNumber] toward [pocket] (detecting when thin cuts or soft strokes
+     * leave the object ball short of the pocket).
+     */
+    fun describeShotPowerAndSpin(
+        tip: TipOffset,
+        cueSpeedMps: Double,
+        aim: AimGeometry,
+        pocket: PocketSpec,
+        table: TableSpec,
+        targetBallNumber: Int? = null,
+    ): String {
+        val pre = computePreImpactCueState(cueSpeedMps, tip, aim.cueToGhostDistanceMeters, table)
+        if (pre.state == ImpactSpinState.STOPPED_SHORT) {
+            val stopTenths = ((pre.travelledDistanceMeters * 10.0).toInt() / 10.0)
+            val needTenths = ((aim.cueToGhostDistanceMeters * 10.0).toInt() / 10.0)
+            return "White ball stops short (${stopTenths}m of ${needTenths}m) — add speed"
+        }
+        val vOb0 = MotionPhysics.transferredObjectBallInitialSpeedMps(
+            cueImpactSpeedMps = pre.impactSpeedMps,
+            cutAngleRad = aim.cutAngleRadians,
+        )
+        val obMaxDist = MotionPhysics.objectBallStoppingDistanceMeters(
+            initialObjectSpeedMps = vOb0,
+            muS = table.cloth.slidingFrictionMuS,
+            muR = table.cloth.rollingResistanceMuR,
+        )
+        val dropDist = (aim.objectToPocketDistanceMeters - pocket.acceptanceRadiusMeters * 0.75)
+            .coerceAtLeast(0.02)
+        if (obMaxDist < dropDist) {
+            val reachPct = ((obMaxDist / dropDist) * 100.0).toInt().coerceIn(1, 99)
+            val ballTag = targetBallNumber?.let { "Ball #$it" } ?: "Object ball"
+            return "$ballTag stops short ($reachPct% to pocket) — transfer needs more speed"
+        }
+        return describeImpactTransition(tip, cueSpeedMps, aim.cueToGhostDistanceMeters, table)
     }
 
     /**
@@ -602,6 +647,25 @@ object SpinPhysics {
         obstacleBalls: List<Ball> = emptyList(),
     ): CueBallTrajectory {
         val preset = tip.toSpinPreset()
+        val preImpact = computePreImpactCueState(
+            cueSpeedMps = cueSpeedMps,
+            tip = tip,
+            cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+            table = table,
+        )
+        if (preImpact.state == ImpactSpinState.STOPPED_SHORT) {
+            val cueStop = clampCenterToBounds(
+                pos = aim.cueBallPos + aim.aimDirection * preImpact.travelledDistanceMeters,
+                table = table,
+                radius = ballRadiusMeters,
+            )
+            return CueBallTrajectory(
+                spin = preset,
+                points = listOf(aim.cueBallPos, cueStop),
+                initialDeflectionAngleRad = 0.0,
+                hitsScratchPocket = detectScratchOnSegment(aim.cueBallPos, cueStop, table.pockets)?.id,
+            )
+        }
         val start = aim.ghostBallCenter
         val postState = computePostImpactCueState(aim, cueSpeedMps, tip, table)
 
@@ -849,5 +913,16 @@ object SpinPhysics {
             }
         }
         return bestPocket
+    }
+
+    private fun clampCenterToBounds(pos: Vec2, table: TableSpec, radius: Double): Vec2 {
+        val minX = radius.coerceAtMost(table.lengthMeters * 0.5)
+        val maxX = (table.lengthMeters - radius).coerceAtLeast(minX)
+        val minY = radius.coerceAtMost(table.widthMeters * 0.5)
+        val maxY = (table.widthMeters - radius).coerceAtLeast(minY)
+        return Vec2(
+            x = pos.x.coerceIn(minX, maxX),
+            y = pos.y.coerceIn(minY, maxY),
+        )
     }
 }

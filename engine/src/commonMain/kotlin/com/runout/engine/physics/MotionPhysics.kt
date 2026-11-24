@@ -15,6 +15,42 @@ import kotlin.math.sqrt
  */
 object MotionPhysics {
     const val GRAVITY_M_S2: Double = 9.81
+    const val BALL_BALL_RESTITUTION: Double = 0.93
+
+    /**
+     * Initial translational speed (m/s) imparted to a stationary equal-mass object ball struck at
+     * [cueImpactSpeedMps] and cut angle [cutAngleRad] under restitution [restitution].
+     */
+    fun transferredObjectBallInitialSpeedMps(
+        cueImpactSpeedMps: Double,
+        cutAngleRad: Double,
+        restitution: Double = BALL_BALL_RESTITUTION,
+    ): Double {
+        if (cueImpactSpeedMps <= 0.0) return 0.0
+        val cosCut = kotlin.math.cos(abs(cutAngleRad)).coerceAtLeast(0.0)
+        return 0.5 * (1.0 + restitution.coerceIn(0.0, 1.0)) * cueImpactSpeedMps * cosCut
+    }
+
+    /**
+     * Total slide-plus-roll stopping distance in metres for a stationary object ball that receives
+     * initial post-collision translational speed [initialObjectSpeedMps] with zero initial spin
+     * (skidding down to `5/7` speed under [muS] before rolling to rest under [muR]).
+     */
+    fun objectBallStoppingDistanceMeters(
+        initialObjectSpeedMps: Double,
+        muS: Double,
+        muR: Double,
+        g: Double = GRAVITY_M_S2,
+    ): Double {
+        val v = abs(initialObjectSpeedMps)
+        if (v <= 1e-9) return 0.0
+        val safeMuS = muS.coerceAtLeast(1e-4)
+        val safeMuR = muR.coerceAtLeast(1e-4)
+        val slideDistance = (12.0 * v * v) / (49.0 * safeMuS * g)
+        val rollingSpeed = stunRollingSpeed(v)
+        val rollDistance = rollingStoppingDistanceMeters(rollingSpeed, safeMuR, g)
+        return slideDistance + rollDistance
+    }
 
     /**
      * The 5/7 stun rule: a ball sliding without topspin/backspin at [initialSpeedMps]

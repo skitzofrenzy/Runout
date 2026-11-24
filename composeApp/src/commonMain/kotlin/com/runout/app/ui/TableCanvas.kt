@@ -72,6 +72,8 @@ import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.DisplacedBallPath
+import com.runout.engine.physics.MotionPhysics
+import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.physics.TrajectoryPath
 import com.runout.engine.planner.HeatZoneGenerator
@@ -740,6 +742,7 @@ fun PoolTableCanvas(
             } else if (selectedShot != null) {
                 drawSelectedShotOverlay(
                     shot = selectedShot,
+                    table = table,
                     ballSet = ballSet,
                     visibleSpins = visibleSpins,
                     ballRadiusMeters = table.ballRadiusMeters,
@@ -1040,6 +1043,7 @@ private fun DrawScope.drawBallSolidTrajectory(
 
 private fun DrawScope.drawSelectedShotOverlay(
     shot: ShotRecommendation,
+    table: TableSpec,
     ballSet: BallSetProfile,
     visibleSpins: Set<CueBallSpinPreset>,
     ballRadiusMeters: Double,
@@ -1049,16 +1053,65 @@ private fun DrawScope.drawSelectedShotOverlay(
     val aim = shot.aim
     val ghostCenter = toCanvasOffset(aim.ghostBallCenter)
     val ballRadiusPx = (ballRadiusMeters * pxPerMeter).toFloat()
+    val preImpact = SpinPhysics.computePreImpactCueState(
+        cueSpeedMps = shot.recommendedCueSpeedMps,
+        tip = TipOffset.fromPreset(shot.recommendedSpin),
+        cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+        table = table,
+    )
 
-    // Target object ball pot line in its own solid ball colour
+    if (preImpact.state == SpinPhysics.ImpactSpinState.STOPPED_SHORT) {
+        val stopMeters = aim.cueBallPos + aim.aimDirection * preImpact.travelledDistanceMeters
+        drawGhostBallOutline(
+            center = ghostCenter,
+            ballRadiusPx = ballRadiusPx,
+            strokeColor = GhostBallStrokeColor.copy(alpha = 0.45f),
+            pxPerMeter = pxPerMeter,
+        )
+        drawBallSolidTrajectory(
+            points = listOf(aim.cueBallPos, stopMeters),
+            ballNumber = 0,
+            ballSet = ballSet,
+            strokeWidth = max(2.8f, pxPerMeter * 0.0088f),
+            ballRadiusPx = ballRadiusPx,
+            pxPerMeter = pxPerMeter,
+            showEndStopRing = true,
+            toCanvasOffset = toCanvasOffset,
+        )
+        return
+    }
+
+    val vOb0 = MotionPhysics.transferredObjectBallInitialSpeedMps(
+        cueImpactSpeedMps = preImpact.impactSpeedMps,
+        cutAngleRad = aim.cutAngleRadians,
+    )
+    val obMaxDist = MotionPhysics.objectBallStoppingDistanceMeters(
+        initialObjectSpeedMps = vOb0,
+        muS = table.cloth.slidingFrictionMuS,
+        muR = table.cloth.rollingResistanceMuR,
+    )
+    val dropDist = (aim.objectToPocketDistanceMeters - shot.pocket.acceptanceRadiusMeters * 0.75)
+        .coerceAtLeast(0.02)
+    val targetStoppedShort = obMaxDist < dropDist
+    val targetEndMeters = if (targetStoppedShort) {
+        val rawStop = aim.objectBallPos + aim.objectBallDirection * obMaxDist
+        Vec2(
+            x = rawStop.x.coerceIn(ballRadiusMeters, (table.lengthMeters - ballRadiusMeters).coerceAtLeast(ballRadiusMeters)),
+            y = rawStop.y.coerceIn(ballRadiusMeters, (table.widthMeters - ballRadiusMeters).coerceAtLeast(ballRadiusMeters)),
+        )
+    } else {
+        aim.pocketAimPos
+    }
+
+    // Target object ball pot/roll line in its own solid ball colour
     drawBallSolidTrajectory(
-        points = listOf(aim.objectBallPos, aim.pocketAimPos),
+        points = listOf(aim.objectBallPos, targetEndMeters),
         ballNumber = shot.targetBall.number,
         ballSet = ballSet,
         strokeWidth = max(2.8f, pxPerMeter * 0.0088f),
         ballRadiusPx = ballRadiusPx,
         pxPerMeter = pxPerMeter,
-        showEndStopRing = false,
+        showEndStopRing = targetStoppedShort,
         toCanvasOffset = toCanvasOffset,
     )
 
@@ -1546,53 +1599,80 @@ private fun DrawScope.drawRunoutPlanOverlay(
     val cuePos = layout.cueBall()?.position
     val ghostMeters = primaryStep.compensatedAim.compensatedGhostBallCenter
     val firstGhostCenter = toCanvasOffset(ghostMeters)
+    val postSim = primaryStep.uncertainty.postShotSimulation
+    val cueStoppedBeforeContact = postSim?.cueBallStoppedBeforeImpact == true
 
-    // 1. Active step target object-ball pot line in its own solid ball colour
-    drawBallSolidTrajectory(
-        points = listOf(primaryStep.targetBall.position, primaryStep.pocketCenter),
-        ballNumber = primaryStep.targetBall.number,
-        ballSet = ballSet,
-        strokeWidth = max(2.9f, pxPerMeter * 0.0090f),
-        ballRadiusPx = ballRadiusPx,
-        pxPerMeter = pxPerMeter,
-        showEndStopRing = false,
-        toCanvasOffset = toCanvasOffset,
-    )
-
-    // 2. Active step cue-ball pre-contact path in solid white
-    if (cuePos != null) {
+    if (cueStoppedBeforeContact) {
+        drawGhostBallOutline(
+            center = firstGhostCenter,
+            ballRadiusPx = ballRadiusPx,
+            strokeColor = GhostBallStrokeColor.copy(alpha = 0.45f),
+            pxPerMeter = pxPerMeter,
+        )
+        val shortCueTraj = postSim!!.cueBallTrajectory
         drawBallSolidTrajectory(
-            points = listOf(cuePos, ghostMeters),
+            points = shortCueTraj.points,
             ballNumber = 0,
             ballSet = ballSet,
-            strokeWidth = max(2.4f, pxPerMeter * 0.0076f),
+            strokeWidth = max(3.1f, pxPerMeter * 0.0096f),
             ballRadiusPx = ballRadiusPx,
             pxPerMeter = pxPerMeter,
-            showEndStopRing = false,
+            showEndStopRing = true,
+            hitsScratch = shortCueTraj.hitsScratchPocket != null,
+            toCanvasOffset = toCanvasOffset,
+        )
+    } else {
+        // 1. Active step target object-ball trajectory in its own solid ball colour (stopping short if underpowered)
+        val targetPoints = postSim?.targetBallTrajectory?.points
+            ?.takeIf { it.size >= 2 }
+            ?: listOf(primaryStep.targetBall.position, primaryStep.pocketCenter)
+        val targetStoppedShort = postSim != null && !postSim.targetBallPotted
+        drawBallSolidTrajectory(
+            points = targetPoints,
+            ballNumber = primaryStep.targetBall.number,
+            ballSet = ballSet,
+            strokeWidth = max(2.9f, pxPerMeter * 0.0090f),
+            ballRadiusPx = ballRadiusPx,
+            pxPerMeter = pxPerMeter,
+            showEndStopRing = targetStoppedShort,
+            toCanvasOffset = toCanvasOffset,
+        )
+
+        // 2. Active step cue-ball pre-contact path in solid white
+        if (cuePos != null) {
+            drawBallSolidTrajectory(
+                points = listOf(cuePos, ghostMeters),
+                ballNumber = 0,
+                ballSet = ballSet,
+                strokeWidth = max(2.4f, pxPerMeter * 0.0076f),
+                ballRadiusPx = ballRadiusPx,
+                pxPerMeter = pxPerMeter,
+                showEndStopRing = false,
+                toCanvasOffset = toCanvasOffset,
+            )
+        }
+
+        drawGhostBallOutline(
+            center = firstGhostCenter,
+            ballRadiusPx = ballRadiusPx,
+            strokeColor = GhostBallStrokeColor,
+            pxPerMeter = pxPerMeter,
+        )
+
+        // 3. Active step post-impact cue-ball trajectory in solid white
+        val nomCueTraj = primaryStep.uncertainty.nominalTrajectory
+        drawBallSolidTrajectory(
+            points = nomCueTraj.points,
+            ballNumber = 0,
+            ballSet = ballSet,
+            strokeWidth = max(3.1f, pxPerMeter * 0.0096f),
+            ballRadiusPx = ballRadiusPx,
+            pxPerMeter = pxPerMeter,
+            showEndStopRing = true,
+            hitsScratch = nomCueTraj.hitsScratchPocket != null,
             toCanvasOffset = toCanvasOffset,
         )
     }
-
-    drawGhostBallOutline(
-        center = firstGhostCenter,
-        ballRadiusPx = ballRadiusPx,
-        strokeColor = GhostBallStrokeColor,
-        pxPerMeter = pxPerMeter,
-    )
-
-    // 3. Active step post-impact cue-ball trajectory in solid white
-    val nomCueTraj = primaryStep.uncertainty.nominalTrajectory
-    drawBallSolidTrajectory(
-        points = nomCueTraj.points,
-        ballNumber = 0,
-        ballSet = ballSet,
-        strokeWidth = max(3.1f, pxPerMeter * 0.0096f),
-        ballRadiusPx = ballRadiusPx,
-        pxPerMeter = pxPerMeter,
-        showEndStopRing = true,
-        hitsScratch = nomCueTraj.hitsScratchPocket != null,
-        toCanvasOffset = toCanvasOffset,
-    )
 
     // 4. Active step 3-level position heat zone & landing cloud (strictly clipped inside playable felt and carved by blocking balls)
     if (showLandingCloud) {
