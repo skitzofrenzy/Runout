@@ -10,6 +10,7 @@ import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.AimGeometry
 import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.CueBallTrajectory
+import com.runout.engine.physics.PocketGeometry
 import com.runout.engine.physics.GhostBallAiming
 import com.runout.engine.physics.MotionPhysics
 import com.runout.engine.physics.SpinCompensatedAim
@@ -402,7 +403,13 @@ object SnookerStrategyPlanner {
                 for (scale in POT_SPEED_SCALES) {
                     val cueSpeed = playerProfile.speedForScale(scale)
                     for (preset in POT_SPIN_PRESETS) {
-                        val tip = TipOffset.fromPreset(preset)
+                        // The preset names the spin at the object ball; skip it where no tip gives that state.
+                        val tip = SpinPhysics.tipForImpactState(
+                            preset = preset,
+                            cueSpeedMps = cueSpeed,
+                            cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+                            table = table,
+                        ) ?: continue
                         val candidate = evaluatePotCandidate(
                             node = node,
                             ply = ply,
@@ -1036,9 +1043,14 @@ object SnookerStrategyPlanner {
 
         val travel = min(maxFreeDist, railDist)
         val segEnd = clampToPlayableBounds(target.position + direction * travel, table, r)
-        val pocketed = table.pockets.any { pocket ->
-            distancePointToSegment(pocket.center, target.position, segEnd) <= pocket.acceptanceRadiusMeters
-        }
+        // The ball drops if its line enters a pocket between the points (the line runs one radius on past the cushion,
+        // where side-pocket and corner capture lines lie).
+        val pocketed = PocketGeometry.captureOnSegment(
+            start = target.position,
+            end = target.position + direction * (travel + r),
+            pockets = table.pockets,
+            ballRadius = r,
+        )?.potted == true
         if (pocketed) {
             return TargetPostContact(finalPosition = segEnd, pocketed = true)
         }
@@ -1137,7 +1149,7 @@ object SnookerStrategyPlanner {
             .coerceIn(0.0, 1.0)
         val separation = (cueFinal.distanceTo(targetFinal) / table.lengthMeters).coerceIn(0.0, 1.0)
 
-        val nearestPocketDist = table.pockets.minOfOrNull { it.center.distanceTo(targetFinal) } ?: 1.0
+        val nearestPocketDist = table.pockets.minOfOrNull { it.mouthCenter.distanceTo(targetFinal) } ?: 1.0
         val pocketDanger = ((r * 5.0 - nearestPocketDist) / (r * 5.0)).coerceIn(0.0, 1.0) * 0.18
         val unintendedPotPenalty = if (targetPocketed) 0.25 else 0.0
         val collisionPenalty = if (returnClear) 0.0 else 0.40
@@ -1167,15 +1179,6 @@ object SnookerStrategyPlanner {
             x = pos.x.coerceIn(minX, maxX),
             y = pos.y.coerceIn(minY, maxY),
         )
-    }
-
-    private fun distancePointToSegment(p: Vec2, a: Vec2, b: Vec2): Double {
-        val ab = b - a
-        val lenSq = ab.lengthSquared()
-        if (lenSq < 1e-12) return p.distanceTo(a)
-        val t = ((p - a).dot(ab) / lenSq).coerceIn(0.0, 1.0)
-        val proj = a + ab * t
-        return p.distanceTo(proj)
     }
 
     private fun buildSummaryCodes(

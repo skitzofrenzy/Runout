@@ -214,10 +214,10 @@ class PhotoCaptureBenchmarksTest {
     }
 
     @Test
-    fun rawArgbFrameDecodingOnSimonisGreenRecoversClothAndSubFifteenMmAccuracy() {
+    fun rawArgbFrameDecodingOnClassicGreenRecoversClothAndSubFifteenMmAccuracy() {
         assertRawPixelRoundTrip(
             preset = SampleCapturedPhotos.overheadNineFootTenBall(),
-            expectedCloth = ClothHueCategory.SIMONIS_GREEN,
+            expectedCloth = ClothHueCategory.CLASSIC_GREEN,
         )
     }
 

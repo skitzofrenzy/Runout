@@ -33,6 +33,10 @@ data class CaptureQualityReport(
 
 /**
  * In-memory snapshot of a captured (or simulated) table photograph, free of persisted EXIF/GPS tags.
+ *
+ * [detectedQuadCornersPx] are the cushion-nose corners `[headLeft, footLeft, footRight, headRight]`.
+ * [cornersNeedingReview] has one flag per corner, in the same order: true where a neighbouring
+ * cushion edge could not be seen and the corner was estimated from the rail (empty when unknown).
  */
 data class CapturedTablePhoto(
     val id: String,
@@ -46,6 +50,7 @@ data class CapturedTablePhoto(
     val groundTruthBallPositionsMeters: Map<Int, Vec2>,
     val sharpnessScore: Double,
     val glareFraction: Double,
+    val cornersNeedingReview: List<Boolean> = emptyList(),
 )
 
 data class RawPhotoAnalysisBundle(
@@ -147,8 +152,8 @@ object PhotoCaptureEvaluator {
 
     /**
      * Runs [RawImageTableDetector.analyzeArgbFrame] on a raw [ArgbImageFrame] pixel buffer, builds
-     * the planar homography from [overriddenQuadCornersPx] or the auto-detected table corners, and
-     * performs 3D ball-height-corrected Hungarian ball identification.
+     * the planar homography from [overriddenQuadCornersPx] or the auto-detected cushion-nose corners,
+     * and performs 3D ball-height-corrected Hungarian ball identification.
      */
     fun processRawArgbFrame(
         frame: ArgbImageFrame,
@@ -218,12 +223,28 @@ object PhotoCaptureEvaluator {
             groundTruthBallPositionsMeters = emptyMap(),
             sharpnessScore = summary.sharpnessScore,
             glareFraction = summary.glareFraction,
+            cornersNeedingReview = cornerReviewFlags(summary, orientedCorners),
         )
         return RawPhotoAnalysisBundle(
             photo = photo,
             summary = summary,
             inferredBallSet = inferredBallSet,
         )
+    }
+
+    /**
+     * One flag per corner of [orientedCorners]: true when either cushion side meeting at that
+     * corner used the cushion-width fallback. [RawFrameDetectionSummary.quadEdges] is indexed by the
+     * unoriented quad, whose side `i` joins corners `i` and `i + 1`.
+     */
+    private fun cornerReviewFlags(summary: RawFrameDetectionSummary, orientedCorners: List<Vec2>): List<Boolean> {
+        val raw = summary.detectedQuadCornersPx
+        val edges = summary.quadEdges
+        if (raw.size != 4 || edges.size != 4 || orientedCorners.size != 4) return emptyList()
+        return orientedCorners.map { corner ->
+            val k = raw.indices.minByOrNull { raw[it].distanceTo(corner) } ?: return emptyList()
+            edges[k].usedFallback || edges[(k + 3) % 4].usedFallback
+        }
     }
 
     /**
@@ -619,7 +640,8 @@ object SampleCapturedPhotos {
 
     /**
      * Renders [preset]'s ground-truth ball layout onto a synthetic 640x360 ARGB pixel frame using
-     * the standard landscape table quad `[TL, TR, BR, BL]` and a head-end camera pose so
+     * the standard landscape table quad `[TL, TR, BR, BL]` at the cushion noses, cloth-covered
+     * cushions and pockets around it, and a head-end camera pose so
      * [PhotoCaptureEvaluator.processRawArgbFrame] can decode it directly without corner overrides.
      */
     fun renderPresetAsRawArgbFrame(
@@ -649,6 +671,7 @@ object SampleCapturedPhotos {
             height = RAW_FRAME_HEIGHT_PX,
             clothCategory = clothCategory,
             ballSet = ballSet,
+            cushions = RawImageTableDetector.SyntheticCushionStyle.SHADED,
         )
     }
 

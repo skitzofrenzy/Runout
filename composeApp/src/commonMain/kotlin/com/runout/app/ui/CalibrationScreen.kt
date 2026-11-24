@@ -739,9 +739,9 @@ private fun FittedParametersComparisonSection(
                 defaultValue = formatFixed(defaults.cloth.cushionRestitutionEc, 3),
             )
             FittedParameterRow(
-                label = "Cushion english coupling (k_spin)",
-                fittedValue = formatFixed(fitted.cushionSpinCouplingFactor, 3),
-                defaultValue = formatFixed(defaults.cushionSpinCouplingFactor, 3),
+                label = "Cushion friction (f_c)",
+                fittedValue = formatFixed(fitted.cloth.cushionFrictionFc, 3),
+                defaultValue = formatFixed(defaults.cloth.cushionFrictionFc, 3),
             )
             FittedParameterRow(
                 label = "Ball–ball friction (μb)",

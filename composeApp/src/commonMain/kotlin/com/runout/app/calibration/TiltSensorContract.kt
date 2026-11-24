@@ -6,9 +6,7 @@ import com.runout.engine.model.ClothParams
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.MotionPhysics
 import com.runout.engine.physics.SpinPhysics
-import com.runout.engine.physics.TipOffset
 import kotlin.math.PI
-import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
@@ -71,7 +69,7 @@ object SampleCalibrationSessions {
             trueMuS = 0.165,
             trueEc = 0.82,
             trueMuB = 0.042,
-            trueKSpin = 0.62,
+            trueFc = 0.24,
             gridSlopes = levelGrid,
             slowRollDistanceMeters = 1.80,
             slowRollLateralDriftMeters = 0.003,
@@ -97,7 +95,7 @@ object SampleCalibrationSessions {
             trueMuS = 0.245,
             trueEc = 0.66,
             trueMuB = 0.076,
-            trueKSpin = 0.44,
+            trueFc = 0.16,
             gridSlopes = levelGrid,
             slowRollDistanceMeters = 1.50,
             slowRollLateralDriftMeters = 0.004,
@@ -132,7 +130,7 @@ object SampleCalibrationSessions {
             trueMuS = 0.205,
             trueEc = 0.74,
             trueMuB = 0.058,
-            trueKSpin = 0.54,
+            trueFc = 0.20,
             gridSlopes = unlevelGrid,
             slowRollDistanceMeters = 1.80,
             slowRollLateralDriftMeters = 0.085,
@@ -192,12 +190,20 @@ object SampleCalibrationSessions {
         trueMuS: Double,
         trueEc: Double,
         trueMuB: Double,
-        trueKSpin: Double,
+        trueFc: Double,
         gridSlopes: List<Pair<Double, Double>>,
         slowRollDistanceMeters: Double,
         slowRollLateralDriftMeters: Double,
         noisePhase: Double,
     ): CalibrationSessionPreset {
+        // The table the drills are generated on; cushion drills go through the engine's cushion model.
+        val trueCloth = ClothParams(
+            rollingResistanceMuR = trueMuR,
+            slidingFrictionMuS = trueMuS,
+            cushionRestitutionEc = trueEc,
+            cushionFrictionFc = trueFc,
+        )
+        val headOnRatio = TableCalibrationFitter.predictHeadOnReboundRatio(trueCloth)
         val g = MotionPhysics.GRAVITY_M_S2
         val relNoise = doubleArrayOf(-0.014, 0.016, -0.009, 0.012, -0.015, 0.008, 0.002)
 
@@ -229,7 +235,7 @@ object SampleCalibrationSessions {
             val noise = relNoise[(i + 3) % relNoise.size] * 0.85
             CushionSpeedDrillTrial(
                 incomingNormalSpeedMps = vIn,
-                reboundNormalSpeedMps = vIn * trueEc * (1.0 + noise),
+                reboundNormalSpeedMps = vIn * headOnRatio * (1.0 + noise),
             )
         }
 
@@ -240,11 +246,7 @@ object SampleCalibrationSessions {
             val v = bankSpeeds[i]
             val thetaIn = bankAngles[i]
             val spin = bankSpins[i]
-            val vN = v * cos(thetaIn)
-            val vT = v * sin(thetaIn)
-            val vNOut = trueEc * vN
-            val vTOut = 0.82 * vT + trueKSpin * spin * vN
-            val thetaOut = atan2(vTOut, vNOut)
+            val thetaOut = TableCalibrationFitter.predictBankReboundAngleRad(v, thetaIn, spin, trueCloth)
             val angleJitter = 0.004 * sin(noisePhase + i * 1.9)
             BankSpinDrillTrial(
                 incomingSpeedMps = v,
@@ -261,10 +263,9 @@ object SampleCalibrationSessions {
             val speed = cutSpeeds[i]
             val trueThrow = SpinPhysics.computeThrowAnglesRadians(
                 cutAngleSignedRadians = phi,
-                cueSpeedMps = speed,
-                tip = TipOffset(),
+                impactSpeedMps = speed,
                 ballBallFrictionMu = trueMuB,
-            ).first
+            ).totalRadians
             val throwJitter = 0.0005 * cos(noisePhase + i * 2.1)
             CutThrowDrillTrial(
                 cutAngleSignedRad = phi,
@@ -284,13 +285,12 @@ object SampleCalibrationSessions {
             val reboundNoise = 0.008 * cos(noisePhase + i * 1.7)
             val throwNoise = 0.0004 * sin(noisePhase + i * 2.9)
             val trueDist = MotionPhysics.rollingStoppingDistanceMeters(v, trueMuR, g) * (1.0 + distNoise)
-            val trueRebound = vCushion * trueEc * (1.0 + reboundNoise)
+            val trueRebound = vCushion * headOnRatio * (1.0 + reboundNoise)
             val trueThrow = SpinPhysics.computeThrowAnglesRadians(
                 cutAngleSignedRadians = phi,
-                cueSpeedMps = v,
-                tip = TipOffset(),
+                impactSpeedMps = v,
                 ballBallFrictionMu = trueMuB,
-            ).first + throwNoise
+            ).totalRadians + throwNoise
             HeldOutShotSample(
                 initialRollingSpeedMps = v,
                 trueStoppingDistanceMeters = trueDist,

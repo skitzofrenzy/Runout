@@ -92,8 +92,15 @@ class MotionPhysicsTest {
         assertEquals(1.27, nineFoot.widthMeters, 1e-9)
         assertEquals(0.028575, nineFoot.ballRadiusMeters, 1e-9)
         assertEquals(6, nineFoot.pockets.size)
-        assertEquals(Vec2(0.0, 0.0), nineFoot.pocketById(PocketId.HEAD_LEFT).center)
-        assertEquals(Vec2(2.54, 1.27), nineFoot.pocketById(PocketId.FOOT_RIGHT).center)
+        // Pockets are cut into the cushions: corner jaw tips m/sqrt(2) along each rail, holes behind the noses.
+        val headLeft = nineFoot.pocketById(PocketId.HEAD_LEFT)
+        val tipOffset = 0.1143 / kotlin.math.sqrt(2.0)
+        assertEquals(0.0, headLeft.jawTipA.distanceTo(Vec2(tipOffset, 0.0)), 1e-12)
+        assertEquals(0.0, headLeft.jawTipB.distanceTo(Vec2(0.0, tipOffset)), 1e-12)
+        assertTrue(headLeft.holeCenter.x < 0.0 && headLeft.holeCenter.y < 0.0)
+        val footRight = nineFoot.pocketById(PocketId.FOOT_RIGHT)
+        assertTrue(footRight.holeCenter.x > 2.54 && footRight.holeCenter.y > 1.27)
+        assertEquals(0.127, nineFoot.pocketById(PocketId.SIDE_LEFT).mouthWidthMeters, 1e-9)
         assertEquals(Vec2(2.54 * 0.25, 1.27 * 0.5), nineFoot.headSpot())
         assertEquals(Vec2(2.54 * 0.75, 1.27 * 0.5), nineFoot.footSpot())
 

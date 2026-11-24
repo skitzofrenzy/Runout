@@ -8,10 +8,11 @@ import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.Camera3DOrbitSpec
 import com.runout.engine.physics.CueBallSpinPreset
+import com.runout.engine.physics.GhostBallAiming
 import com.runout.engine.physics.ShotAnimationPhase
 import com.runout.engine.physics.ShotTimelineAnimator
+import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
-import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -209,20 +210,21 @@ class ShotTimelineAnd3DTest {
     @Test
     fun scratchTrajectoryAddsCueBallToPocketedNumbersAtEndAndRemovesFromActiveBalls() {
         val footLeft = table.pocketById(PocketId.FOOT_LEFT)
-        val ghost = Vec2(table.lengthMeters - 0.635, 0.635)
-        val toFootLeft = (footLeft.center - ghost).normalized()
-        val objectBall = Ball(number = 8, position = ghost + toFootLeft * (2.0 * r), radiusMeters = r)
-        val tangentToFootRight = toFootLeft.rotate(PI / 2.0)
-        val aimDir = (toFootLeft + tangentToFootRight).normalized()
-        val cueBall = Ball(number = 0, position = ghost - aimDir * 0.60, radiusMeters = r)
+        // A 45° cut into FOOT_LEFT placed so that the stun line (just inside the tangent line) heads into FOOT_RIGHT.
+        val setup = StunIntoCornerFixture.build(table, objectBallNumber = 8, cueSpeedMps = 2.5)
+        val objectBall = setup.objectBall
+        val cueBall = setup.cueBall
         val scratchLayout = TableLayout(table, listOf(cueBall, objectBall))
 
+        // The scratch needs a stun hit (the cue ball leaves close to the tangent), which over 0.6 m takes a low tip.
+        val aim = GhostBallAiming.computeAimGeometry(cueBall, objectBall, footLeft, scratchLayout.balls, table = table)
+        val stunTip = assertNotNull(SpinPhysics.tipForImpactState(CueBallSpinPreset.STUN, 2.5, aim.cueToGhostDistanceMeters, table))
         val timeline = ShotTimelineAnimator.buildTimeline(
             layout = scratchLayout,
             targetBallNumber = 8,
             pocketId = PocketId.FOOT_LEFT,
             cueSpeedMps = 2.5,
-            tip = TipOffset(),
+            tip = stunTip,
         )
         assertNotNull(timeline)
         assertEquals(PocketId.FOOT_RIGHT, timeline.cueBallTrajectory.hitsScratchPocket)

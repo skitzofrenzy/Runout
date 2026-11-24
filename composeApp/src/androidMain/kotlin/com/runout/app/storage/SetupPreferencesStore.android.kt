@@ -30,6 +30,18 @@ actual fun rememberSetupPreferencesStore(): SetupPreferencesStore {
                 }
                 editor.apply()
             }
+
+            override fun loadAcceptedTermsVersion(): String? {
+                if (prefs.getString(TermsAcceptanceKeys.KEY_TERMS_ACCEPTED, null) != "true") return null
+                return prefs.getString(TermsAcceptanceKeys.KEY_TERMS_VERSION, null)
+            }
+
+            override fun saveAcceptedTermsVersion(version: String) {
+                prefs.edit()
+                    .putString(TermsAcceptanceKeys.KEY_TERMS_ACCEPTED, "true")
+                    .putString(TermsAcceptanceKeys.KEY_TERMS_VERSION, version)
+                    .apply()
+            }
         }
     }
 }

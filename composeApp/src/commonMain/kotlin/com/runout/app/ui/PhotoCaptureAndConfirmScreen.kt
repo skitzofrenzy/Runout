@@ -60,6 +60,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextMeasurer
@@ -1344,7 +1345,7 @@ private fun RawArgbFramePreviewCanvas(
 
 private fun ClothHueCategory.displayLabel(): String = when (this) {
     ClothHueCategory.TOURNAMENT_BLUE -> "Tournament Blue"
-    ClothHueCategory.SIMONIS_GREEN -> "Simonis Green"
+    ClothHueCategory.CLASSIC_GREEN -> "Classic Green"
     ClothHueCategory.CHAMPIONSHIP_RED -> "Championship Red"
     ClothHueCategory.SLATE_GREY -> "Slate Grey"
 }
@@ -1538,6 +1539,12 @@ private fun InteractiveFramingGuideCard(
     sourceImageBitmap: ImageBitmap? = null,
 ) {
     val hasCustomCorners = quadCornersPx != photo.detectedQuadCornersPx
+    // A corner estimated from the rail stays flagged until the player moves it.
+    val cornerNeedsReview: (Int) -> Boolean = { index ->
+        photo.cornersNeedingReview.getOrElse(index) { false } &&
+            quadCornersPx.getOrNull(index) == photo.detectedQuadCornersPx.getOrNull(index)
+    }
+    val cornersToCheck = quadCornersPx.indices.filter(cornerNeedsReview).map { CORNER_LABELS.getOrElse(it) { "C$it" } }
     val frameWidthPx = photo.intrinsics.imageWidthPx.toFloat().coerceAtLeast(1f)
     val frameHeightPx = photo.intrinsics.imageHeightPx.toFloat().coerceAtLeast(1f)
     val frameAspectRatio = frameWidthPx / frameHeightPx
@@ -1587,13 +1594,18 @@ private fun InteractiveFramingGuideCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Framing Guide & 4-Corner Homography",
+                        text = "Match the box to the playing surface",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        text = "Drag corners or balls (magnifying loupe) • Tap empty area to rescan/add ball",
+                        text = TABLE_BOX_HINT,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "Drag corners or balls (magnifier) • Tap an empty spot to rescan or add a ball",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1601,10 +1613,16 @@ private fun InteractiveFramingGuideCard(
                 OutlinedButton(
                     onClick = onResetCorners,
                     enabled = hasCustomCorners,
+                    modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
                 ) {
                     Text("Reset Corners")
                 }
             }
+
+            TableBoxGuide(
+                expanded = !TableBoxGuideSession.collapsed,
+                onToggle = { TableBoxGuideSession.collapsed = !TableBoxGuideSession.collapsed },
+            )
 
             val tapModifier = Modifier.pointerInput(photo.id) {
                 detectTapGestures { tapOffset ->
@@ -1663,6 +1681,7 @@ private fun InteractiveFramingGuideCard(
                             ?.first
 
                         if (hitCornerIdx != null) {
+                            TableBoxGuideSession.hasDraggedCorner = true
                             draggedCorner = hitCornerIdx
                             draggedBallId = null
                             latestOnActiveCornerChanged(hitCornerIdx)
@@ -1791,11 +1810,20 @@ private fun InteractiveFramingGuideCard(
                             path = quadPath,
                             color = if (isQuadGeometryInvalid) ErrorRedColor else GuideCyanColor,
                             style = Stroke(
-                                width = 2.5f,
+                                width = 3.5f,
                                 cap = StrokeCap.Round,
                                 join = StrokeJoin.Round,
                             ),
                         )
+
+                        // Until the first corner drag, name what the box's sides follow.
+                        if (!TableBoxGuideSession.hasDraggedCorner && !isQuadGeometryInvalid) {
+                            drawSideAlignmentLabel(
+                                quadCanvasPts = pts,
+                                textMeasurer = textMeasurer,
+                                fontSizeSp = handleLabelSp,
+                            )
+                        }
 
                         // Project table head string and centre line onto the angled view when valid
                         if (cornerHomography != null) {
@@ -1803,6 +1831,17 @@ private fun InteractiveFramingGuideCard(
                                 homography = cornerHomography,
                                 photo = photo,
                                 toCanvas = ::toCanvas,
+                            )
+                        }
+
+                        // Corner marks: short ticks along both cushion noses meeting at each corner
+                        for (index in pts.indices) {
+                            drawCushionCornerMark(
+                                corner = pts[index],
+                                towardPrevious = pts[(index + 3) % 4],
+                                towardNext = pts[(index + 1) % 4],
+                                color = if (cornerNeedsReview(index)) WarningAmberColor else Color.White,
+                                dashed = cornerNeedsReview(index),
                             )
                         }
                     }
@@ -1896,7 +1935,7 @@ private fun InteractiveFramingGuideCard(
                 val loupeTarget: Triple<Offset, String, Color>? = when {
                     activeCornerIndex != null && activeCornerIndex in quadCornersPx.indices -> {
                         val label = CORNER_LABELS.getOrElse(activeCornerIndex) { "C$activeCornerIndex" }
-                        Triple(toCanvas(quadCornersPx[activeCornerIndex]), label, WarningAmberColor)
+                        Triple(toCanvas(quadCornersPx[activeCornerIndex]), "$label · where cushion edges cross", WarningAmberColor)
                     }
                     draggedCandidateId != null -> {
                         val draggedCand = photo.rawDetections.firstOrNull { it.id == draggedCandidateId }
@@ -1941,9 +1980,16 @@ private fun InteractiveFramingGuideCard(
 
             if (isQuadGeometryInvalid) {
                 Text(
-                    text = "Corner geometry is degenerate — drag corners back to the cushion noses or tap Reset Corners.",
+                    text = "The box is twisted. Drag the corners back to where the cushion front edges cross, or tap Reset Corners.",
                     style = MaterialTheme.typography.labelSmall,
                     color = ErrorRedColor,
+                )
+            } else if (cornersToCheck.isNotEmpty()) {
+                Text(
+                    text = "Check corners ${cornersToCheck.joinToString(", ")}: a cushion edge was hard to see, " +
+                        "so they were estimated from the rail. Line each side up with a cushion's front edge.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = WarningAmberColor,
                 )
             }
 
@@ -2120,6 +2166,252 @@ private fun DrawScope.drawFramingGuideReticle(
     )
 }
 
+private const val TABLE_BOX_HINT =
+    "Each side of the box follows a cushion's front edge. Each corner goes where two of those edges cross."
+
+private const val TABLE_BOX_ANSWER =
+    "The box is the playing surface. Each side runs along the front edge of a cushion, the edge a ball " +
+        "touches. It does not follow the wooden rail, the outer edge of the table, or the middle of the pockets."
+
+private const val TABLE_BOX_TIP =
+    "Line up each side of the box with a cushion's front edge first; the corners then fall into place. " +
+        "Use the magnifier while you drag. The short bright ticks mark the pocket mouths and should sit on " +
+        "the ends of the cushions."
+
+private const val TABLE_BOX_SIDE_LABEL = "along the cushion's front edge"
+
+private val DiagramClothColor = Color(0xFF137547)
+private val DiagramCushionColor = Color(0xFF1C9A5E)
+
+/** In-memory state of the table-box guide for this app session. */
+private object TableBoxGuideSession {
+    /** True once the player has hidden the guide. */
+    var collapsed by mutableStateOf(false)
+
+    /** True once the player has dragged a corner; the side label on the photo then goes away. */
+    var hasDraggedCorner by mutableStateOf(false)
+}
+
+/**
+ * Explains what the table box is: the playing surface, bounded by the cushions' front edges, with a
+ * diagram of one corner. The header row (at least 48 dp tall) shows or hides the explanation.
+ */
+@Composable
+private fun TableBoxGuide(expanded: Boolean, onToggle: () -> Unit) {
+    val textMeasurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val labelSp = with(density) { 11.dp.toSp() }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = RunoutColors.SurfaceMid,
+        border = BorderStroke(1.dp, RunoutColors.SurfaceHigh),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = RunoutSpacing.Element)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget)
+                    .clickable(onClick = onToggle),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "What is the table box?",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = RunoutColors.TextPrimary,
+                )
+                Text(
+                    text = if (expanded) "Hide" else "Show",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = RunoutColors.PrimaryCyan,
+                )
+            }
+            if (expanded) {
+                Text(
+                    text = TABLE_BOX_ANSWER,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = RunoutColors.TextPrimary,
+                )
+                Spacer(modifier = Modifier.height(RunoutSpacing.Element))
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(112.dp),
+                ) {
+                    drawTableBoxCornerDiagram(textMeasurer = textMeasurer, labelFontSp = labelSp)
+                }
+                Spacer(modifier = Modifier.height(RunoutSpacing.Element))
+                Text(
+                    text = TABLE_BOX_TIP,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = RunoutColors.TextSecondary,
+                )
+                Spacer(modifier = Modifier.height(RunoutSpacing.Element))
+            }
+        }
+    }
+}
+
+/**
+ * One table corner seen from above, drawn in the left square of the canvas: rail, two cushions, the
+ * pocket opening and hole, and the two cushion front edges extended until they cross. A green tick
+ * marks the crossing (where the box corner goes); red crosses mark the pocket centre and the outer
+ * table corner. Labels sit to the right with thin leader lines.
+ */
+private fun DrawScope.drawTableBoxCornerDiagram(textMeasurer: TextMeasurer, labelFontSp: TextUnit) {
+    val s = size.height
+    fun p(x: Float, y: Float) = Offset(x * s, y * s)
+    fun polygon(pts: List<Offset>) = Path().apply {
+        moveTo(pts[0].x, pts[0].y)
+        for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+        close()
+    }
+    val nose = 0.42f
+    val back = 0.30f
+    val jaw = 0.58f
+
+    clipRect(right = s) {
+        // Rail, then the bed inside the cushion front edges.
+        drawRoundRect(
+            color = RunoutColors.TextSecondary.copy(alpha = 0.45f),
+            topLeft = p(0.04f, 0.04f),
+            size = Size(s, s),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(0.06f * s, 0.06f * s),
+        )
+        drawRect(color = DiagramClothColor, topLeft = p(nose, nose), size = Size(s, s))
+        // Cushions, cut back at the pocket jaws.
+        drawPath(polygon(listOf(p(jaw + 0.08f, back), p(1.0f, back), p(1.0f, nose), p(jaw, nose))), DiagramCushionColor)
+        drawPath(polygon(listOf(p(back, jaw + 0.08f), p(nose, jaw), p(nose, 1.0f), p(back, 1.0f))), DiagramCushionColor)
+        // Pocket opening between the jaws, and the hole behind it.
+        drawPath(
+            polygon(listOf(p(jaw + 0.08f, back), p(jaw, nose), p(nose, jaw), p(back, jaw + 0.08f), p(back, back))),
+            ViewfinderBackdropColor,
+        )
+        drawCircle(color = Color.Black, radius = 0.13f * s, center = p(0.24f, 0.24f))
+        // Cushion front edges (solid) and their extensions to the crossing (dashed).
+        val edgeStroke = 3f
+        drawLine(RunoutColors.PrimaryCyan, p(jaw, nose), p(1.0f, nose), strokeWidth = edgeStroke)
+        drawLine(RunoutColors.PrimaryCyan, p(nose, jaw), p(nose, 1.0f), strokeWidth = edgeStroke)
+        val dash = PathEffect.dashPathEffect(floatArrayOf(5f, 4f), 0f)
+        drawLine(RunoutColors.PrimaryCyan, p(jaw, nose), p(nose - 0.05f, nose), strokeWidth = 2f, pathEffect = dash)
+        drawLine(RunoutColors.PrimaryCyan, p(nose, jaw), p(nose, nose - 0.05f), strokeWidth = 2f, pathEffect = dash)
+    }
+
+    val markerR = 0.055f * s
+    val crossing = p(nose, nose)
+    val pocketCentre = p(0.24f, 0.24f)
+    val tableCorner = p(0.075f, 0.075f)
+
+    fun drawCross(c: Offset) {
+        drawCircle(RunoutColors.DangerCoral, markerR, c)
+        val d = markerR * 0.45f
+        drawLine(Color.White, Offset(c.x - d, c.y - d), Offset(c.x + d, c.y + d), strokeWidth = 2.5f, cap = StrokeCap.Round)
+        drawLine(Color.White, Offset(c.x - d, c.y + d), Offset(c.x + d, c.y - d), strokeWidth = 2.5f, cap = StrokeCap.Round)
+    }
+    drawCross(tableCorner)
+    drawCross(pocketCentre)
+    drawCircle(RunoutColors.SuccessGreen, markerR, crossing)
+    val tick = Path().apply {
+        moveTo(crossing.x - 0.5f * markerR, crossing.y)
+        lineTo(crossing.x - 0.1f * markerR, crossing.y + 0.4f * markerR)
+        lineTo(crossing.x + 0.5f * markerR, crossing.y - 0.4f * markerR)
+    }
+    drawPath(tick, RunoutColors.OnSuccess, style = Stroke(width = 2.5f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+
+    // Labels to the right of the corner, joined to their markers.
+    val labelX = s + 0.12f * s
+    val labels = listOf(
+        Triple(tableCorner, "not the table edge", RunoutColors.DangerCoral),
+        Triple(pocketCentre, "not the pocket centre", RunoutColors.DangerCoral),
+        Triple(crossing, "corner goes here", RunoutColors.SuccessGreen),
+    )
+    labels.forEachIndexed { index, (marker, text, color) ->
+        val layout = textMeasurer.measure(
+            text = text,
+            style = TextStyle(color = color, fontSize = labelFontSp, fontWeight = FontWeight.SemiBold),
+        )
+        val rowY = s * (0.18f + 0.30f * index)
+        drawLine(
+            color = color.copy(alpha = 0.6f),
+            start = Offset(marker.x + markerR, marker.y),
+            end = Offset(labelX - 4f, rowY),
+            strokeWidth = 1.2f,
+        )
+        drawText(layout, topLeft = Offset(labelX, rowY - layout.size.height / 2f))
+    }
+}
+
+/**
+ * Labels the longest side of the box on the photo so the player sees that the sides, not just the
+ * corners, are what to line up.
+ */
+private fun DrawScope.drawSideAlignmentLabel(
+    quadCanvasPts: List<Offset>,
+    textMeasurer: TextMeasurer,
+    fontSizeSp: TextUnit,
+) {
+    if (quadCanvasPts.size != 4) return
+    val side = quadCanvasPts.indices.maxByOrNull { i ->
+        val a = quadCanvasPts[i]
+        val b = quadCanvasPts[(i + 1) % 4]
+        hypot(b.x - a.x, b.y - a.y)
+    } ?: return
+    val a = quadCanvasPts[side]
+    val b = quadCanvasPts[(side + 1) % 4]
+    val mid = Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
+    val centroid = Offset(quadCanvasPts.map { it.x }.average().toFloat(), quadCanvasPts.map { it.y }.average().toFloat())
+    val towardInside = Offset(centroid.x - mid.x, centroid.y - mid.y)
+    val len = hypot(towardInside.x, towardInside.y).coerceAtLeast(1f)
+    val layout = textMeasurer.measure(
+        text = TABLE_BOX_SIDE_LABEL,
+        style = TextStyle(color = GuideCyanColor, fontSize = fontSizeSp, fontWeight = FontWeight.SemiBold),
+    )
+    val pad = 4f
+    val anchor = Offset(mid.x + towardInside.x / len * 18f, mid.y + towardInside.y / len * 18f)
+    val left = (anchor.x - layout.size.width / 2f)
+        .coerceIn(pad, (size.width - layout.size.width - pad).coerceAtLeast(pad))
+    val top = (anchor.y - layout.size.height / 2f)
+        .coerceIn(pad, (size.height - layout.size.height - pad).coerceAtLeast(pad))
+    drawRoundRect(
+        color = ViewfinderBackdropColor.copy(alpha = 0.72f),
+        topLeft = Offset(left - pad, top - pad / 2f),
+        size = Size(layout.size.width + 2 * pad, layout.size.height + pad),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f),
+    )
+    drawText(layout, topLeft = Offset(left, top))
+}
+
+/**
+ * Draws an L-shaped mark at a table [corner]: two short ticks running along the cushion noses
+ * towards the neighbouring corners, so the player can see which two edges the corner joins.
+ */
+private fun DrawScope.drawCushionCornerMark(
+    corner: Offset,
+    towardPrevious: Offset,
+    towardNext: Offset,
+    color: Color,
+    dashed: Boolean,
+) {
+    val maxTick = 28.dp.toPx()
+    for (target in listOf(towardPrevious, towardNext)) {
+        val dx = target.x - corner.x
+        val dy = target.y - corner.y
+        val length = hypot(dx, dy)
+        if (length < 1f) continue
+        val tick = minOf(maxTick, 0.16f * length)
+        drawLine(
+            color = color,
+            start = corner,
+            end = Offset(corner.x + dx / length * tick, corner.y + dy / length * tick),
+            strokeWidth = 3.5f,
+            cap = StrokeCap.Round,
+            pathEffect = if (dashed) PathEffect.dashPathEffect(floatArrayOf(5f, 4f), 0f) else null,
+        )
+    }
+}
+
 private fun DrawScope.drawProjectedTableGuides(
     homography: PerspectiveHomography,
     photo: CapturedTablePhoto,
@@ -2163,6 +2455,30 @@ private fun DrawScope.drawProjectedTableGuides(
             radius = 3.5f,
             center = footSpot,
         )
+    }
+
+    // Pocket mouths: a bright tick at each jaw tip and a thin line across the mouth, so the box can be
+    // checked against the cushion ends in the photo.
+    val tickHalf = 7.dp.toPx()
+    for (pocket in table.pockets) {
+        val a = safeProject(pocket.jawTipA) ?: continue
+        val b = safeProject(pocket.jawTipB) ?: continue
+        drawLine(color = Color(0x99FDE68A), start = a, end = b, strokeWidth = 1.2f)
+        val dx = b.x - a.x
+        val dy = b.y - a.y
+        val length = hypot(dx, dy)
+        if (length < 1f) continue
+        val nx = -dy / length * tickHalf
+        val ny = dx / length * tickHalf
+        for (tip in listOf(a, b)) {
+            drawLine(
+                color = Color(0xFFFDE68A),
+                start = Offset(tip.x - nx, tip.y - ny),
+                end = Offset(tip.x + nx, tip.y + ny),
+                strokeWidth = 3f,
+                cap = StrokeCap.Round,
+            )
+        }
     }
 }
 

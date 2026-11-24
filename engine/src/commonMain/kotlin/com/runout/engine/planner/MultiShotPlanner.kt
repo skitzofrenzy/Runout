@@ -17,7 +17,6 @@ import com.runout.engine.physics.SpinCompensatedAim
 import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
 import kotlin.math.abs
-import kotlin.math.cos
 import kotlin.math.roundToInt
 
 /**
@@ -41,7 +40,11 @@ enum class ShotDifficultyTier(val label: String) {
 /**
  * One planned shot inside a [RunoutPlan]: the target and pocket, the spin-compensated aim, the recommended speed
  * (player scale `1..10` and SI m/s), the recommended tip contact point, the execution-error evaluation,
- * next-ball position difficulty probability (`null` on the final winning ball), and the score used for ranking.
+ * the position probability (`null` on the final winning ball and on a shot that does not pot), and the score used
+ * for ranking.
+ *
+ * [positionSuccessProbability] is the probability that the cue ball does not scratch and that the next shot, played
+ * from where this shot leaves the cue ball (averaged over the landing cloud), is made.
  */
 data class PlannedShotStep(
     val stepNumber: Int,
@@ -94,38 +97,92 @@ data class SelfPlayBenchmarkResult(
 /**
  * Expectimax beam-search run-out planner.
  *
- * Every ply enumerates legal target balls, unobstructed pockets, player speed scales and cue-tip offsets, applies
- * the spin-compensated aim and the execution-error model, moves the cue ball to the mean landing position and
- * scores the result by the accumulated make probability times the heat-zone value of the leave for the next ball
- * (plus a bonus for cue-ball paths that break out a problem ball). Only the best [beamWidth] states survive each
- * ply.
+ * Every ply enumerates legal target balls, unobstructed pockets, and a coarse grid of speeds and cue-tip offsets; the
+ * best strokes of each target-pocket pair are then refined in half speed steps and one vertical tip step while the
+ * plan improves. Each candidate is simulated with the spin-compensated aim and the execution-error model and moves
+ * the cue ball to its simulated resting place. A plan is scored as
+ *
+ * > value = product of P(make and no scratch) x product of (control x hold) x leave
+ *
+ * - **P(make)** comes from [ExecutionErrorModel.makeProbability]: a real probability for this player.
+ * - **control** ([controlFactor]) is how hard the stroke is to play as asked, each cause counted once: cue-ball
+ *   routes of two or more cushions, tip offsets toward the miscue limit, and very hard or very soft speeds. Side
+ *   spin, cut and distance are not in it; they are in P(make).
+ * - **hold** is the share of the next shot's make probability the player keeps over the landing cloud (speed and aim
+ *   error) compared with the nominal landing.
+ * - **leave** is the value of the last landing. Inside the horizon it is the next shot's best make probability; at the
+ *   end of the horizon it is a one-shot look ahead ([leafValue]): the best next pot times the leave it gives on the
+ *   ball after (rotation games: the next ball in order; 8-ball: the best remaining ball). In 8-ball the leave also
+ *   carries a rack term for problem balls still tied up on the table the shot leaves ([rackFactor]).
+ *
+ * Only the best [beamWidth] states survive each ply. Shots that do not pot, or whose nominal cue ball scratches, are
+ * only searched when the caller allows them for the first shot, and then always rank below plans that pot.
  */
 object MultiShotPlanner {
     private const val MAX_CUT_ANGLE_RAD: Double = HeatZoneGenerator.MAX_HEAT_CUT_ANGLE_RAD
     private const val MAX_SCRATCH_PROBABILITY: Double = 0.45
     private const val LEAVE_FLOOR: Double = 0.05
-    private const val BREAKOUT_BONUS_WITH_INSURANCE: Double = 0.15
-    private const val BREAKOUT_BONUS_WITHOUT_INSURANCE: Double = 0.04
-    private const val HEAT_COLS: Int = 24
-    private const val HEAT_ROWS: Int = 12
     private const val MAX_RETURNED_PLANS: Int = 5
     private const val SELF_PLAY_MAX_SHOTS: Int = 4
     private const val SELF_PLAY_HORIZON: Int = 3
     private const val GREEDY_SPEED_SCALE: Int = 6
     private const val LANDING_CLEARANCE_FACTOR: Double = 2.0
+    private const val DISTINCT_LANDING_METERS: Double = 0.25
+
+    /** Other cue-ball routes kept per target-pocket pair, besides the best, on the first ply and on later plies before the last. */
+    private const val PLY1_ALTERNATIVE_ROUTES: Int = 2
+    private const val DEEP_PLY_ALTERNATIVE_ROUTES: Int = 1
+    private const val VALUE_EPSILON: Double = 1e-12
+
+    /** Plans within this fraction of each other count as equally good when choosing a stroke. */
+    private const val NEAR_TIE_FRACTION: Double = 0.002
+
+    /** A medium pace: among equally good strokes the one closest to it is preferred. */
+    private const val COMFORTABLE_SPEED_UNITS: Double = 4.0
+
+    /** Cells of the lazily filled next-shot and leaf caches (about 5 cm on a 9 ft table). */
+    private const val CACHE_COLS: Int = 48
+    private const val CACHE_ROWS: Int = 24
 
     private val PLY1_SPEED_UNITS: List<Double> = listOf(2.0, 2.5, 3.5, 4.5, 5.5, 6.5, 8.0)
-    private val DEEP_PLY_SPEED_UNITS: List<Double> = listOf(2.5, 4.0, 5.5, 7.0)
+    private val DEEP_PLY_SPEED_UNITS: List<Double> = listOf(2.5, 4.5, 6.5)
 
-    private val DEEP_PLY_TIPS: List<TipOffset> = listOf(
+    /** First-ply tips: the graded planner set. Deeper plies use its centre-line tips and its two mild follow-side tips. */
+    private val PLY1_TIPS: List<TipOffset> = TipOffset.gradedPlannerCandidates()
+    private val DEEP_PLY_TIPS: List<TipOffset> = PLY1_TIPS.filter {
+        it.sideRatio == 0.0 || (abs(it.sideRatio) == 0.16 && it.verticalRatio == 0.20)
+    }
+
+    private const val REFINE_SPEED_STEP: Double = 0.5
+    private const val REFINE_TIP_STEP: Double = 0.09
+    private const val REFINE_MAX_SPEED_STEPS: Int = 6
+    private const val REFINE_MIN_SPEED: Double = 1.0
+    private const val REFINE_MAX_SPEED: Double = 9.5
+
+    /** Strokes tried from a leaf for the leave on the ball after the next one: centre, follow and draw, medium and firm. */
+    private val LEAF_SPEED_UNITS: List<Double> = listOf(3.0, 5.0)
+    private val LEAF_TIPS: List<TipOffset> = listOf(
         TipOffset(sideRatio = 0.0, verticalRatio = 0.0),
-        TipOffset(sideRatio = 0.0, verticalRatio = 0.18),
-        TipOffset(sideRatio = 0.0, verticalRatio = 0.35),
-        TipOffset(sideRatio = 0.0, verticalRatio = -0.14),
-        TipOffset(sideRatio = 0.0, verticalRatio = -0.28),
-        TipOffset(sideRatio = -0.16, verticalRatio = 0.20),
-        TipOffset(sideRatio = 0.16, verticalRatio = 0.20),
+        TipOffset(sideRatio = 0.0, verticalRatio = 0.30),
+        TipOffset(sideRatio = 0.0, verticalRatio = -0.30),
     )
+    private const val LEAF_SHOTS_EXPANDED: Int = 2
+    private const val LEAF_MAX_CUSHIONS: Int = 2
+
+    // Control factor.
+    private const val TWO_CUSHION_FACTOR: Double = 0.90
+    private const val THREE_CUSHION_FACTOR: Double = 0.80
+    private const val EXTRA_CUSHION_STEP: Double = 0.05
+    private const val MIN_CUSHION_FACTOR: Double = 0.60
+    private const val COMFORTABLE_TIP_RATIO: Double = 0.25
+    private const val TIP_AT_LIMIT_PENALTY: Double = 0.20
+    private const val POWER_SPEED_UNITS: Double = 6.5
+    private const val POWER_PENALTY_PER_UNIT: Double = 0.05
+    private const val SOFT_SPEED_UNITS: Double = 2.0
+    private const val SOFT_PENALTY_PER_UNIT: Double = 0.04
+
+    // Eight-ball rack term.
+    private const val UNRESOLVED_PROBLEM_FACTOR: Double = 0.85
 
     fun planRunout(
         layout: TableLayout,
@@ -139,6 +196,7 @@ object MultiShotPlanner {
         customFirstShotPocketId: PocketId? = null,
         allowHighScratchFirstShot: Boolean = false,
         customFirstShotSpeedUnits: Double? = null,
+        firstStepNumber: Int = 1,
     ): List<RunoutPlan> {
         if (layout.cueBall() == null) return emptyList()
         val objectBallCount = layout.balls.count { it.number != 0 }
@@ -164,6 +222,7 @@ object MultiShotPlanner {
             customTargetBallNumber = customFirstShotTargetBallNumber,
             customPocketId = customFirstShotPocketId,
             allowHighScratchFirstShot = allowHighScratchFirstShot,
+            firstStepNumber = firstStepNumber,
         )
 
         val root = SearchNode(
@@ -182,9 +241,9 @@ object MultiShotPlanner {
         for (ply in 1..maxDepth) {
             val children = mutableListOf<SearchNode>()
             for (node in beam) {
-                val expanded = expand(node, ply, context)
+                val expanded = expand(node, ply, ply == maxDepth, context)
                 if (expanded.isEmpty()) {
-                    if (node.steps.isNotEmpty()) finished += node.copy(leaveFactor = LEAVE_FLOOR)
+                    if (node.steps.isNotEmpty()) finished += node.copy(leaveFactor = LEAVE_FLOOR, notes = emptyList())
                 } else {
                     children += expanded
                 }
@@ -265,6 +324,10 @@ object MultiShotPlanner {
     // Search
     // ---------------------------------------------------------------------------------------------
 
+    /**
+     * A partial plan. [legal] is false once a step does not pot or scratches (only possible when the caller allows
+     * such a first shot); [notes] are explanations that belong to the plan ending at this node.
+     */
     private data class SearchNode(
         val layout: TableLayout,
         val rules: GameRulesState,
@@ -273,53 +336,212 @@ object MultiShotPlanner {
         val bonusFactor: Double,
         val leaveFactor: Double,
         val terminal: Boolean,
+        val legal: Boolean = true,
+        val notes: List<String> = emptyList(),
     ) {
         val value: Double
             get() = cumulativeProbability * bonusFactor * leaveFactor
     }
 
-    private val NODE_ORDER: Comparator<SearchNode> = compareByDescending<SearchNode> { it.value }
+    private val NODE_ORDER: Comparator<SearchNode> = compareByDescending<SearchNode> { it.legal }
+        .thenByDescending { it.value }
         .thenBy { it.steps.firstOrNull()?.targetBall?.number ?: 0 }
         .thenBy { it.steps.firstOrNull()?.pocketId?.ordinal ?: 0 }
+
+    /** A leaf's value with the shot behind it, for the explanation of the plan's last step. */
+    private class LeafResult(val value: Double, val note: String?)
 
     private class SearchContext(
         val profile: PlayerProfile,
         val customTip: TipOffset?,
         val customSpeedUnits: Double?,
-        val customTargetBallNumber: Int? = null,
-        val customPocketId: PocketId? = null,
-        val allowHighScratchFirstShot: Boolean = false,
+        val customTargetBallNumber: Int?,
+        val customPocketId: PocketId?,
+        val allowHighScratchFirstShot: Boolean,
+        val firstStepNumber: Int,
     ) {
         private val problemCache = HashMap<String, List<ProblemBallReport>>()
-        private val heatCache = HashMap<String, HeatZoneMap>()
+        private val nextShotCache = HashMap<String, DoubleArray>()
+        private val leafCache = HashMap<String, Array<LeafResult?>>()
 
-        private fun layoutSignature(layout: TableLayout): String =
-            layout.balls
-                .filter { !it.isCueBall }
-                .sortedBy { it.number }
-                .joinToString(",") { b ->
-                    val gx = (b.position.x * 20.0).roundToInt()
-                    val gy = (b.position.y * 20.0).roundToInt()
-                    "${b.number}@${gx}_$gy"
-                }
-
-        fun problemBalls(layout: TableLayout, rules: GameRulesState): List<ProblemBallReport> {
-            val key = layoutSignature(layout) + "|" + rules.gameType + "|" + rules.eightBallGroup
+        fun problemBalls(layout: TableLayout, rules: GameRulesState, signature: String): List<ProblemBallReport> {
+            val key = signature + "|" + rules.gameType + "|" + rules.eightBallGroup
             return problemCache.getOrPut(key) { ProblemBallAnalyzer.analyzeProblemBalls(layout, rules) }
         }
 
-        fun heatMap(layout: TableLayout, targetNumbers: List<Int>): HeatZoneMap {
-            val key = layoutSignature(layout) + "|" + targetNumbers.joinToString(",")
-            return heatCache.getOrPut(key) {
-                HeatZoneGenerator.computeForNextBalls(
-                    layout = layout,
-                    targetBallNumbers = targetNumbers,
-                    playerProfile = profile,
-                    cols = HEAT_COLS,
-                    rows = HEAT_ROWS,
+        private fun cellOf(layout: TableLayout, point: Vec2): Int {
+            val table = layout.table
+            val col = ((point.x / table.lengthMeters) * CACHE_COLS).toInt().coerceIn(0, CACHE_COLS - 1)
+            val row = ((point.y / table.widthMeters) * CACHE_ROWS).toInt().coerceIn(0, CACHE_ROWS - 1)
+            return row * CACHE_COLS + col
+        }
+
+        private fun cellCentre(layout: TableLayout, cell: Int): Vec2 {
+            val table = layout.table
+            val col = cell % CACHE_COLS
+            val row = cell / CACHE_COLS
+            return Vec2((col + 0.5) * table.lengthMeters / CACHE_COLS, (row + 0.5) * table.widthMeters / CACHE_ROWS)
+        }
+
+        /**
+         * Where to evaluate a cue ball resting at [point]: the centre of its cache cell when a cue ball can rest there
+         * (so the value can be shared), else [point] itself (not cached).
+         */
+        private fun evaluationPoint(layout: TableLayout, point: Vec2, cueRadius: Double): Pair<Vec2, Int?> {
+            val cell = cellOf(layout, point)
+            val centre = cellCentre(layout, cell)
+            return if (canRestAt(layout, centre, cueRadius)) centre to cell else point to null
+        }
+
+        /**
+         * Best make probability, over [targets] and pockets, of the next shot from a cue ball resting at [point] on
+         * [layout] (whose own cue ball is ignored); `0` where a cue ball cannot rest.
+         */
+        fun nextShotProbability(
+            layout: TableLayout,
+            signature: String,
+            targets: List<Ball>,
+            point: Vec2,
+            cueRadius: Double,
+        ): Double {
+            if (targets.isEmpty() || !canRestAt(layout, point, cueRadius)) return 0.0
+            val (at, cell) = evaluationPoint(layout, point, cueRadius)
+            val key = signature + "|" + targets.joinToString(",") { it.number.toString() }
+            val grid = nextShotCache.getOrPut(key) { DoubleArray(CACHE_COLS * CACHE_ROWS) { Double.NaN } }
+            if (cell != null && !grid[cell].isNaN()) return grid[cell]
+            val value = bestPotProbability(layout, targets, at, cueRadius)
+            if (cell != null) grid[cell] = value
+            return value
+        }
+
+        private fun bestPotProbability(layout: TableLayout, targets: List<Ball>, at: Vec2, cueRadius: Double): Double {
+            val cue = Ball(number = 0, position = at, radiusMeters = cueRadius)
+            var best = 0.0
+            for (target in targets) {
+                for (pocket in layout.table.pockets) {
+                    val aim = playableAim(layout, cue, target, pocket) ?: continue
+                    val p = HeatZoneGenerator.shotQuality(aim, pocket, profile.aimErrorStdRad)
+                    if (p > best) best = p
+                }
+            }
+            return best
+        }
+
+        /** [leafValue], cached per table signature and cell. */
+        fun leaf(layout: TableLayout, rules: GameRulesState, signature: String, point: Vec2, cueRadius: Double): LeafResult {
+            if (!canRestAt(layout, point, cueRadius)) return LeafResult(0.0, null)
+            val (at, cell) = evaluationPoint(layout, point, cueRadius)
+            val key = signature + "|" + rules.gameType + "|" + rules.eightBallGroup
+            val grid = leafCache.getOrPut(key) { arrayOfNulls(CACHE_COLS * CACHE_ROWS) }
+            if (cell != null) grid[cell]?.let { return it }
+            val value = leafValue(layout, rules, at, cueRadius, this)
+            if (cell != null) grid[cell] = value
+            return value
+        }
+    }
+
+    private fun canRestAt(layout: TableLayout, point: Vec2, cueRadius: Double): Boolean =
+        layout.table.isWithinPlayableBounds(point, cueRadius) &&
+            layout.balls.none { !it.isCueBall && it.position.distanceTo(point) < LANDING_CLEARANCE_FACTOR * cueRadius }
+
+    private fun layoutSignature(layout: TableLayout): String =
+        layout.balls
+            .filter { !it.isCueBall }
+            .sortedBy { it.number }
+            .joinToString(",") { b ->
+                val gx = (b.position.x * 200.0).roundToInt()
+                val gy = (b.position.y * 200.0).roundToInt()
+                "${b.number}@${gx}_$gy"
+            }
+
+    /**
+     * One-shot look ahead from a cue ball at [at] on [layout]: for the best [LEAF_SHOTS_EXPANDED] next pots, the make
+     * probability times the leave it gives on the ball after it (the best of a small set of centre, follow and draw
+     * strokes, each traced among the other balls and charged for cushions like [controlFactor]). When the next ball
+     * is the last one, its make probability alone.
+     */
+    private fun leafValue(
+        layout: TableLayout,
+        rules: GameRulesState,
+        at: Vec2,
+        cueRadius: Double,
+        context: SearchContext,
+    ): LeafResult {
+        val table = layout.table
+        val profile = context.profile
+        val cue = Ball(number = 0, position = at, radiusMeters = cueRadius)
+        class NextPot(val target: Ball, val pocket: PocketSpec, val aim: AimGeometry, val probability: Double)
+
+        val pots = ArrayList<NextPot>()
+        for (target in rules.legalTargetBalls(layout)) {
+            for (pocket in table.pockets) {
+                val aim = playableAim(layout, cue, target, pocket) ?: continue
+                val p = HeatZoneGenerator.shotQuality(aim, pocket, profile.aimErrorStdRad)
+                if (p > 0.0) pots += NextPot(target, pocket, aim, p)
+            }
+        }
+        if (pots.isEmpty()) return LeafResult(0.0, null)
+        pots.sortWith(
+            compareByDescending<NextPot> { it.probability }
+                .thenBy { it.target.number }
+                .thenBy { it.pocket.id.ordinal },
+        )
+
+        var best = LeafResult(0.0, null)
+        for (pot in pots.take(LEAF_SHOTS_EXPANDED)) {
+            val after = TableLayout(table, layout.balls.filter { it.number != pot.target.number && !it.isCueBall })
+            val ballsAfter = if (isGameOver(rules, pot.target)) {
+                emptyList()
+            } else {
+                rulesAfterPotting(rules, pot.target).legalTargetBalls(after)
+            }
+            if (ballsAfter.isEmpty()) {
+                if (pot.probability > best.value) best = LeafResult(pot.probability, null)
+                continue
+            }
+            val afterSignature = layoutSignature(after)
+            var bestLeave = 0.0
+            var bestCushions = 0
+            for (speedUnits in LEAF_SPEED_UNITS) {
+                val speed = profile.speedForUnits(speedUnits)
+                for (tip in LEAF_TIPS) {
+                    val pre = SpinPhysics.computePreImpactCueState(speed, tip, pot.aim.cueToGhostDistanceMeters, table)
+                    if (pre.state == SpinPhysics.ImpactSpinState.STOPPED_SHORT) continue
+                    val path = SpinPhysics.traceCueBallPathWithSpin(
+                        aim = pot.aim,
+                        cueSpeedMps = speed,
+                        tip = tip,
+                        table = table,
+                        ballRadiusMeters = cueRadius,
+                        maxBounces = LEAF_MAX_CUSHIONS,
+                        obstacleBalls = after.balls,
+                    )
+                    if (path.hitsScratchPocket != null) continue
+                    val stop = path.points.lastOrNull() ?: continue
+                    val next = context.nextShotProbability(after, afterSignature, ballsAfter, stop, cueRadius)
+                    val leave = (LEAVE_FLOOR + (1.0 - LEAVE_FLOOR) * next) * cushionFactor(path.cushionContacts)
+                    if (leave > bestLeave) {
+                        bestLeave = leave
+                        bestCushions = path.cushionContacts
+                    }
+                }
+            }
+            val value = pot.probability * bestLeave.coerceAtLeast(LEAVE_FLOOR)
+            if (value > best.value) {
+                val after1 = ballsAfter.joinToString(" or ") { "#${it.number}" }
+                val route = when (bestCushions) {
+                    0 -> "with no cushion"
+                    1 -> "off one cushion"
+                    else -> "off $bestCushions cushions"
+                }
+                best = LeafResult(
+                    value,
+                    "Ball #${pot.target.number} is then a ${percent(pot.probability)}% pot into the " +
+                        "${pot.pocket.id.displayName} pocket, with a route $route to $after1.",
                 )
             }
         }
+        return best
     }
 
     private class ShotEvaluation(
@@ -327,12 +549,13 @@ object MultiShotPlanner {
         val uncertainty: ShotUncertaintyResult,
         val cueSpeedMps: Double,
         val preImpact: SpinPhysics.PreImpactCueState,
+        val legal: Boolean,
     ) {
         val stepProbability: Double
             get() = (uncertainty.makeProbability * (1.0 - uncertainty.scratchProbability)).coerceIn(0.0, 1.0)
     }
 
-    private fun expand(node: SearchNode, ply: Int, context: SearchContext): List<SearchNode> {
+    private fun expand(node: SearchNode, ply: Int, isLastPly: Boolean, context: SearchContext): List<SearchNode> {
         val cue = node.layout.cueBall() ?: return emptyList()
         val table = node.layout.table
         val targets = node.rules.legalTargetBalls(node.layout).let { legal ->
@@ -344,17 +567,18 @@ object MultiShotPlanner {
         }
         if (targets.isEmpty()) return emptyList()
 
-        val problemBalls = context.problemBalls(node.layout, node.rules)
-        val customSpeed = context.customSpeedUnits
-        val customTip = context.customTip
+        val signature = layoutSignature(node.layout)
+        val problemBalls = context.problemBalls(node.layout, node.rules, signature)
+        val speedPinned = ply == 1 && context.customSpeedUnits != null
+        val tipPinned = ply == 1 && context.customTip != null
         val speeds = when {
-            ply == 1 && customSpeed != null -> listOf(customSpeed)
+            speedPinned -> listOfNotNull(context.customSpeedUnits)
             ply == 1 -> PLY1_SPEED_UNITS
             else -> DEEP_PLY_SPEED_UNITS
         }
         val tips = when {
-            ply == 1 && customTip != null -> listOf(customTip)
-            ply == 1 -> TipOffset.gradedPlannerCandidates()
+            tipPinned -> listOfNotNull(context.customTip)
+            ply == 1 -> PLY1_TIPS
             else -> DEEP_PLY_TIPS
         }
         val pockets = if (ply == 1 && context.customPocketId != null) {
@@ -367,49 +591,117 @@ object MultiShotPlanner {
         for (target in targets) {
             for (pocket in pockets) {
                 val aim = playableAim(node.layout, cue, target, pocket) ?: continue
-                val pairCandidates = ArrayList<SearchNode>(speeds.size * tips.size)
-                for (speedUnits in speeds) {
-                    for (tip in tips) {
-                        val child = buildChild(
-                            node = node,
-                            ply = ply,
-                            cue = cue,
-                            target = target,
-                            pocket = pocket,
-                            aim = aim,
-                            speedUnits = speedUnits,
-                            tip = tip,
-                            problemBalls = problemBalls,
-                            context = context,
-                        ) ?: continue
-                        pairCandidates += child
-                    }
+                val tried = HashMap<Pair<Double, TipOffset>, SearchNode?>()
+                fun stroke(speedUnits: Double, tip: TipOffset): SearchNode? {
+                    val key = speedUnits to tip
+                    if (key in tried) return tried[key]
+                    val child = buildChild(node, ply, isLastPly, cue, target, pocket, aim, speedUnits, tip, problemBalls, context)
+                    tried[key] = child
+                    return child
                 }
-                if (pairCandidates.isEmpty()) continue
-                pairCandidates.sortWith(NODE_ORDER)
-                val primary = pairCandidates.first()
+                for (speedUnits in speeds) for (tip in tips) stroke(speedUnits, tip)
+                val coarse = tried.values.filterNotNull().sortedWith(NODE_ORDER)
+                if (coarse.isEmpty()) continue
+                val primary = refine(simplestNearBest(coarse), speedPinned, tipPinned, ::stroke)
                 children += primary
-                // On Ply 1, also retain a distinct alternative cue-ball position route (e.g. hold short vs 1-rail roll)
-                if (ply == 1 && customSpeed == null && customTip == null) {
-                    val primaryLanding = primary.layout.cueBall()?.position
-                    if (primaryLanding != null) {
-                        val distinctAlt = pairCandidates.drop(1).firstOrNull { alt ->
-                            val altLanding = alt.layout.cueBall()?.position
-                            altLanding != null && altLanding.distanceTo(primaryLanding) >= 0.40
-                        }
-                        if (distinctAlt != null) {
-                            children += distinctAlt
-                        }
-                    }
+                // Before the last ply, also keep other cue-ball routes (for example holding short versus rolling off a rail):
+                // when the next pot is easy from all of them, only the plies after can tell them apart.
+                val alternatives = when {
+                    isLastPly || (ply == 1 && (speedPinned || tipPinned)) -> 0
+                    ply == 1 -> PLY1_ALTERNATIVE_ROUTES
+                    else -> DEEP_PLY_ALTERNATIVE_ROUTES
+                }
+                val landings = mutableListOf(landingOf(primary))
+                for (candidate in coarse) {
+                    if (landings.size > alternatives) break
+                    if (landings.any { landingOf(candidate).distanceTo(it) < DISTINCT_LANDING_METERS }) continue
+                    val refined = refine(candidate, speedPinned = false, tipPinned = false, stroke = ::stroke)
+                    val route = if (landings.none { landingOf(refined).distanceTo(it) < DISTINCT_LANDING_METERS }) refined else candidate
+                    children += route
+                    landings += landingOf(route)
                 }
             }
         }
         return children
     }
 
+    private fun landingOf(node: SearchNode): Vec2 =
+        node.layout.cueBall()?.position ?: node.steps.last().uncertainty.nominalLandingPosition
+
+    /** A pace closer to [COMFORTABLE_SPEED_UNITS] first, then a tip closer to the centre: the simpler of two strokes. */
+    private val SIMPLER_STROKE: Comparator<SearchNode> =
+        compareBy<SearchNode> { abs(it.steps.last().recommendedSpeedUnits - COMFORTABLE_SPEED_UNITS) }
+        .thenBy { it.steps.last().recommendedTip.magnitudeRatio }
+
+    /**
+     * Whether [candidate] should replace [current] as the stroke of a step: it is clearly better (by more than
+     * [NEAR_TIE_FRACTION]), or it is a simpler stroke ([SIMPLER_STROKE]) whose plan is within [NEAR_TIE_FRACTION] of
+     * [bestValue], the best value seen for this shot. When two strokes do equally well a player plays the one at a more
+     * comfortable pace and closer to centre ball.
+     */
+    private fun preferable(candidate: SearchNode, current: SearchNode, bestValue: Double): Boolean {
+        if (candidate.legal != current.legal) return candidate.legal
+        if (candidate.value > current.value * (1.0 + NEAR_TIE_FRACTION) + VALUE_EPSILON) return true
+        return candidate.value >= bestValue * (1.0 - NEAR_TIE_FRACTION) && SIMPLER_STROKE.compare(candidate, current) < 0
+    }
+
+    /** The simplest stroke among [ranked] (best first) whose plan is within [NEAR_TIE_FRACTION] of the best. */
+    private fun simplestNearBest(ranked: List<SearchNode>): SearchNode {
+        val first = ranked.first()
+        return ranked
+            .filter { it.legal == first.legal && it.value >= first.value * (1.0 - NEAR_TIE_FRACTION) }
+            .minWith(SIMPLER_STROKE.thenByDescending { it.value })
+    }
+
+    /**
+     * Hill-climbs the stroke of [seed]'s last step: speed in [REFINE_SPEED_STEP] steps in each direction while the plan
+     * improves ([preferable]), then one [REFINE_TIP_STEP] of the vertical tip either way. [stroke] evaluates (and
+     * remembers) a stroke.
+     */
+    private fun refine(
+        seed: SearchNode,
+        speedPinned: Boolean,
+        tipPinned: Boolean,
+        stroke: (Double, TipOffset) -> SearchNode?,
+    ): SearchNode {
+        if (!seed.legal) return seed
+        var best = seed
+        var bestValue = seed.value
+        if (!speedPinned) {
+            for (direction in intArrayOf(1, -1)) {
+                var current = best
+                var steps = 0
+                while (steps < REFINE_MAX_SPEED_STEPS) {
+                    val last = current.steps.last()
+                    val next = last.recommendedSpeedUnits + direction * REFINE_SPEED_STEP
+                    if (next < REFINE_MIN_SPEED || next > REFINE_MAX_SPEED) break
+                    val candidate = stroke(next, last.recommendedTip) ?: break
+                    bestValue = maxOf(bestValue, candidate.value)
+                    if (!preferable(candidate, current, bestValue)) break
+                    current = candidate
+                    steps++
+                }
+                if (preferable(current, best, bestValue)) best = current
+            }
+        }
+        if (!tipPinned) {
+            val last = best.steps.last()
+            for (delta in doubleArrayOf(REFINE_TIP_STEP, -REFINE_TIP_STEP)) {
+                val vertical = ((last.recommendedTip.verticalRatio + delta) * 100.0).roundToInt() / 100.0
+                val tip = last.recommendedTip.copy(verticalRatio = vertical)
+                if (!tip.isWithinMiscueLimit) continue
+                val candidate = stroke(last.recommendedSpeedUnits, tip) ?: continue
+                bestValue = maxOf(bestValue, candidate.value)
+                if (preferable(candidate, best, bestValue)) best = candidate
+            }
+        }
+        return best
+    }
+
     private fun buildChild(
         node: SearchNode,
         ply: Int,
+        isLastPly: Boolean,
         cue: Ball,
         target: Ball,
         pocket: PocketSpec,
@@ -419,7 +711,6 @@ object MultiShotPlanner {
         problemBalls: List<ProblemBallReport>,
         context: SearchContext,
     ): SearchNode? {
-        val table = node.layout.table
         val evaluation = evaluateShot(
             layout = node.layout,
             cue = cue,
@@ -433,20 +724,9 @@ object MultiShotPlanner {
         ) ?: return null
         val uncertainty = evaluation.uncertainty
         val stepProbability = evaluation.stepProbability
+        val legal = evaluation.legal
 
-        val breakout = ProblemBallAnalyzer.checkTrajectoryBreakout(
-            trajectory = uncertainty.nominalTrajectory,
-            shotTargetBallNumber = target.number,
-            shotPocketId = pocket.id,
-            problemBalls = problemBalls,
-            ballRadiusMeters = cue.radiusMeters,
-        )
-        val breakoutBonus = when {
-            breakout == null -> 0.0
-            breakout.insuranceBallNumber != null -> BREAKOUT_BONUS_WITH_INSURANCE
-            else -> BREAKOUT_BONUS_WITHOUT_INSURANCE
-        }
-
+        val breakout = truthfulBreakout(uncertainty, target, pocket, problemBalls, cue.radiusMeters)
         val advanced = advance(
             layout = node.layout,
             rules = node.rules,
@@ -456,108 +736,44 @@ object MultiShotPlanner {
             simulation = uncertainty.postShotSimulation,
         )
         val landing = advanced.layout.cueBall()?.position ?: uncertainty.nominalLandingPosition
-        val terminal = advanced.nextTargets.isEmpty()
-        val virtualCueAtLanding = Ball(number = 0, position = landing, radiusMeters = cue.radiusMeters)
-        val bounceCount = (uncertainty.nominalTrajectory.points.size - 2).coerceAtLeast(0)
-        val (leaveFactor, positionSuccessProbability) = when {
-            terminal -> computeExecutionSimplicityFactor(
-                speedUnits = speedUnits,
-                tip = tip,
-                bounceCount = 0,
-                isTerminalShot = true,
-            ) to null
-            isFinalTargetState(advanced.rules, advanced.nextTargets) -> {
-                val finalBall = advanced.nextTargets.first()
-                val heat = context.heatMap(advanced.layout, listOf(finalBall.number))
-                val overlapsBall = advanced.layout.balls.any {
-                    !it.isCueBall && it.position.distanceTo(landing) < LANDING_CLEARANCE_FACTOR * cue.radiusMeters
-                }
-                val hasClearNextShot = !overlapsBall &&
-                    table.isWithinPlayableBounds(landing, cue.radiusMeters) &&
-                    table.pockets.any { nextPocket ->
-                        playableAim(
-                            layout = advanced.layout,
-                            cue = virtualCueAtLanding,
-                            target = finalBall,
-                            pocket = nextPocket,
-                        ) != null && !HeatZoneGenerator.isPointOccludedForPocket(
-                            landing,
-                            HeatZoneGenerator.computePocketVisibility(advanced.layout, finalBall, nextPocket, cue.radiusMeters),
-                        )
-                    }
-                val heatValue = if (!hasClearNextShot) 0.0 else heat.valueAt(landing)
-                val cloudEase = evaluateFinalBallLandingCloudEase(
-                    landingCloud = uncertainty.landingCloud,
-                    finalBall = finalBall,
-                    nextLayout = advanced.layout,
-                    cueRadius = cue.radiusMeters,
-                    profile = context.profile,
-                )
-                val simplicity = computeExecutionSimplicityFactor(
-                    speedUnits = speedUnits,
-                    tip = tip,
-                    bounceCount = bounceCount,
-                    isTerminalShot = false,
-                )
-                val combinedEase = (0.75 * cloudEase + 0.25 * heatValue).coerceIn(0.0, 1.0) * simplicity
-                val factor = 0.20 + 0.80 * combinedEase
-                val posProb = evaluatePositionSuccessProbability(
-                    uncertainty = uncertainty,
-                    heat = heat,
-                    nextLayout = advanced.layout,
-                    landing = landing,
-                    hasClearNextShot = hasClearNextShot,
-                    cueRadius = cue.radiusMeters,
-                    speedUnits = speedUnits,
-                    tip = tip,
-                )
-                factor to posProb
-            }
+        val gameWon = legal && advanced.nextTargets.isEmpty()
+        val terminal = !legal || gameWon
+        val stepsSoFar = node.steps
+
+        var leaveFactor: Double
+        var positionProbability: Double? = null
+        var hold = 1.0
+        val notes = ArrayList<String>()
+        when {
+            !legal -> leaveFactor = LEAVE_FLOOR
+            gameWon -> leaveFactor = 1.0
             else -> {
-                val heat = context.heatMap(advanced.layout, advanced.nextTargets.take(2).map { it.number })
-                val overlapsBall = advanced.layout.balls.any {
-                    !it.isCueBall && it.position.distanceTo(landing) < LANDING_CLEARANCE_FACTOR * cue.radiusMeters
-                }
-                val hasClearNextShot = !overlapsBall &&
-                    table.isWithinPlayableBounds(landing, cue.radiusMeters) &&
-                    advanced.nextTargets.any { nextTarget ->
-                        table.pockets.any { nextPocket ->
-                            playableAim(
-                                layout = advanced.layout,
-                                cue = virtualCueAtLanding,
-                                target = nextTarget,
-                                pocket = nextPocket,
-                            ) != null && !HeatZoneGenerator.isPointOccludedForPocket(
-                                landing,
-                                HeatZoneGenerator.computePocketVisibility(advanced.layout, nextTarget, nextPocket, cue.radiusMeters),
-                            )
-                        }
-                    }
-                val heatValue = if (!hasClearNextShot) 0.0 else heat.valueAt(landing)
-                val factor = LEAVE_FLOOR + (1.0 - LEAVE_FLOOR) * heatValue
-                val posProb = evaluatePositionSuccessProbability(
-                    uncertainty = uncertainty,
-                    heat = heat,
-                    nextLayout = advanced.layout,
-                    landing = landing,
-                    hasClearNextShot = hasClearNextShot,
-                    cueRadius = cue.radiusMeters,
-                    speedUnits = speedUnits,
-                    tip = tip,
+                val afterSignature = layoutSignature(advanced.layout)
+                val nominalNext = context.nextShotProbability(
+                    advanced.layout, afterSignature, advanced.nextTargets, landing, cue.radiusMeters,
                 )
-                factor to posProb
+                val (expectedNext, keptShare) = positionHold(
+                    uncertainty, advanced, afterSignature, nominalNext, cue.radiusMeters, context,
+                )
+                positionProbability = (expectedNext * (1.0 - uncertainty.scratchProbability)).coerceIn(0.0, 1.0)
+                hold = keptShare
+                val leave = if (isLastPly) {
+                    val leaf = context.leaf(advanced.layout, advanced.rules, afterSignature, landing, cue.radiusMeters)
+                    leaf.note?.let { notes += it }
+                    leaf.value
+                } else {
+                    nominalNext
+                }
+                val (rack, rackNotes) = rackFactor(advanced, afterSignature, context)
+                notes += rackNotes
+                leaveFactor = (LEAVE_FLOOR + (1.0 - LEAVE_FLOOR) * leave) * rack
             }
         }
 
-        val controlFactor = computeHumanShotControlFactor(
-            aim = aim,
-            pocket = pocket,
-            uncertainty = uncertainty,
-            preImpact = evaluation.preImpact,
-            speedUnits = speedUnits,
+        val control = controlFactor(
+            cushions = if (gameWon) 0 else uncertainty.nominalTrajectory.cushionContacts,
             tip = tip,
-            positionSuccessProbability = positionSuccessProbability,
-            hasBreakout = breakout != null,
+            speedUnits = speedUnits,
         )
         val scaleInt = speedUnits.roundToInt().coerceIn(
             PlayerProfile.MIN_SPEED_SCALE,
@@ -565,32 +781,137 @@ object MultiShotPlanner {
         )
 
         val step = PlannedShotStep(
-            stepNumber = ply,
+            stepNumber = context.firstStepNumber + ply - 1,
             targetBall = target,
             pocketId = pocket.id,
-            pocketCenter = pocket.center,
+            pocketCenter = aim.pocketAimPos,
             compensatedAim = evaluation.compensatedAim,
             recommendedSpeedScale = scaleInt,
             cueSpeedMps = evaluation.cueSpeedMps,
             recommendedTip = tip,
             uncertainty = uncertainty,
             breakoutOpportunity = breakout,
-            stepScore = stepProbability * controlFactor * (1.0 + breakoutBonus),
+            stepScore = stepProbability * control * hold,
             resultingLayout = advanced.layout,
             disturbedBalls = uncertainty.postShotSimulation?.disturbedBalls.orEmpty(),
-            positionSuccessProbability = positionSuccessProbability,
+            positionSuccessProbability = positionProbability,
             recommendedSpeedUnits = speedUnits,
         )
 
         return SearchNode(
             layout = advanced.layout,
             rules = advanced.rules,
-            steps = node.steps + step,
+            steps = stepsSoFar + step,
             cumulativeProbability = node.cumulativeProbability * stepProbability,
-            bonusFactor = node.bonusFactor * controlFactor * (1.0 + breakoutBonus),
+            bonusFactor = node.bonusFactor * control * hold,
             leaveFactor = leaveFactor,
             terminal = terminal,
+            legal = node.legal && legal,
+            notes = notes,
         )
+    }
+
+    /**
+     * The next shot's make probability averaged over the non-scratching points of the landing cloud, and the share of
+     * the nominal landing's value it keeps (at most 1; 1 when the nominal landing has no shot at all).
+     */
+    private fun positionHold(
+        uncertainty: ShotUncertaintyResult,
+        advanced: AdvancedState,
+        signature: String,
+        nominalNext: Double,
+        cueRadius: Double,
+        context: SearchContext,
+    ): Pair<Double, Double> {
+        val cloud = uncertainty.landingCloud
+        if (cloud.isEmpty()) return nominalNext to 1.0
+        val weights = ExecutionErrorModel.SIGMA_WEIGHTS
+        var weightSum = 0.0
+        var valueSum = 0.0
+        for (i in cloud.indices) {
+            if (uncertainty.landingCloudScratched.getOrElse(i) { false }) continue
+            val w = weights.getOrElse(i) { 1.0 / cloud.size }
+            weightSum += w
+            valueSum += w * context.nextShotProbability(advanced.layout, signature, advanced.nextTargets, cloud[i], cueRadius)
+        }
+        val expected = if (weightSum > 1e-12) valueSum / weightSum else 0.0
+        val kept = if (nominalNext > 1e-6) (expected / nominalNext).coerceIn(0.0, 1.0) else 1.0
+        return expected to kept
+    }
+
+    /**
+     * How hard the stroke is to play as asked, each cause once: the cue ball's cushions on the way to position
+     * ([cushionFactor]; the game-winning shot needs no position and passes 0), a tip offset beyond
+     * [COMFORTABLE_TIP_RATIO] toward the miscue limit, and speeds above [POWER_SPEED_UNITS] or below
+     * [SOFT_SPEED_UNITS].
+     */
+    private fun controlFactor(cushions: Int, tip: TipOffset, speedUnits: Double): Double {
+        val tipShare = ((tip.magnitudeRatio - COMFORTABLE_TIP_RATIO) / (TipOffset.MAX_SAFE_OFFSET_RATIO - COMFORTABLE_TIP_RATIO))
+            .coerceIn(0.0, 1.0)
+        val tipFactor = 1.0 - TIP_AT_LIMIT_PENALTY * tipShare
+        val speedFactor = when {
+            speedUnits > POWER_SPEED_UNITS -> 1.0 - POWER_PENALTY_PER_UNIT * (speedUnits - POWER_SPEED_UNITS)
+            speedUnits < SOFT_SPEED_UNITS -> 1.0 - SOFT_PENALTY_PER_UNIT * (SOFT_SPEED_UNITS - speedUnits)
+            else -> 1.0
+        }.coerceAtLeast(0.70)
+        return cushionFactor(cushions) * tipFactor * speedFactor
+    }
+
+    /** Route complexity: none or one cushion is natural; two cost 10 %, three 20 %, then 5 % per cushion. */
+    private fun cushionFactor(cushions: Int): Double = when {
+        cushions <= 1 -> 1.0
+        cushions == 2 -> TWO_CUSHION_FACTOR
+        else -> (THREE_CUSHION_FACTOR - EXTRA_CUSHION_STEP * (cushions - 3)).coerceAtLeast(MIN_CUSHION_FACTOR)
+    }
+
+    /**
+     * Eight-ball rack term on the leave, with its explanations: [UNRESOLVED_PROBLEM_FACTOR] for each ball of the
+     * player's group (or the 8) that is still a problem ball on the table this shot leaves, so that a break-out played
+     * now, while the rest of the group is still there to play after it, is worth more than one put off past the
+     * horizon. `1` in rotation games and on an open table.
+     */
+    private fun rackFactor(
+        advanced: AdvancedState,
+        signature: String,
+        context: SearchContext,
+    ): Pair<Double, List<String>> {
+        val rules = advanced.rules
+        if (rules.gameType != GameType.EIGHT_BALL) return 1.0 to emptyList()
+        if (rules.eightBallGroup != EightBallGroup.SOLIDS && rules.eightBallGroup != EightBallGroup.STRIPES) {
+            return 1.0 to emptyList()
+        }
+        var factor = 1.0
+        val notes = ArrayList<String>()
+        for (problem in context.problemBalls(advanced.layout, rules, signature)) {
+            factor *= UNRESOLVED_PROBLEM_FACTOR
+            notes += "Ball #${problem.ballNumber} is still tied up when the plan ends; breaking it out earlier, while " +
+                "other balls of the group are left to play, scores higher."
+        }
+        return factor to notes
+    }
+
+    /**
+     * The break-out a shot really makes: a cue-ball path that passes a problem ball ([ProblemBallAnalyzer.checkTrajectoryBreakout])
+     * and moves that ball or one of the balls tying it up in the simulation.
+     */
+    private fun truthfulBreakout(
+        uncertainty: ShotUncertaintyResult,
+        target: Ball,
+        pocket: PocketSpec,
+        problemBalls: List<ProblemBallReport>,
+        cueRadius: Double,
+    ): BreakoutOpportunity? {
+        val breakout = ProblemBallAnalyzer.checkTrajectoryBreakout(
+            trajectory = uncertainty.nominalTrajectory,
+            shotTargetBallNumber = target.number,
+            shotPocketId = pocket.id,
+            problemBalls = problemBalls,
+            ballRadiusMeters = cueRadius,
+        ) ?: return null
+        val report = problemBalls.firstOrNull { it.ballNumber == breakout.problemBallNumber } ?: return null
+        val involved = report.blockingBallNumbers.toSet() + report.ballNumber
+        val moved = uncertainty.postShotSimulation?.disturbedBalls.orEmpty().any { it.ballNumber in involved }
+        return breakout.takeIf { moved }
     }
 
     private fun playableAim(layout: TableLayout, cue: Ball, target: Ball, pocket: PocketSpec): AimGeometry? {
@@ -606,6 +927,12 @@ object MultiShotPlanner {
         return aim
     }
 
+    /**
+     * Simulates one candidate stroke. Unless [allowHighScratch] is set, a shot is only kept when the nominal
+     * simulation pots the target in the intended pocket, drops no other ball (no plan counts on a carom, and in 8-ball
+     * an early 8 loses), the nominal cue ball does not scratch, and the scratch probability stays below
+     * [MAX_SCRATCH_PROBABILITY].
+     */
     private fun evaluateShot(
         layout: TableLayout,
         cue: Ball,
@@ -643,9 +970,15 @@ object MultiShotPlanner {
             tip = tip,
             playerProfile = profile,
         )
-        if (!allowHighScratch && !uncertainty.targetBallPotted) return null
+        val simulation = uncertainty.postShotSimulation
+        val pottedAsCalled = uncertainty.targetBallPotted &&
+            (simulation?.targetBallTrajectory?.pocketedIn ?: pocket.id) == pocket.id
+        val otherBallDropped = simulation?.disturbedBalls?.any { it.pocketedIn != null } == true
+        val nominalScratch = uncertainty.nominalTrajectory.hitsScratchPocket != null
+        val legal = pottedAsCalled && !nominalScratch && !otherBallDropped
+        if (!allowHighScratch && !legal) return null
         if (!allowHighScratch && uncertainty.scratchProbability >= MAX_SCRATCH_PROBABILITY) return null
-        return ShotEvaluation(compensated, uncertainty, cueSpeed, preImpact)
+        return ShotEvaluation(compensated, uncertainty, cueSpeed, preImpact, legal)
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -664,203 +997,10 @@ object MultiShotPlanner {
         GameType.TEN_BALL -> target.number == 10
     }
 
-    private fun isFinalTargetState(rules: GameRulesState, nextTargets: List<Ball>): Boolean =
-        nextTargets.size == 1 && isGameOver(rules, nextTargets.first())
-
-    private fun evaluateFinalBallLandingCloudEase(
-        landingCloud: List<Vec2>,
-        finalBall: Ball,
-        nextLayout: TableLayout,
-        cueRadius: Double,
-        profile: PlayerProfile,
-    ): Double {
-        val samplePoints = landingCloud.ifEmpty { listOfNotNull(nextLayout.cueBall()?.position) }
-        if (samplePoints.isEmpty()) return 0.0
-        val table = nextLayout.table
-        var totalEase = 0.0
-        for (pt in samplePoints) {
-            if (!table.isWithinPlayableBounds(pt, cueRadius)) continue
-            if (pt.distanceTo(finalBall.position) < LANDING_CLEARANCE_FACTOR * cueRadius) continue
-            val virtualCue = Ball(number = 0, position = pt, radiusMeters = cueRadius)
-            var bestPointScore = 0.0
-            for (pocket in table.pockets) {
-                val aim = playableAim(nextLayout, virtualCue, finalBall, pocket) ?: continue
-                val quality = HeatZoneGenerator.shotQuality(aim, pocket, profile.aimErrorStdRad)
-                val cutEase = 0.72 + 0.28 * cos(abs(aim.cutAngleRadians)).coerceAtLeast(0.0)
-                val minRailDist = minOf(
-                    pt.x,
-                    table.lengthMeters - pt.x,
-                    pt.y,
-                    table.widthMeters - pt.y,
-                )
-                val comfortThreshold = 2.2 * cueRadius
-                val comfort = if (minRailDist >= comfortThreshold) {
-                    1.0
-                } else {
-                    0.78 + 0.22 * (minRailDist / comfortThreshold).coerceIn(0.0, 1.0)
-                }
-                val score = (quality * cutEase * comfort).coerceIn(0.0, 1.0)
-                if (score > bestPointScore) bestPointScore = score
-            }
-            totalEase += bestPointScore
-        }
-        return (totalEase / samplePoints.size.toDouble()).coerceIn(0.0, 1.0)
-    }
-
-    private fun evaluatePositionSuccessProbability(
-        uncertainty: ShotUncertaintyResult,
-        heat: HeatZoneMap,
-        nextLayout: TableLayout,
-        landing: Vec2,
-        hasClearNextShot: Boolean,
-        cueRadius: Double,
-        speedUnits: Double,
-        tip: TipOffset,
-    ): Double {
-        val cloud = uncertainty.landingCloud.ifEmpty { listOf(landing) }
-        val weights = ExecutionErrorModel.SIGMA_WEIGHTS
-        val table = nextLayout.table
-        val objectBalls = nextLayout.balls.filter { !it.isCueBall }
-        val nominalHeat = if (hasClearNextShot) heat.valueAt(landing) else 0.0
-
-        var weightedSum = 0.0
-        var totalWeight = 0.0
-        for (i in cloud.indices) {
-            val pt = cloud[i]
-            val w = weights.getOrElse(i) { 1.0 / cloud.size }
-            totalWeight += w
-            val inBounds = table.isWithinPlayableBounds(pt, cueRadius)
-            val hitsBall = objectBalls.any {
-                it.position.distanceTo(pt) < LANDING_CLEARANCE_FACTOR * cueRadius
-            }
-            if (!inBounds || hitsBall) continue
-            val v = heat.valueAt(pt)
-            if (v <= 0.02) continue
-            val rel = if (nominalHeat > 0.05) (v / nominalHeat).coerceIn(0.0, 1.0) else 0.0
-            val absQuality = (v / 0.72).coerceIn(0.0, 1.0)
-            weightedSum += w * (0.55 * rel + 0.45 * absQuality)
-        }
-
-        val rawZoneAccuracy = (weightedSum / totalWeight.coerceAtLeast(1e-6)).coerceIn(0.0, 1.0)
-        val zoneAccuracy = if (hasClearNextShot) {
-            rawZoneAccuracy
-        } else {
-            (rawZoneAccuracy * 0.25).coerceAtMost(0.18)
-        }
-
-        val pts = uncertainty.nominalTrajectory.points
-        val bounceCount = (pts.size - 2).coerceAtLeast(0)
-        var travelMeters = 0.0
-        for (i in 1 until pts.size) {
-            travelMeters += pts[i - 1].distanceTo(pts[i])
-        }
-        val sideMag = abs(tip.clampedSideRatio)
-        val drawMag = (-tip.clampedVerticalRatio).coerceAtLeast(0.0)
-        val followMag = tip.clampedVerticalRatio.coerceAtLeast(0.0)
-        val spinPenalty = 0.36 * sideMag + 0.32 * drawMag + 0.10 * followMag
-        val railPenalty = (0.11 * bounceCount).coerceAtMost(0.38)
-        val travelPenalty = (0.09 * (travelMeters - 0.35).coerceAtLeast(0.0)).coerceAtMost(0.24)
-        val spreadPenalty = 0.28 * (uncertainty.landingSpreadRadiusMeters / 0.55).coerceIn(0.0, 1.0)
-        val speedStress = when {
-            speedUnits <= 1.5 -> 0.12
-            speedUnits <= 2.0 -> 0.06
-            speedUnits >= 9.0 -> 0.22 + 0.06 * (speedUnits - 9.0)
-            speedUnits >= 6.5 -> 0.08 * (speedUnits - 6.0)
-            else -> 0.0
-        }
-        val strokeControl = (1.0 - spinPenalty - railPenalty - travelPenalty - spreadPenalty - speedStress)
-            .coerceIn(0.18, 1.0)
-        val scratchSurvival = (1.0 - uncertainty.scratchProbability).coerceIn(0.0, 1.0)
-        return (zoneAccuracy * strokeControl * scratchSurvival).coerceIn(0.02, 0.98)
-    }
-
     /**
-     * Evaluates realistic human cue-ball control on every step so the beam search strongly favors
-     * short, natural 0-to-1 rail position routes and clean pockets over multi-rail, high-spin "robot" shots.
+     * Rules state after legally potting [target] (assigns the 8-ball group on an open table).
      */
-    private fun computeHumanShotControlFactor(
-        aim: AimGeometry,
-        pocket: PocketSpec,
-        uncertainty: ShotUncertaintyResult,
-        preImpact: SpinPhysics.PreImpactCueState,
-        speedUnits: Double,
-        tip: TipOffset,
-        positionSuccessProbability: Double?,
-        hasBreakout: Boolean,
-    ): Double {
-        val pts = uncertainty.nominalTrajectory.points
-        val bounceCount = (pts.size - 2).coerceAtLeast(0)
-        var travelMeters = 0.0
-        for (i in 1 until pts.size) {
-            travelMeters += pts[i - 1].distanceTo(pts[i])
-        }
-
-        val posFactor = if (positionSuccessProbability != null) {
-            (0.45 + 0.55 * positionSuccessProbability).coerceIn(0.38, 1.0)
-        } else {
-            1.0
-        }
-
-        val railSimplicity = when (bounceCount) {
-            0, 1 -> 1.0
-            2 -> 0.87
-            else -> (0.68 - 0.07 * (bounceCount - 3)).coerceAtLeast(0.50)
-        }
-
-        val travelControl = if (travelMeters <= 0.80 || hasBreakout) {
-            1.0
-        } else {
-            (1.0 - 0.09 * (travelMeters - 0.80)).coerceIn(0.76, 1.0)
-        }
-
-        val sideMag = abs(tip.clampedSideRatio)
-        val drawMag = (-tip.clampedVerticalRatio).coerceAtLeast(0.0)
-        var spinSimplicity = (1.0 - 0.12 * sideMag - 0.14 * drawMag).coerceIn(0.76, 1.0)
-        if (drawMag > 0.25 && sideMag > 0.20) {
-            spinSimplicity *= 0.88
-        }
-        // Penalize asking for draw at a soft speed / long distance where draw completely dies into forward roll
-        if (tip.clampedVerticalRatio < -0.18 && preImpact.state == SpinPhysics.ImpactSpinState.NATURAL_FORWARD_ROLL) {
-            spinSimplicity *= 0.80
-        }
-
-        val cutComfort = if (abs(aim.cutAngleRadians) <= 0.84) {
-            1.0
-        } else {
-            (1.0 - 0.22 * ((abs(aim.cutAngleRadians) - 0.84) / 0.55).coerceIn(0.0, 1.0))
-        }
-        val pocketComfort = if (
-            (pocket.id == PocketId.SIDE_LEFT || pocket.id == PocketId.SIDE_RIGHT) &&
-            abs(aim.objectBallDirection.y) < 0.62
-        ) {
-            0.84
-        } else {
-            1.0
-        }
-
-        val speedComfort = if (speedUnits in 2.5..5.5 || hasBreakout) {
-            1.0
-        } else {
-            (1.0 - 0.035 * abs(speedUnits - 4.0)).coerceIn(0.85, 1.0)
-        }
-
-        return (posFactor * railSimplicity * travelControl * spinSimplicity * cutComfort * pocketComfort * speedComfort)
-            .coerceIn(0.22, 1.0)
-    }
-
-    private fun computeExecutionSimplicityFactor(
-        speedUnits: Double,
-        tip: TipOffset,
-        bounceCount: Int,
-        isTerminalShot: Boolean,
-    ): Double = if (isTerminalShot) {
-        (1.0 - 0.06 * tip.magnitudeRatio - 0.055 * abs(speedUnits - 4.0)).coerceIn(0.74, 1.0)
-    } else {
-        (1.0 - 0.08 * tip.magnitudeRatio - 0.022 * abs(speedUnits - 4.0) - 0.045 * (bounceCount - 1).coerceAtLeast(0))
-            .coerceIn(0.70, 1.0)
-    }
-
-    private fun rulesAfterPotting(rules: GameRulesState, target: Ball): GameRulesState {
+    fun rulesAfterPotting(rules: GameRulesState, target: Ball): GameRulesState {
         if (rules.gameType != GameType.EIGHT_BALL || rules.eightBallGroup != EightBallGroup.OPEN) return rules
         return when {
             target.isSolid -> rules.copy(eightBallGroup = EightBallGroup.SOLIDS)
@@ -982,9 +1122,10 @@ object MultiShotPlanner {
         var rules = initialRules
         for ((index, step) in steps.withIndex()) {
             val ballNumber = step.targetBall.number
+            val pots = step.uncertainty.targetBallPotted && step.uncertainty.postShotSimulation?.cueBallStoppedBeforeImpact != true
             val posSummary = step.positionSuccessProbability?.let { posProb ->
-                ", ${percent(posProb)}% position (${step.positionDifficulty!!.label})"
-            } ?: ", final ball"
+                ", ${percent(posProb)}% position (${ShotDifficultyTier.fromProbability(posProb).label})"
+            } ?: if (pots) ", final ball" else ""
             val speedLabel = PlayerProfile.formatSpeedUnits(step.recommendedSpeedUnits)
             reasons += "Step ${step.stepNumber}: pot ball #$ballNumber in the ${step.pocketId.displayName} pocket " +
                 "at speed $speedLabel/10, ${percent(step.uncertainty.makeProbability)}% to make (${step.makeDifficulty.label})$posSummary."
@@ -1015,15 +1156,16 @@ object MultiShotPlanner {
             if (breakout != null) {
                 val insurance = breakout.insuranceBallNumber
                 reasons += if (insurance != null) {
-                    "Step ${step.stepNumber} sends the cue ball past problem ball #${breakout.problemBallNumber} " +
+                    "Step ${step.stepNumber} sends the cue ball into problem ball #${breakout.problemBallNumber}'s cluster " +
                         "to free it; ball #$insurance is the open insurance ball if it stays tied up."
                 } else {
-                    "Step ${step.stepNumber} sends the cue ball past problem ball #${breakout.problemBallNumber} to free it."
+                    "Step ${step.stepNumber} sends the cue ball into problem ball #${breakout.problemBallNumber}'s cluster to free it."
                 }
             }
 
             rules = rulesAfterPotting(rules, step.targetBall)
         }
+        reasons += node.notes
 
         for (problem in problemBalls) {
             val causes = problem.reasons.joinToString(", ") {

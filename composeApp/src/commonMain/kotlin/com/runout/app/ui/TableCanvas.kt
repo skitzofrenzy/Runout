@@ -13,6 +13,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
@@ -34,7 +35,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -53,13 +53,19 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -68,14 +74,21 @@ import com.runout.engine.model.Ball
 import com.runout.engine.model.BallPaletteColor
 import com.runout.engine.model.BallSetProfile
 import com.runout.engine.model.PocketId
+import com.runout.engine.model.PocketSpec
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.DisplacedBallPath
 import com.runout.engine.physics.MotionPhysics
+import com.runout.engine.physics.PocketGeometry
+import com.runout.engine.physics.PathWaypoint
+import com.runout.engine.physics.PathWaypointKind
+import com.runout.engine.physics.ShotPathWaypoints
 import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.physics.TrajectoryPath
+import com.runout.engine.planner.FallbackAdvice
+import com.runout.engine.planner.FallbackLineRole
 import com.runout.engine.planner.HeatZoneGenerator
 import com.runout.engine.planner.HeatZoneMap
 import com.runout.engine.planner.PlannedShotStep
@@ -91,12 +104,13 @@ import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 private val RailWoodOuterColor = Color(0xFF3E2415)
 private val RailWoodInnerColor = Color(0xFF54321E)
-private val CushionClothColor = Color(0xFF0D5C3A)
 private val ClothBaizeColor = Color(0xFF137547)
+private val CushionClothColor = cushionShadeOf(ClothBaizeColor)
 private val TableMarkingColor = Color(0x55E2E8F0)
 private val DiamondSightColor = Color(0xFFD6C7B2)
 private val PocketHoleColor = Color(0xFF090D12)
@@ -115,7 +129,7 @@ private val HeatZoneMediumColor = Color(0x42F59E0B)
 private val HeatZoneLowColor = Color(0x38F87171)
 private val DisturbedScatterColor = Color(0xFFF59E0B)
 
-private data class TableCanvasGeometry(
+internal data class TableCanvasGeometry(
     val railPaddingPx: Float,
     val pxPerMeter: Float,
     val playLeft: Float,
@@ -134,18 +148,28 @@ private data class TableCanvasGeometry(
     )
 }
 
-private fun computeTableCanvasGeometry(
+/**
+ * Fits [table] and its rail band into the canvas. The band is 7.5 % of the short canvas side, widened (and the table
+ * shrunk to match) when a pocket's hole would not fit inside it, see [requiredRailBandMeters].
+ */
+internal fun computeTableCanvasGeometry(
     canvasWidth: Float,
     canvasHeight: Float,
     table: TableSpec,
 ): TableCanvasGeometry {
-    val railPaddingPx = min(canvasWidth, canvasHeight) * 0.075f
-    val availableWidth = (canvasWidth - 2f * railPaddingPx).coerceAtLeast(1f)
-    val availableHeight = (canvasHeight - 2f * railPaddingPx).coerceAtLeast(1f)
-    val pxPerMeter = min(
-        availableWidth / table.lengthMeters.toFloat(),
-        availableHeight / table.widthMeters.toFloat(),
+    val basePaddingPx = min(canvasWidth, canvasHeight) * 0.075f
+    val baseAvailableWidth = (canvasWidth - 2f * basePaddingPx).coerceAtLeast(1f)
+    val baseAvailableHeight = (canvasHeight - 2f * basePaddingPx).coerceAtLeast(1f)
+    val basePxPerMeter = min(
+        baseAvailableWidth / table.lengthMeters.toFloat(),
+        baseAvailableHeight / table.widthMeters.toFloat(),
     ).coerceAtLeast(1f)
+    val bandMeters = max(basePaddingPx / basePxPerMeter, requiredRailBandMeters(table).toFloat())
+    val pxPerMeter = min(
+        canvasWidth / (table.lengthMeters.toFloat() + 2f * bandMeters),
+        canvasHeight / (table.widthMeters.toFloat() + 2f * bandMeters),
+    ).coerceAtLeast(1f)
+    val railPaddingPx = bandMeters * pxPerMeter
     val playWidth = table.lengthMeters.toFloat() * pxPerMeter
     val playHeight = table.widthMeters.toFloat() * pxPerMeter
     val playLeft = (canvasWidth - playWidth) * 0.5f
@@ -357,6 +381,10 @@ fun PoolTableCanvas(
     showHeatZone: Boolean = false,
     showLandingCloud: Boolean = true,
     fitContainer: Boolean = false,
+    displayMode: AppDisplayMode = AppDisplayMode.SIMPLE,
+    isFullscreen: Boolean = false,
+    onToggleFullscreen: (() -> Unit)? = null,
+    fallbackAdvice: FallbackAdvice? = null,
 ) {
     val table = layout.table
     val tableAspectRatio = (table.lengthMeters / table.widthMeters).toFloat()
@@ -371,6 +399,35 @@ fun PoolTableCanvas(
     val latestOnSelectPocket by rememberUpdatedState(onSelectPocket)
     val latestOnTapCueBall by rememberUpdatedState(onTapCueBall)
 
+    // Tappable physics waypoints (spin transitions, contacts, cushions, rest) for the active plan step
+    val tooltipSteps = activeRunoutPlan?.steps.orEmpty()
+    val tooltipStep = if (!isDraggingBall && tooltipSteps.isNotEmpty()) {
+        tooltipSteps[(focusedStepIndex ?: 0).coerceIn(0, tooltipSteps.lastIndex)]
+    } else {
+        null
+    }
+    val pathWaypoints = remember(tooltipStep, table) {
+        tooltipStep?.let { step ->
+            ShotPathWaypoints.build(
+                aim = step.compensatedAim.geometricAim,
+                cueSpeedMps = step.cueSpeedMps,
+                tip = step.recommendedTip,
+                table = table,
+                simulation = step.uncertainty.postShotSimulation,
+                targetBallNumber = step.targetBall.number,
+                speedUnits = step.recommendedSpeedUnits,
+            )
+        } ?: emptyList()
+    }
+    val latestWaypoints by rememberUpdatedState(pathWaypoints)
+    // The selection remembers which waypoint list it belongs to, so it is dropped as soon as the shot changes
+    // (another step, a sandbox tip or speed edit, a ball move) without waiting for a later recomposition.
+    var waypointSelection by remember { mutableStateOf<PathWaypointSelection?>(null) }
+    val selectedWaypointIndex = waypointSelection
+        ?.takeIf { it.waypoints === pathWaypoints }
+        ?.index
+        ?.takeIf { it in pathWaypoints.indices }
+    val activeWaypointIndex = selectedWaypointIndex
     var zoomScale by remember { mutableStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     var lastCanvasSize by remember { mutableStateOf(Size.Zero) }
@@ -515,30 +572,56 @@ fun PoolTableCanvas(
                         }
                     }
                 }
-                if (!handledTap && latestOnSelectPocket != null && latestAvailablePockets.isNotEmpty()) {
-                    val validSet = latestAvailablePockets.toSet()
-                    val tappedPocket = activeLayout.table.pockets
-                        .filter { it.id in validSet }
-                        .map { pocket ->
-                            val screenPocket = baseToScreenCanvasOffset(
-                                curGeom.toCanvasOffset(pocket.center),
-                                cSize,
-                                zoomScale,
-                                panOffset,
-                            )
-                            val dist = hypot(lastSinglePos.x - screenPocket.x, lastSinglePos.y - screenPocket.y)
-                            val hitR = max(
-                                44f,
-                                (pocket.acceptanceRadiusMeters * curGeom.pxPerMeter * zoomScale * 1.9).toFloat(),
-                            ).coerceAtMost(84f)
-                            Triple(pocket, dist, hitR)
-                        }
-                        .filter { (_, dist, hitR) -> dist <= hitR }
-                        .minByOrNull { (_, dist, _) -> dist }
-                        ?.first
-                    if (tappedPocket != null) {
-                        latestOnSelectPocket?.invoke(tappedPocket.id)
+                if (!handledTap) {
+                    val tapPoint = lastSinglePos
+                    val wps = latestWaypoints
+                    val waypointHit = pickPathWaypointIndex(
+                        screenPoints = wps.map { wp ->
+                            if (wp.kind == PathWaypointKind.CUE_START) {
+                                null
+                            } else {
+                                baseToScreenCanvasOffset(
+                                    curGeom.toCanvasOffset(wp.position),
+                                    cSize,
+                                    zoomScale,
+                                    panOffset,
+                                )
+                            }
+                        },
+                        tap = tapPoint,
+                        radiusPx = PATH_WAYPOINT_TAP_RADIUS_DP.dp.toPx(),
+                    )
+                    val pocketHit = if (latestOnSelectPocket != null && latestAvailablePockets.isNotEmpty()) {
+                        val validSet = latestAvailablePockets.toSet()
+                        activeLayout.table.pockets
+                            .filter { it.id in validSet }
+                            .map { pocket ->
+                                val screenPocket = baseToScreenCanvasOffset(
+                                    curGeom.toCanvasOffset(pocketTapPoint(pocket)),
+                                    cSize,
+                                    zoomScale,
+                                    panOffset,
+                                )
+                                val dist = hypot(tapPoint.x - screenPocket.x, tapPoint.y - screenPocket.y)
+                                Triple(pocket, dist, POCKET_TAP_RADIUS_DP.dp.toPx())
+                            }
+                            .filter { (_, dist, hitR) -> dist <= hitR }
+                            .minByOrNull { (_, dist, _) -> dist }
+                    } else {
+                        null
                     }
+                    // Priority: ball, then path waypoint, then pocket. A waypoint only gives way to a pocket
+                    // when the tap is strictly closer to that pocket's centre than to the waypoint.
+                    if (waypointHit != null && (pocketHit == null || waypointHit.second <= pocketHit.second)) {
+                        waypointSelection = PathWaypointSelection(wps, waypointHit.first)
+                        handledTap = true
+                    } else if (pocketHit != null) {
+                        latestOnSelectPocket?.invoke(pocketHit.first.id)
+                        handledTap = true
+                    }
+                }
+                if (!handledTap) {
+                    waypointSelection = null
                 }
             }
         }
@@ -575,44 +658,18 @@ fun PoolTableCanvas(
 
             fun toCanvasOffset(siPos: Vec2): Offset = geom.toCanvasOffset(siPos)
 
+            val tablePalette = TableDrawPalette(
+                woodOuter = RailWoodOuterColor,
+                woodInner = RailWoodInnerColor,
+                cloth = ClothBaizeColor,
+                cushion = CushionClothColor,
+                throat = PocketHoleColor,
+                holeRim = PocketRimColor,
+            )
+
             fun DrawScope.renderTableLayer() {
-                // 1. Wooden rails and cushion border
-                val railOuterLeft = playLeft - railPaddingPx
-        val railOuterTop = playTop - railPaddingPx
-        val railOuterWidth = playWidth + 2f * railPaddingPx
-        val railOuterHeight = playHeight + 2f * railPaddingPx
-        val railCornerRadius = CornerRadius(railPaddingPx * 0.7f, railPaddingPx * 0.7f)
-        drawRoundRect(
-            color = RailWoodOuterColor,
-            topLeft = Offset(railOuterLeft, railOuterTop),
-            size = Size(railOuterWidth, railOuterHeight),
-            cornerRadius = railCornerRadius,
-        )
-        val innerWoodInset = railPaddingPx * 0.18f
-        drawRoundRect(
-            color = RailWoodInnerColor,
-            topLeft = Offset(railOuterLeft + innerWoodInset, railOuterTop + innerWoodInset),
-            size = Size(railOuterWidth - 2f * innerWoodInset, railOuterHeight - 2f * innerWoodInset),
-            cornerRadius = CornerRadius(railPaddingPx * 0.55f, railPaddingPx * 0.55f),
-        )
-
-        val cushionClothInset = railPaddingPx * 0.68f
-        drawRoundRect(
-            color = CushionClothColor,
-            topLeft = Offset(playLeft - (railPaddingPx - cushionClothInset), playTop - (railPaddingPx - cushionClothInset)),
-            size = Size(
-                width = playWidth + 2f * (railPaddingPx - cushionClothInset),
-                height = playHeight + 2f * (railPaddingPx - cushionClothInset),
-            ),
-            cornerRadius = CornerRadius(railPaddingPx * 0.2f, railPaddingPx * 0.2f),
-        )
-
-        // 2. Playing surface (within cushion noses: 0..lengthMeters, 0..widthMeters)
-        drawRect(
-            color = ClothBaizeColor,
-            topLeft = Offset(playLeft, playTop),
-            size = Size(playWidth, playHeight),
-        )
+                // 1. Wooden rails, cloth (the nose rectangle 0..lengthMeters x 0..widthMeters) and pocket openings
+                drawTableBody(table, geom, tablePalette)
 
         // Shared active step & pocket visibility for cloth heat-zone, pockets, and landing-cloud occlusion
         val planSteps = activeRunoutPlan?.steps.orEmpty()
@@ -642,24 +699,21 @@ fun PoolTableCanvas(
             )
         }
 
-        drawRect(
-            color = Color(0x33000000),
-            topLeft = Offset(playLeft, playTop),
-            size = Size(playWidth, playHeight),
-            style = Stroke(width = max(1f, pxPerMeter * 0.004f)),
-        )
+        // 2c. Cushion strips: straight, ending at the jaw tips of each pocket
+        drawTableCushions(table, geom, tablePalette)
 
-        // 3. Rail diamond sights (8 divisions along length, 4 along width)
-        val diamondRadius = max(2f, railPaddingPx * 0.09f)
-        val topRailSightY = playTop - railPaddingPx * 0.45f
-        val bottomRailSightY = playTop + playHeight + railPaddingPx * 0.45f
+        // 3. Rail diamond sights (8 divisions along length, 4 along width) on the wood beside the cushions
+        val diamondRadius = max(2f, railPaddingPx * 0.07f)
+        val diamondOffsetPx = geom.diamondOffsetPx()
+        val topRailSightY = playTop - diamondOffsetPx
+        val bottomRailSightY = playTop + playHeight + diamondOffsetPx
         for (i in listOf(1, 2, 3, 5, 6, 7)) {
             val sightX = playLeft + playWidth * (i / 8f)
             drawCircle(color = DiamondSightColor, radius = diamondRadius, center = Offset(sightX, topRailSightY))
             drawCircle(color = DiamondSightColor, radius = diamondRadius, center = Offset(sightX, bottomRailSightY))
         }
-        val leftRailSightX = playLeft - railPaddingPx * 0.45f
-        val rightRailSightX = playLeft + playWidth + railPaddingPx * 0.45f
+        val leftRailSightX = playLeft - diamondOffsetPx
+        val rightRailSightX = playLeft + playWidth + diamondOffsetPx
         for (j in 1..3) {
             val sightY = playTop + playHeight * (j / 4f)
             drawCircle(color = DiamondSightColor, radius = diamondRadius, center = Offset(leftRailSightX, sightY))
@@ -680,43 +734,35 @@ fun PoolTableCanvas(
         drawCircle(color = TableMarkingColor, radius = spotRadiusPx, center = headSpotCenter)
         drawCircle(color = TableMarkingColor, radius = spotRadiusPx, center = footSpotCenter)
 
-        // 5. Six pockets (layout.table.pockets)
+        // 5. Pocket highlights: a stroke across the mouth (jaw tip to jaw tip) and the rim of the hole
         val targetPocketId = if (!isDraggingBall) (focusedStep?.pocketId ?: selectedShot?.pocket?.id) else null
         val selectablePocketsSet = if (!isDraggingBall) availablePockets.toSet() else emptySet()
         for (pocket in table.pockets) {
-            val pocketCenter = toCanvasOffset(pocket.center)
-            val pocketRadiusPx = (pocket.acceptanceRadiusMeters * pxPerMeter).toFloat()
             val isTargetPocket = pocket.id == targetPocketId
             val isSelectablePocket = pocket.id in selectablePocketsSet
+            if (!isTargetPocket && !isSelectablePocket) continue
+            val (mouthA, mouthB) = geom.mouthSegment(pocket)
+            val (holeCenterPx, holeRadiusPx) = geom.holeCircle(pocket)
+            val highlight = if (isTargetPocket) PotLineColor else PotLineColor.copy(alpha = 0.6f)
+            val strokeWidth = if (isTargetPocket) max(2.4f, pxPerMeter * 0.0065f) else max(1.6f, pxPerMeter * 0.0045f)
             drawCircle(
-                color = when {
-                    isTargetPocket -> PotLineColor.copy(alpha = 0.45f)
-                    isSelectablePocket -> PotLineColor.copy(alpha = 0.18f)
-                    else -> PocketRimColor
-                },
-                radius = pocketRadiusPx * 1.12f,
-                center = pocketCenter,
+                color = highlight.copy(alpha = if (isTargetPocket) 0.30f else 0.14f),
+                radius = holeRadiusPx,
+                center = holeCenterPx,
             )
             drawCircle(
-                color = PocketHoleColor,
-                radius = pocketRadiusPx,
-                center = pocketCenter,
+                color = highlight,
+                radius = holeRadiusPx,
+                center = holeCenterPx,
+                style = Stroke(width = strokeWidth),
             )
-            if (isTargetPocket) {
-                drawCircle(
-                    color = PotLineColor,
-                    radius = pocketRadiusPx * 1.18f,
-                    center = pocketCenter,
-                    style = Stroke(width = max(2.2f, pxPerMeter * 0.0065f)),
-                )
-            } else if (isSelectablePocket) {
-                drawCircle(
-                    color = PotLineColor.copy(alpha = 0.55f),
-                    radius = pocketRadiusPx * 1.14f,
-                    center = pocketCenter,
-                    style = Stroke(width = max(1.4f, pxPerMeter * 0.0042f)),
-                )
-            }
+            drawLine(
+                color = highlight,
+                start = mouthA,
+                end = mouthB,
+                strokeWidth = strokeWidth * 1.3f,
+                cap = StrokeCap.Round,
+            )
         }
 
         // 6. Strategy plan / selected shot overlays (suppressed while actively dragging for 60fps feedback)
@@ -749,10 +795,26 @@ fun PoolTableCanvas(
                     pxPerMeter = pxPerMeter,
                     toCanvasOffset = ::toCanvasOffset,
                 )
+            } else if (fallbackAdvice != null) {
+                drawFallbackAdvice(
+                    advice = fallbackAdvice,
+                    ballSet = ballSet,
+                    ballRadiusPx = ballRadiusPx,
+                    pxPerMeter = pxPerMeter,
+                    toCanvasOffset = ::toCanvasOffset,
+                )
             }
         }
 
         // 7. Balls on the playing surface
+        if (!isDraggingBall && pathWaypoints.isNotEmpty()) {
+            drawPathWaypointMarkers(
+                waypoints = pathWaypoints,
+                selectedIndex = activeWaypointIndex,
+                ballRadiusPx = ballRadiusPx,
+                toCanvasOffset = ::toCanvasOffset,
+            )
+        }
         val fontSizePx = (ballRadiusPx * 0.80f).coerceAtLeast(6f)
         val fontSizeSp = with(density) { fontSizePx.toSp() }
         val targetBallNumber = if (!isDraggingBall) {
@@ -848,10 +910,579 @@ fun PoolTableCanvas(
             onZoomOut = { applyStepZoom((zoomScale - 0.5f).coerceAtLeast(MIN_TABLE_ZOOM)) },
             onResetZoom = { applyStepZoom(1.0f) },
             onZoomIn = { applyStepZoom((zoomScale + 0.5f).coerceAtMost(MAX_TABLE_ZOOM)) },
+            isFullscreen = isFullscreen,
+            onToggleFullscreen = onToggleFullscreen,
             modifier = Modifier
                 .align(BiasAlignment(horizontalBias = -0.50f, verticalBias = 0.98f))
                 .padding(bottom = 2.dp),
         )
+
+        // Path inspector entry chip (top rail) when waypoints exist but none is open. The outer box is the
+        // 48 dp touch target; the visible pill stays small so it does not cover the felt.
+        if (pathWaypoints.isNotEmpty() && activeWaypointIndex == null) {
+            Box(
+                modifier = Modifier
+                    .align(BiasAlignment(horizontalBias = -0.50f, verticalBias = -0.98f))
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .clickable(role = Role.Button) {
+                        val firstTappable = pathWaypoints.indexOfFirst { it.kind != PathWaypointKind.CUE_START }
+                        waypointSelection = PathWaypointSelection(
+                            pathWaypoints,
+                            if (firstTappable >= 0) firstTappable else 0,
+                        )
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xCC0B1218),
+                    border = BorderStroke(1.dp, RunoutColors.PrimaryCyan.copy(alpha = 0.55f)),
+                ) {
+                    Text(
+                        text = "ⓘ Path physics",
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = RunoutColors.PrimaryCyan,
+                    )
+                }
+            }
+        }
+
+        val tooltipIdx = activeWaypointIndex
+        if (tooltipIdx != null && lastCanvasSize.width > 1f && lastCanvasSize.height > 1f) {
+            val wp = pathWaypoints[tooltipIdx]
+            val geomNow = computeTableCanvasGeometry(lastCanvasSize.width, lastCanvasSize.height, table)
+            val anchor = baseToScreenCanvasOffset(
+                geomNow.toCanvasOffset(wp.position),
+                lastCanvasSize,
+                zoomScale,
+                panOffset,
+            )
+            PathWaypointCallout(
+                card = describePathWaypoint(wp, displayMode, pathWaypoints.firstOrNull()),
+                accent = pathWaypointColor(wp.kind),
+                index = tooltipIdx,
+                count = pathWaypoints.size,
+                anchor = anchor,
+                onPrev = {
+                    waypointSelection = PathWaypointSelection(pathWaypoints, (tooltipIdx - 1).coerceAtLeast(0))
+                },
+                onNext = {
+                    waypointSelection = PathWaypointSelection(
+                        pathWaypoints,
+                        (tooltipIdx + 1).coerceAtMost(pathWaypoints.lastIndex),
+                    )
+                },
+                onClose = { waypointSelection = null },
+            )
+        }
+    }
+}
+
+/** Radius, in dp, within which a tap selects a path waypoint. */
+internal const val PATH_WAYPOINT_TAP_RADIUS_DP: Float = 24f
+
+/** Waypoint choice that belongs to one specific waypoint list; it is ignored once the list is replaced. */
+private class PathWaypointSelection(val waypoints: List<PathWaypoint>, val index: Int)
+
+/**
+ * Picks the waypoint nearest to [tap] among [screenPoints] (null entries are not tappable) within [radiusPx].
+ * Returns the index and the distance in pixels, or `null` when nothing is in reach.
+ */
+internal fun pickPathWaypointIndex(
+    screenPoints: List<Offset?>,
+    tap: Offset,
+    radiusPx: Float,
+): Pair<Int, Float>? {
+    var best: Pair<Int, Float>? = null
+    for ((i, p) in screenPoints.withIndex()) {
+        if (p == null) continue
+        val d = hypot(tap.x - p.x, tap.y - p.y)
+        if (d <= radiusPx && (best == null || d < best.second)) best = i to d
+    }
+    return best
+}
+
+private fun pathWaypointColor(kind: PathWaypointKind): Color = when (kind) {
+    PathWaypointKind.CUE_START -> Color(0xFFF8FAFC)
+    PathWaypointKind.SPIN_TRANSITION,
+    PathWaypointKind.POST_IMPACT_TRANSITION,
+    -> Color(0xFF22D3EE)
+    PathWaypointKind.OBJECT_CONTACT -> Color(0xFFF472B6)
+    PathWaypointKind.CUSHION_CONTACT -> Color(0xFFFBBF24)
+    PathWaypointKind.BALL_CONTACT -> Color(0xFFFB923C)
+    PathWaypointKind.OBJECT_BALL_REST,
+    PathWaypointKind.CUE_REST,
+    PathWaypointKind.CUE_STOPS_SHORT,
+    -> Color(0xFFE2E8F0)
+    PathWaypointKind.SCRATCH -> ScratchWarningColor
+}
+
+private fun DrawScope.drawPathWaypointMarkers(
+    waypoints: List<PathWaypoint>,
+    selectedIndex: Int?,
+    ballRadiusPx: Float,
+    toCanvasOffset: (Vec2) -> Offset,
+) {
+    val r = max(4.2f, ballRadiusPx * 0.30f)
+    for ((i, wp) in waypoints.withIndex()) {
+        if (wp.kind == PathWaypointKind.CUE_START) continue
+        val c = toCanvasOffset(wp.position)
+        val color = pathWaypointColor(wp.kind)
+        if (i == selectedIndex) {
+            drawCircle(color = color.copy(alpha = 0.28f), radius = r * 2.6f, center = c)
+            drawCircle(color = color, radius = r * 2.6f, center = c, style = Stroke(width = max(1.6f, r * 0.35f)))
+        }
+        drawCircle(color = Color(0xE6090D12), radius = r + max(1.4f, r * 0.30f), center = c)
+        drawCircle(color = color, radius = r, center = c)
+    }
+}
+
+/** Title and at most three short lines shown by the path inspector callout. */
+internal data class PathWaypointCardText(val title: String, val lines: List<String>)
+
+private fun fmtMps(mps: Double): String {
+    val hundredths = (mps * 100.0).roundToInt().coerceAtLeast(0)
+    return "${hundredths / 100}.${(hundredths % 100).toString().padStart(2, '0')} m/s"
+}
+
+private fun fmtCm(meters: Double): String = "${(meters * 100.0).roundToInt().coerceAtLeast(0)} cm"
+
+private fun pctOf(part: Double, whole: Double): Int =
+    if (whole <= 1e-9) 0 else ((part / whole) * 100.0).roundToInt().coerceIn(0, 999)
+
+private fun fmtSpeedUnits(units: Double): String {
+    val halves = (units * 2.0).roundToInt()
+    return if (halves % 2 == 0) "${halves / 2}" else "${halves / 2}.5"
+}
+
+private fun ballTag(number: Int?): String = if (number == null) "another ball" else "#$number"
+
+/** Plain-English name for the vertical spin factor `k` (-1 full draw, 0 stun, +1 natural roll). */
+private fun spinWords(k: Double): String = when {
+    k < -0.08 -> "backspin"
+    k <= 0.18 -> "no spin"
+    k < 0.92 -> "a little topspin"
+    k <= 1.02 -> "natural roll"
+    else -> "extra topspin"
+}
+
+private fun spinPercentText(k: Double): String = when {
+    k < -0.08 -> "${(abs(k) * 100.0).roundToInt()}% backspin"
+    k <= 0.18 -> "no spin (stun)"
+    k < 0.92 -> "${(k * 100.0).roundToInt()}% of natural roll"
+    k <= 1.02 -> "natural roll"
+    else -> "${(k * 100.0).roundToInt()}% overspin"
+}
+
+private fun englishPercent(sideRatio: Double): Int =
+    (abs(sideRatio) / TipOffset.MAX_SAFE_OFFSET_RATIO * 100.0).roundToInt()
+
+private fun englishSide(sideRatio: Double): String = if (sideRatio < 0.0) "left" else "right"
+
+private const val NOTICEABLE_ENGLISH_RATIO = 0.03
+
+/**
+ * Words for one path waypoint. [PathWaypoint]s carry numbers only; this turns them into the card text for
+ * [mode]: [AppDisplayMode.SIMPLE] is plain English without units, [AppDisplayMode.PRO] adds m/s, %, cm and degrees.
+ * [start] is the strike waypoint of the same shot, used for the stroke speed and the starting spin.
+ */
+internal fun describePathWaypoint(
+    wp: PathWaypoint,
+    mode: AppDisplayMode,
+    start: PathWaypoint?,
+): PathWaypointCardText {
+    val pro = mode == AppDisplayMode.PRO
+    val strokeMps = start?.speedOutMps ?: 0.0
+    val k0 = start?.verticalSpinAfter ?: 0.0
+    return when (wp.kind) {
+        PathWaypointKind.CUE_START -> {
+            val side = wp.sideSpinAfter ?: 0.0
+            val tipK = wp.verticalSpinAfter ?: 0.0
+            val hasEnglish = abs(side) >= NOTICEABLE_ENGLISH_RATIO
+            val lines = if (pro) {
+                listOf(
+                    "Stroke ${fmtMps(wp.speedOutMps ?: 0.0)}" +
+                        (wp.speedUnits?.let { ", speed ${fmtSpeedUnits(it)}/10" } ?: "") + ".",
+                    "Spin at the tip: ${spinPercentText(tipK)}.",
+                    if (hasEnglish) {
+                        "English: ${englishPercent(side)}% of max, ${englishSide(side)}."
+                    } else {
+                        "No side english."
+                    },
+                )
+            } else {
+                listOfNotNull(
+                    when {
+                        tipK < -0.08 -> "Low on the ball: backspin (draw)."
+                        tipK <= 0.18 -> "Centre ball: no spin (stun)."
+                        tipK < 0.92 -> "Above centre: a little topspin."
+                        else -> "High on the ball: topspin (follow)."
+                    },
+                    if (hasEnglish) "Side english on the ${englishSide(side)}." else null,
+                    wp.speedUnits?.let { "Stroke speed ${fmtSpeedUnits(it)} out of 10." },
+                )
+            }
+            PathWaypointCardText("Strike", lines)
+        }
+
+        PathWaypointKind.SPIN_TRANSITION -> {
+            val atSpeed = wp.speedOutMps ?: 0.0
+            val speedLine = "Cue ball at ${fmtMps(atSpeed)} (${pctOf(atSpeed, strokeMps)}% of stroke speed)."
+            val after = fmtCm(wp.distanceAlongPathMeters)
+            when (wp.transition) {
+                SpinPhysics.SpinRegimeChange.DRAW_TO_STUN -> PathWaypointCardText(
+                    "Backspin gone",
+                    if (pro) {
+                        listOf("Draw turns to stun after $after.", speedLine, "Sliding with no spin; roll comes next.")
+                    } else {
+                        listOf("Backspin has worn off here.", "From this point the ball only slides.")
+                    },
+                )
+
+                SpinPhysics.SpinRegimeChange.STUN_TO_ROLL -> PathWaypointCardText(
+                    if (k0 >= -0.08) "Stun fades" else "Roll begins",
+                    if (pro) {
+                        listOf(
+                            "Slide turns to forward roll after $after.",
+                            speedLine,
+                            "Spin now ${spinPercentText(wp.verticalSpinAfter ?: 0.0)}, rising.",
+                        )
+                    } else {
+                        listOf("The sliding ball starts to roll forward.", "The cloth is now adding topspin.")
+                    },
+                )
+
+                else -> PathWaypointCardText(
+                    if (k0 > 1.02) "Overspin grips" else "Natural roll",
+                    if (pro) {
+                        listOf(
+                            "Slipping ends after $after: natural roll.",
+                            speedLine,
+                            if (k0 > 1.02) {
+                                "Extra topspin is absorbed by the cloth."
+                            } else {
+                                "Draw or stun no longer change the line."
+                            },
+                        )
+                    } else if (k0 > 1.02) {
+                        listOf("Extra topspin has gripped the cloth.", "From here the ball rolls naturally.")
+                    } else if (k0 < -0.08) {
+                        listOf("All the backspin is gone.", "From here the ball just rolls forward.")
+                    } else {
+                        listOf("The ball now rolls without slipping.", "Spin no longer changes its line.")
+                    },
+                )
+            }
+        }
+
+        PathWaypointKind.OBJECT_CONTACT -> {
+            val ball = ballTag(wp.otherBallNumber)
+            val arrive = wp.speedInMps ?: 0.0
+            val given = wp.objectBallSpeedMps ?: 0.0
+            val transfer = pctOf(given, arrive)
+            val keptK = wp.verticalSpinAfter ?: 0.0
+            if (pro) {
+                val cut = ((wp.cutAngleRadians ?: 0.0) * 180.0 / PI).roundToInt()
+                val deflect = ((wp.cueDeflectionRadians ?: 0.0) * 180.0 / PI).roundToInt()
+                PathWaypointCardText(
+                    "Contact $ball",
+                    listOf(
+                        "Arrives at ${fmtMps(arrive)}, ${spinPercentText(wp.verticalSpinBefore ?: 0.0)}.",
+                        "$cut° cut sends $ball off at ${fmtMps(given)} ($transfer%).",
+                        "Leaves at ${fmtMps(wp.speedOutMps ?: 0.0)}, $deflect° off line, spin kept.",
+                    ),
+                )
+            } else {
+                PathWaypointCardText(
+                    "Contact $ball",
+                    listOf(
+                        when (wp.regimeBefore) {
+                            SpinPhysics.ImpactSpinState.BACKSPIN_DRAW -> "Arrives with the backspin still on."
+                            SpinPhysics.ImpactSpinState.STUN_SLIDE -> "Arrives sliding with no spin."
+                            SpinPhysics.ImpactSpinState.PARTIAL_FORWARD_ROLL -> "Arrives part-way to rolling."
+                            else -> "Arrives rolling forward."
+                        },
+                        when {
+                            transfer >= 80 -> "$ball gets most of the speed."
+                            transfer >= 40 -> "$ball gets about half the speed."
+                            else -> "$ball gets only a little speed."
+                        },
+                        if (keptK < -0.08 || keptK > 0.18) {
+                            "The cue ball keeps its ${spinWords(keptK)} after contact."
+                        } else {
+                            "The cue ball leaves without much spin."
+                        },
+                    ),
+                )
+            }
+        }
+
+        PathWaypointKind.OBJECT_BALL_REST -> {
+            val ball = ballTag(wp.otherBallNumber)
+            PathWaypointCardText(
+                "$ball stops",
+                if (pro) {
+                    listOf(
+                        "$ball rolls ${fmtCm(wp.travelMeters ?: 0.0)} then stops.",
+                        "${fmtCm(wp.shortfallMeters ?: 0.0)} from the pocket.",
+                        "The cut or stroke gave it too little speed.",
+                    )
+                } else {
+                    listOf("$ball runs out of speed before the pocket.", "Use more speed, or a fuller hit.")
+                },
+            )
+        }
+
+        PathWaypointKind.POST_IMPACT_TRANSITION -> {
+            val kAt = wp.verticalSpinBefore ?: 0.0
+            PathWaypointCardText(
+                when {
+                    kAt < -0.08 -> "Draw bites"
+                    kAt > 0.18 -> "Follow takes over"
+                    else -> "Slide ends"
+                },
+                if (pro) {
+                    listOf(
+                        "The slide after contact is over.",
+                        "Cue ball now rolls at ${fmtMps(wp.speedOutMps ?: 0.0)}.",
+                        "It had ${spinPercentText(kAt)} at contact.",
+                    )
+                } else {
+                    listOf(
+                        when {
+                            kAt < -0.08 -> "The backspin has pulled the cue ball back."
+                            kAt > 0.18 -> "The topspin has carried the cue ball forward."
+                            else -> "The slide after the hit has ended."
+                        },
+                        "From here the cue ball just rolls.",
+                    )
+                },
+            )
+        }
+
+        PathWaypointKind.CUSHION_CONTACT -> {
+            val vin = wp.speedInMps ?: 0.0
+            val vout = wp.speedOutMps ?: 0.0
+            val keep = pctOf(vout, vin)
+            val before = wp.sideSpinBefore ?: 0.0
+            val after = wp.sideSpinAfter ?: 0.0
+            val hasEnglish = abs(before) >= NOTICEABLE_ENGLISH_RATIO
+            val kAfter = wp.verticalSpinAfter ?: 1.0
+            val rollsStraight = kAfter in 0.92..1.02
+            PathWaypointCardText(
+                "Cushion ${wp.cushionIndex ?: 1}",
+                if (pro) {
+                    listOf(
+                        "Speed ${fmtMps(vin)} → ${fmtMps(vout)} (−${100 - keep}%).",
+                        if (hasEnglish) {
+                            "English ${englishPercent(before)}% ${englishSide(before)} → ${englishPercent(after)}% ${englishSide(after)} of max."
+                        } else {
+                            "No english in; leaves with ${englishPercent(after)}% ${englishSide(after)}."
+                        },
+                        "Leaves with ${spinPercentText(kAfter)}" +
+                            if (rollsStraight) ", rolling straight on." else "; the cloth bends it from there.",
+                    )
+                } else {
+                    listOf(
+                        "The cue ball keeps about $keep% of its speed.",
+                        if (hasEnglish) {
+                            "Side english bends the bounce, and the rail changes it."
+                        } else {
+                            "No side spin going in; the rail adds a little."
+                        },
+                        if (rollsStraight) {
+                            "It rolls straight on from the rail."
+                        } else {
+                            "It leaves with ${spinWords(kAfter)}, so its path bends after the rail."
+                        },
+                    )
+                },
+            )
+        }
+
+        PathWaypointKind.BALL_CONTACT -> {
+            val ball = ballTag(wp.otherBallNumber)
+            val vin = wp.speedInMps ?: 0.0
+            val vout = wp.speedOutMps ?: 0.0
+            PathWaypointCardText(
+                "Hits $ball",
+                if (pro) {
+                    listOf(
+                        "Cue ball meets $ball.",
+                        "Speed ${fmtMps(vin)} → ${fmtMps(vout)} (−${100 - pctOf(vout, vin)}%).",
+                    )
+                } else {
+                    listOf("The cue ball bumps $ball on its way.", "It slows down and pushes that ball.")
+                },
+            )
+        }
+
+        PathWaypointKind.CUE_STOPS_SHORT -> PathWaypointCardText(
+            "Stops short",
+            if (pro) {
+                listOf(
+                    "Cloth stops the cue ball after ${fmtCm(wp.travelMeters ?: 0.0)}.",
+                    "${fmtCm(wp.shortfallMeters ?: 0.0)} before contact with ${ballTag(wp.otherBallNumber)}.",
+                    "Add stroke speed.",
+                )
+            } else {
+                listOf(
+                    "Not enough speed: the cue ball stops short of ${ballTag(wp.otherBallNumber)}.",
+                    "Hit it harder.",
+                )
+            },
+        )
+
+        PathWaypointKind.SCRATCH -> PathWaypointCardText(
+            "Scratch!",
+            if (pro) {
+                listOf(
+                    "Cue ball drops in this pocket at ${fmtMps(wp.speedInMps ?: 0.0)}.",
+                    "Change the speed or spin.",
+                )
+            } else {
+                listOf("The cue ball still has enough speed to drop in this pocket.", "Change the speed or spin.")
+            },
+        )
+
+        PathWaypointKind.CUE_REST -> {
+            val cushions = wp.cushionCount ?: 0
+            val via = if (cushions > 0) " via $cushions cushion${if (cushions > 1) "s" else ""}" else ""
+            PathWaypointCardText(
+                "Cue ball rests",
+                if (pro) {
+                    listOf("Rolls ${fmtCm(wp.travelMeters ?: 0.0)} after contact$via.", "Stops here: your next position.")
+                } else {
+                    listOf("The cue ball stops here$via.", "This is your position for the next shot.")
+                },
+            )
+        }
+    }
+}
+
+/**
+ * Path inspector callout: a card anchored to a point on the table with a title, up to three short lines and
+ * Back / Next / Close buttons that each have a 48 dp touch target.
+ */
+@Composable
+private fun PathWaypointCallout(
+    card: PathWaypointCardText,
+    accent: Color,
+    index: Int,
+    count: Int,
+    anchor: Offset,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val density = LocalDensity.current
+    Layout(
+        content = {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xF20F1720),
+                border = BorderStroke(1.dp, accent.copy(alpha = 0.85f)),
+                shadowElevation = 6.dp,
+            ) {
+                Column(
+                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(accent, RoundedCornerShape(50)),
+                        )
+                        Text(
+                            text = card.title,
+                            modifier = Modifier.padding(start = 6.dp),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFF8FAFC),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    for (line in card.lines.take(3)) {
+                        Text(
+                            text = line,
+                            fontSize = 10.5.sp,
+                            lineHeight = 13.sp,
+                            color = Color(0xFFCBD5E1),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        CalloutButton(label = "‹ Back", enabled = index > 0, onClick = onPrev)
+                        Text(
+                            text = "${index + 1} / $count",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF94A3B8),
+                        )
+                        CalloutButton(label = "Next ›", enabled = index < count - 1, onClick = onNext)
+                        CalloutButton(label = "Close", enabled = true, onClick = onClose)
+                    }
+                }
+            }
+        },
+        modifier = Modifier.fillMaxSize(),
+    ) { measurables, constraints ->
+        val margin = with(density) { 6.dp.roundToPx() }
+        val gap = with(density) { 14.dp.roundToPx() }
+        val fullW = constraints.maxWidth
+        val fullH = constraints.maxHeight
+        val cardW = minOf(fullW - 2 * margin, with(density) { 280.dp.roundToPx() }).coerceAtLeast(1)
+        val placeable = measurables.first().measure(
+            Constraints(minWidth = cardW, maxWidth = cardW, minHeight = 0, maxHeight = fullH.coerceAtLeast(1)),
+        )
+        layout(fullW, fullH) {
+            val ax = anchor.x.coerceIn(0f, fullW.toFloat())
+            val ay = anchor.y.coerceIn(0f, fullH.toFloat())
+            val x = (ax - placeable.width / 2f).roundToInt()
+                .coerceIn(margin, (fullW - placeable.width - margin).coerceAtLeast(margin))
+            val above = (ay - gap - placeable.height).roundToInt()
+            val below = (ay + gap).roundToInt()
+            val y = when {
+                above >= margin -> above
+                below + placeable.height <= fullH - margin -> below
+                ay > fullH / 2f -> margin
+                else -> (fullH - placeable.height - margin).coerceAtLeast(0)
+            }
+            placeable.place(x, y)
+        }
+    }
+}
+
+/** Text button with a 48 dp touch target around a smaller visible pill. */
+@Composable
+private fun CalloutButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .defaultMinSize(minWidth = 56.dp, minHeight = 48.dp)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(6.dp),
+            color = if (enabled) Color(0xFF1E293B) else Color(0x661E293B),
+        ) {
+            Text(
+                text = label,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (enabled) Color(0xFFE2E8F0) else Color(0xFF64748B),
+            )
+        }
     }
 }
 
@@ -861,6 +1492,8 @@ private fun TableZoomControlsPill(
     onZoomOut: () -> Unit,
     onResetZoom: () -> Unit,
     onZoomIn: () -> Unit,
+    isFullscreen: Boolean = false,
+    onToggleFullscreen: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val isZoomed = zoomScale > 1.02f
@@ -870,10 +1503,11 @@ private fun TableZoomControlsPill(
     Surface(
         modifier = modifier,
         shape = RoundedCornerShape(999.dp),
-        color = Color(0xCC0B1120),
+        // See-through so the rail and anything under the pill stay visible; a faint tint keeps the label readable.
+        color = Color(0x1F0B1120),
         border = BorderStroke(
             width = 1.dp,
-            color = if (isZoomed) RunoutColors.PrimaryCyan.copy(alpha = 0.65f) else Color(0x66475569),
+            color = if (isZoomed) RunoutColors.PrimaryCyan.copy(alpha = 0.45f) else Color(0x33475569),
         ),
     ) {
         Row(
@@ -884,7 +1518,8 @@ private fun TableZoomControlsPill(
             Box(
                 modifier = Modifier
                     .defaultMinSize(minWidth = 28.dp, minHeight = 24.dp)
-                    .clickable(enabled = isZoomed, onClick = onZoomOut),
+                    .semantics { contentDescription = "Zoom out" }
+                    .clickable(enabled = isZoomed, role = Role.Button, onClick = onZoomOut),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -898,10 +1533,11 @@ private fun TableZoomControlsPill(
                 modifier = Modifier
                     .defaultMinSize(minWidth = 36.dp, minHeight = 24.dp)
                     .background(
-                        color = if (isZoomed) RunoutColors.PrimaryCyan.copy(alpha = 0.20f) else Color.Transparent,
+                        color = if (isZoomed) RunoutColors.PrimaryCyan.copy(alpha = 0.12f) else Color.Transparent,
                         shape = RoundedCornerShape(999.dp),
                     )
-                    .clickable(enabled = isZoomed, onClick = onResetZoom)
+                    .semantics { contentDescription = "Reset zoom" }
+                    .clickable(enabled = isZoomed, role = Role.Button, onClick = onResetZoom)
                     .padding(horizontal = 5.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -915,7 +1551,8 @@ private fun TableZoomControlsPill(
             Box(
                 modifier = Modifier
                     .defaultMinSize(minWidth = 28.dp, minHeight = 24.dp)
-                    .clickable(enabled = zoomScale < MAX_TABLE_ZOOM - 0.02f, onClick = onZoomIn),
+                    .semantics { contentDescription = "Zoom in" }
+                    .clickable(enabled = zoomScale < MAX_TABLE_ZOOM - 0.02f, role = Role.Button, onClick = onZoomIn),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -929,9 +1566,29 @@ private fun TableZoomControlsPill(
                     },
                 )
             }
+            if (onToggleFullscreen != null) {
+                Box(
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 28.dp, minHeight = 24.dp)
+                        .semantics {
+                            contentDescription = if (isFullscreen) "Exit fullscreen" else "Enter fullscreen"
+                        }
+                        .clickable(role = Role.Button, onClick = onToggleFullscreen),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    RunoutVectorIcon(
+                        icon = if (isFullscreen) RunoutIcon.EXIT_FULLSCREEN else RunoutIcon.FULLSCREEN,
+                        tint = RunoutColors.TextPrimary,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+            }
         }
     }
 }
+
+/** The curve to draw: the sampled path when the engine supplies one, else the contact vertices. */
+private fun TrajectoryPath.drawPoints(): List<Vec2> = sampledPoints.ifEmpty { points }
 
 /**
  * Draws a crisp solid trajectory polyline in the moving ball's own solid base colour
@@ -1041,6 +1698,95 @@ private fun DrawScope.drawBallSolidTrajectory(
     }
 }
 
+/**
+ * The tip that gives this shot the spin state at the object ball that [ShotRecommendation.recommendedSpin] names, for
+ * its distance and speed on [table], or `null` when no tip within the miscue limit does.
+ */
+fun ShotRecommendation.solvedTip(table: TableSpec): TipOffset? = SpinPhysics.tipForImpactState(
+    preset = recommendedSpin,
+    cueSpeedMps = recommendedCueSpeedMps,
+    cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+    table = table,
+)
+
+/** A faint continuation of a pot line from where the ball crosses the mouth to the middle of the hole. */
+private fun DrawScope.drawIntoPocketLine(
+    from: Vec2,
+    pocket: PocketSpec,
+    color: Color,
+    pxPerMeter: Float,
+    toCanvasOffset: (Vec2) -> Offset,
+    alpha: Float = 0.45f,
+) {
+    drawLine(
+        color = color.copy(alpha = alpha),
+        start = toCanvasOffset(from),
+        end = toCanvasOffset(pocket.holeCenter),
+        strokeWidth = max(2f, pxPerMeter * 0.0065f),
+        cap = StrokeCap.Round,
+    )
+}
+
+/**
+ * Lines of a [FallbackAdvice]: the cue ball's path (through the cushion point on a kick), a ghost ball where it meets
+ * the first ball, and each object ball's leg in that ball's colour. A kick's cushion point gets a ring.
+ */
+private fun DrawScope.drawFallbackAdvice(
+    advice: FallbackAdvice,
+    ballSet: BallSetProfile,
+    ballRadiusPx: Float,
+    pxPerMeter: Float,
+    toCanvasOffset: (Vec2) -> Offset,
+) {
+    val strokeWidth = max(2.8f, pxPerMeter * 0.0088f)
+    val cueLegs = advice.lines.filter { it.role == FallbackLineRole.CUE_BALL }
+    if (cueLegs.isNotEmpty()) {
+        drawBallSolidTrajectory(
+            points = listOf(cueLegs.first().from) + cueLegs.map { it.to },
+            ballNumber = 0,
+            ballSet = ballSet,
+            strokeWidth = strokeWidth,
+            ballRadiusPx = ballRadiusPx,
+            pxPerMeter = pxPerMeter,
+            showEndStopRing = advice.cueBallRest != null,
+            toCanvasOffset = toCanvasOffset,
+        )
+        // The ghost ball where the cue ball meets the first ball (the end of the first leg, or of the kick's second).
+        val contact = if (advice.cushionPoint != null) cueLegs.last().to else cueLegs.first().to
+        drawGhostBallOutline(
+            center = toCanvasOffset(contact),
+            ballRadiusPx = ballRadiusPx,
+            strokeColor = GhostBallStrokeColor,
+            pxPerMeter = pxPerMeter,
+        )
+    }
+    for (line in advice.lines) {
+        val ballNumber = when (line.role) {
+            FallbackLineRole.CUE_BALL -> continue
+            FallbackLineRole.FIRST_OBJECT_BALL -> advice.targetBallNumbers.first()
+            FallbackLineRole.SECOND_OBJECT_BALL -> advice.targetBallNumbers.getOrNull(1) ?: continue
+        }
+        drawBallSolidTrajectory(
+            points = listOf(line.from, line.to),
+            ballNumber = ballNumber,
+            ballSet = ballSet,
+            strokeWidth = strokeWidth,
+            ballRadiusPx = ballRadiusPx,
+            pxPerMeter = pxPerMeter,
+            showEndStopRing = false,
+            toCanvasOffset = toCanvasOffset,
+        )
+    }
+    advice.cushionPoint?.let { point ->
+        drawCircle(
+            color = GhostBallStrokeColor,
+            radius = ballRadiusPx * 0.45f,
+            center = toCanvasOffset(point),
+            style = Stroke(width = max(2f, strokeWidth * 0.8f)),
+        )
+    }
+}
+
 private fun DrawScope.drawSelectedShotOverlay(
     shot: ShotRecommendation,
     table: TableSpec,
@@ -1055,7 +1801,8 @@ private fun DrawScope.drawSelectedShotOverlay(
     val ballRadiusPx = (ballRadiusMeters * pxPerMeter).toFloat()
     val preImpact = SpinPhysics.computePreImpactCueState(
         cueSpeedMps = shot.recommendedCueSpeedMps,
-        tip = TipOffset.fromPreset(shot.recommendedSpin),
+        // The preset names the state at the object ball; use the tip that produces it, else the nearest fixed tip.
+        tip = shot.solvedTip(table) ?: TipOffset.fromPreset(shot.recommendedSpin),
         cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
         table = table,
     )
@@ -1090,8 +1837,15 @@ private fun DrawScope.drawSelectedShotOverlay(
         muS = table.cloth.slidingFrictionMuS,
         muR = table.cloth.rollingResistanceMuR,
     )
-    val dropDist = (aim.objectToPocketDistanceMeters - shot.pocket.acceptanceRadiusMeters * 0.75)
-        .coerceAtLeast(0.02)
+    // The object ball drops once its centre reaches the capture line, the same line the engine tests.
+    val dropDist = (
+        PocketGeometry.distanceToCaptureLine(
+            from = aim.objectBallPos,
+            direction = aim.objectBallDirection,
+            pocket = shot.pocket,
+            ballRadius = ballRadiusMeters,
+        ) ?: aim.objectToPocketDistanceMeters
+        ).coerceAtLeast(0.02)
     val targetStoppedShort = obMaxDist < dropDist
     val targetEndMeters = if (targetStoppedShort) {
         val rawStop = aim.objectBallPos + aim.objectBallDirection * obMaxDist
@@ -1114,6 +1868,15 @@ private fun DrawScope.drawSelectedShotOverlay(
         showEndStopRing = targetStoppedShort,
         toCanvasOffset = toCanvasOffset,
     )
+    if (!targetStoppedShort) {
+        drawIntoPocketLine(
+            from = aim.pocketAimPos,
+            pocket = shot.pocket,
+            color = ballBaseColor(shot.targetBall.number, ballSet),
+            pxPerMeter = pxPerMeter,
+            toCanvasOffset = toCanvasOffset,
+        )
+    }
 
     // Pre-contact cue-ball path in solid white
     drawBallSolidTrajectory(
@@ -1134,7 +1897,7 @@ private fun DrawScope.drawSelectedShotOverlay(
         val isRecommended = spin == shot.recommendedSpin
         if (isRecommended) {
             drawBallSolidTrajectory(
-                points = trajectory.points,
+                points = trajectory.drawPoints(),
                 ballNumber = 0,
                 ballSet = ballSet,
                 strokeWidth = max(3.0f, pxPerMeter * 0.0095f),
@@ -1193,7 +1956,7 @@ private fun DrawScope.drawSpinTrajectory(
     pxPerMeter: Float,
     toCanvasOffset: (Vec2) -> Offset,
 ) {
-    val points = trajectory.points
+    val points = trajectory.drawPoints()
     if (points.isEmpty()) return
 
     val baseColor = spinColor(trajectory.spin)
@@ -1611,7 +2374,7 @@ private fun DrawScope.drawRunoutPlanOverlay(
         )
         val shortCueTraj = postSim!!.cueBallTrajectory
         drawBallSolidTrajectory(
-            points = shortCueTraj.points,
+            points = shortCueTraj.drawPoints(),
             ballNumber = 0,
             ballSet = ballSet,
             strokeWidth = max(3.1f, pxPerMeter * 0.0096f),
@@ -1623,10 +2386,12 @@ private fun DrawScope.drawRunoutPlanOverlay(
         )
     } else {
         // 1. Active step target object-ball trajectory in its own solid ball colour (stopping short if underpowered)
-        val targetPoints = postSim?.targetBallTrajectory?.points
+        val simulatedTargetPoints = postSim?.targetBallTrajectory?.let { it.sampledPoints.ifEmpty { it.points } }
             ?.takeIf { it.size >= 2 }
+        val targetPoints = simulatedTargetPoints
             ?: listOf(primaryStep.targetBall.position, primaryStep.pocketCenter)
         val targetStoppedShort = postSim != null && !postSim.targetBallPotted
+        val stepPocketSpec = layout.table.pockets.firstOrNull { it.id == primaryStep.pocketId }
         drawBallSolidTrajectory(
             points = targetPoints,
             ballNumber = primaryStep.targetBall.number,
@@ -1637,6 +2402,16 @@ private fun DrawScope.drawRunoutPlanOverlay(
             showEndStopRing = targetStoppedShort,
             toCanvasOffset = toCanvasOffset,
         )
+        // A simulated path that drops already ends at the hole; a straight pot line ends at the aim point.
+        if (simulatedTargetPoints == null && !targetStoppedShort && stepPocketSpec != null) {
+            drawIntoPocketLine(
+                from = primaryStep.pocketCenter,
+                pocket = stepPocketSpec,
+                color = ballBaseColor(primaryStep.targetBall.number, ballSet),
+                pxPerMeter = pxPerMeter,
+                toCanvasOffset = toCanvasOffset,
+            )
+        }
 
         // 2. Active step cue-ball pre-contact path in solid white
         if (cuePos != null) {
@@ -1662,7 +2437,7 @@ private fun DrawScope.drawRunoutPlanOverlay(
         // 3. Active step post-impact cue-ball trajectory in solid white
         val nomCueTraj = primaryStep.uncertainty.nominalTrajectory
         drawBallSolidTrajectory(
-            points = nomCueTraj.points,
+            points = nomCueTraj.drawPoints(),
             ballNumber = 0,
             ballSet = ballSet,
             strokeWidth = max(3.1f, pxPerMeter * 0.0096f),
@@ -1694,6 +2469,7 @@ private fun DrawScope.drawRunoutPlanOverlay(
     // 5. Solid per-ball same-coloured trajectory lines for any secondary balls moved in this shot
     if (primaryStep.disturbedBalls.isNotEmpty()) {
         drawDisturbedBallsOverlay(
+            clipOutsetPx = requiredRailBandMeters(layout.table).toFloat() * pxPerMeter,
             disturbedBalls = primaryStep.disturbedBalls,
             ballSet = ballSet,
             ballRadiusPx = ballRadiusPx,
@@ -1750,9 +2526,20 @@ private fun DrawScope.drawRunoutPlanOverlay(
             cap = StrokeCap.Round,
             pathEffect = stepEffect,
         )
+        layout.table.pockets.firstOrNull { it.id == step.pocketId }?.let { stepPocketSpec ->
+            drawIntoPocketLine(
+                from = step.pocketCenter,
+                pocket = stepPocketSpec,
+                color = stepColor,
+                pxPerMeter = pxPerMeter,
+                toCanvasOffset = toCanvasOffset,
+                alpha = 0.40f,
+            )
+        }
 
         if (step.disturbedBalls.isNotEmpty()) {
             drawDisturbedBallsOverlay(
+                clipOutsetPx = requiredRailBandMeters(layout.table).toFloat() * pxPerMeter,
                 disturbedBalls = step.disturbedBalls,
                 ballSet = ballSet,
                 ballRadiusPx = ballRadiusPx * 0.9f,
@@ -1778,6 +2565,7 @@ private fun DrawScope.drawRunoutPlanOverlay(
 }
 
 private fun DrawScope.drawDisturbedBallsOverlay(
+    clipOutsetPx: Float,
     disturbedBalls: List<DisplacedBallPath>,
     ballSet: BallSetProfile,
     ballRadiusPx: Float,
@@ -1792,15 +2580,15 @@ private fun DrawScope.drawDisturbedBallsOverlay(
     val strokeW = max(2.5f, pxPerMeter * 0.0078f)
 
     clipRect(
-        left = playLeft,
-        top = playTop,
-        right = playLeft + playWidth,
-        bottom = playTop + playHeight,
+        left = playLeft - clipOutsetPx,
+        top = playTop - clipOutsetPx,
+        right = playLeft + playWidth + clipOutsetPx,
+        bottom = playTop + playHeight + clipOutsetPx,
     ) {
         for (path in disturbedBalls) {
             if (path.points.size < 2) continue
             drawBallSolidTrajectory(
-                points = path.points,
+                points = path.sampledPoints.ifEmpty { path.points },
                 ballNumber = path.ballNumber,
                 ballSet = ballSet,
                 strokeWidth = strokeW,

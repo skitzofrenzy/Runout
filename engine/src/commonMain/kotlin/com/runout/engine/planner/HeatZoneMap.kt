@@ -9,12 +9,12 @@ import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.AimGeometry
 import com.runout.engine.physics.GhostBallAiming
+import com.runout.engine.physics.PocketGeometry
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
-import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -103,9 +103,6 @@ class HeatZoneMap(
 object HeatZoneGenerator {
     private const val OVERLAP_FACTOR: Double = 2.05
     private const val SECONDARY_TARGET_WEIGHT: Double = 0.25
-    private const val POCKET_WINDOW_FRACTION: Double = 0.8
-    private const val MIN_CUT_COSINE: Double = 0.22
-    private const val ERROR_DISTANCE_GAIN: Double = 0.18
     private const val OCCLUSION_CLEARANCE_PAD_METERS: Double = 0.002
     const val MAX_HEAT_CUT_ANGLE_RAD: Double = 78.0 * PI / 180.0
 
@@ -189,14 +186,15 @@ object HeatZoneGenerator {
         cueRadius: Double = layout.table.ballRadiusMeters,
     ): PocketVisibilityRegion {
         val table = layout.table
-        val objToPocket = (pocket.center - targetBall.position).normalized()
+        val pocketAim = PocketGeometry.aimPoint(targetBall.position, pocket, targetBall.radiusMeters)
+        val objToPocket = (pocketAim - targetBall.position).normalized()
         val contactDist = cueRadius + targetBall.radiusMeters
         val ghostCenter = targetBall.position - objToPocket * contactDist
         val obstacles = layout.balls.filter { !it.isCueBall && it.number != targetBall.number }
 
         val pocketPathClear = GhostBallAiming.isSegmentClear(
             start = targetBall.position,
-            end = pocket.center,
+            end = pocketAim,
             movingRadius = targetBall.radiusMeters,
             obstacles = obstacles,
             clearanceMarginMeters = -OCCLUSION_CLEARANCE_PAD_METERS,
@@ -205,7 +203,10 @@ object HeatZoneGenerator {
         val ghostClear = obstacles.none {
             it.position.distanceTo(ghostCenter) < cueRadius + it.radiusMeters + OCCLUSION_CLEARANCE_PAD_METERS
         }
-        val isPocketClear = pocketPathClear && ghostOnTable && ghostClear
+        val windowOpen = PocketGeometry.entryWindow(
+            targetBall.position, pocket, targetBall.radiusMeters, pocket.jawToleranceSlow,
+        ).isOpen
+        val isPocketClear = windowOpen && pocketPathClear && ghostOnTable && ghostClear
 
         val farDist = max(table.lengthMeters, table.widthMeters) * 3.0
         val wedges = obstacles.map { blocker ->
@@ -346,19 +347,20 @@ object HeatZoneGenerator {
     }
 
     /**
-     * Estimated probability in `0.0..1.0` that a shot with geometry [aim] pots into [pocket] for a player with
-     * aim-error standard deviation [aimErrorStdRad]: the object-ball deflection caused by aim error (growing
-     * with cue distance and sharper cuts) is compared with the angular size of the pocket window.
+     * Probability in `0.0..1.0` that a shot with geometry [aim] pots into [pocket] for a player whose cue line has
+     * standard deviation [aimErrorStdRad]: [ExecutionErrorModel.directionalMakeProbability] at the jaw tolerance of a
+     * ball arriving at [PocketGeometry.NOMINAL_ARRIVAL_SPEED_MPS] (a position map has no stroke to take a speed from).
+     * A closed window scores zero.
      */
     internal fun shotQuality(aim: AimGeometry, pocket: PocketSpec, aimErrorStdRad: Double): Double {
-        val cutCosine = cos(abs(aim.cutAngleRadians)).coerceAtLeast(MIN_CUT_COSINE)
-        val halfWindow = atan2(
-            pocket.acceptanceRadiusMeters * POCKET_WINDOW_FRACTION,
-            aim.objectToPocketDistanceMeters.coerceAtLeast(0.05),
-        ).coerceAtLeast(0.005)
-        val lever = 1.0 + ERROR_DISTANCE_GAIN * aim.cueToGhostDistanceMeters / 0.0572
-        val sigmaObject = aimErrorStdRad.coerceAtLeast(0.003) * lever / cutCosine
-        val ratio = sigmaObject / halfWindow
-        return exp(-0.5 * ratio * ratio).coerceIn(0.0, 1.0)
+        val ballRadius = aim.objectBallPos.distanceTo(aim.ghostBallCenter) * 0.5
+        return ExecutionErrorModel.directionalMakeProbability(
+            aim = aim,
+            pocket = pocket,
+            objectBallRadiusMeters = ballRadius,
+            cueBallRadiusMeters = ballRadius,
+            jawTolerance = PocketGeometry.jawTolerance(pocket, PocketGeometry.NOMINAL_ARRIVAL_SPEED_MPS),
+            cueLineErrorStdRad = aimErrorStdRad,
+        )
     }
 }

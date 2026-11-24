@@ -53,6 +53,7 @@ import com.runout.engine.model.EightBallGroup
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
+import com.runout.engine.model.PocketPreset
 import com.runout.engine.model.PocketSpec
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
@@ -89,6 +90,22 @@ private val SHEET_TABLE_SIZE_OPTIONS = listOf(
     SheetTableSizeOption("12-ft Snooker", "12 ft Snooker") { TableSpec.fullSizeSnooker() },
 )
 
+private val SHEET_POCKET_PRESET_OPTIONS = listOf(
+    PocketPreset.TOURNAMENT to "Tournament",
+    PocketPreset.PRO_CUT to "Pro-cut",
+    PocketPreset.BAR_BOX to "Bar box",
+)
+
+/** The pool pocket cut that [table]'s pockets match, or `null` for a custom set. */
+internal fun pocketPresetOf(table: TableSpec): PocketPreset? =
+    PocketPreset.entries.firstOrNull { preset ->
+        table.pockets == TableSpec.defaultPockets(table.lengthMeters, table.widthMeters, table.ballRadiusMeters, preset)
+    }
+
+/** [table] with its six pockets rebuilt as [preset]. */
+internal fun TableSpec.withPocketPreset(preset: PocketPreset): TableSpec =
+    copy(pockets = TableSpec.defaultPockets(lengthMeters, widthMeters, ballRadiusMeters, preset))
+
 private data class SheetGameOption(
     val label: String,
     val rulesState: GameRulesState,
@@ -120,6 +137,7 @@ fun GameAndTableSetupSheet(
     onSelectPreset: (Int) -> Unit,
     onStartBlankTable: () -> Unit,
     onResizeTable: (TableSpec) -> Unit,
+    onSelectPocketPreset: (PocketPreset) -> Unit,
     onSelectRules: (GameRulesState) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -206,6 +224,40 @@ fun GameAndTableSetupSheet(
                                 )
                             },
                         )
+                    }
+                }
+            }
+
+            // Pocket size (this session only; not saved). Snooker tables keep their own cut.
+            if (PocketPreset.forBallRadius(currentLayout.table.ballRadiusMeters) != PocketPreset.SNOOKER) {
+                val activePocketPreset = pocketPresetOf(currentLayout.table)
+                Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element)) {
+                    Text(
+                        text = "Pockets",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Element),
+                    ) {
+                        SHEET_POCKET_PRESET_OPTIONS.forEach { (preset, label) ->
+                            val isSelected = activePocketPreset == preset
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { onSelectPocketPreset(preset) },
+                                modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
+                                label = {
+                                    Text(
+                                        text = label,
+                                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                    )
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -492,9 +544,9 @@ fun ShotOptionsSheet(
                 ) {
                     CueBallSpinPreset.entries.forEach { spin ->
                         val label = when (spin) {
-                            CueBallSpinPreset.STUN -> "90° Stun Line"
-                            CueBallSpinPreset.FOLLOW -> "30° Follow Line"
-                            CueBallSpinPreset.DRAW -> "Draw Line"
+                            CueBallSpinPreset.STUN -> "Stun at ball (90°)"
+                            CueBallSpinPreset.FOLLOW -> "Roll at ball (30°)"
+                            CueBallSpinPreset.DRAW -> "Draw at ball"
                         }
                         FilterChip(
                             selected = spin in visibleSpins,
@@ -591,7 +643,7 @@ fun QuickSpinSheet(
                 )
                 GlossaryInfoButton(
                     term = "Spin Levels & Mixing",
-                    explanation = "Mild offsets (Drag Stun, Touch of Follow/Draw, 1/2-Tip English) hold cleaner control and less squirt/throw than max spin. On long shots, soft draw wears off into stun or forward roll.",
+                    explanation = "Mild offsets (a touch low or high, 1/2-tip english) hold cleaner control and less squirt/throw than max spin. The cue ball slides first and settles into forward roll: backspin wears off over distance, and a centre-ball hit is already rolling after about half a metre at medium speed. To stop the cue ball dead on the object ball you need a tip below centre, lower the farther the ball and the softer the stroke.",
                 )
                 TextButton(
                     onClick = onDismiss,
@@ -604,10 +656,10 @@ fun QuickSpinSheet(
 
             val presets = listOf(
                 Triple("Auto Recommended", "Let Runout pick the cleanest natural spin & speed", null),
-                Triple("Center Ball (Pure Stun)", "Slides along 90° tangent on close/medium shots; rolls forward on long soft shots", TipOffset(0.0, 0.0)),
-                Triple("Touch of Low (Drag Stun)", "Holds the 90° stun line longer across medium-to-long distance", TipOffset(0.0, -0.14)),
+                Triple("Center Ball", "No spin at the strike; the cue ball slides, then rolls forward the farther it travels. Not a stop shot unless the object ball is very close", TipOffset(0.0, 0.0)),
+                Triple("Touch of Low", "A little backspin at the strike. It wears off as the ball travels, so it gives a stop at the object ball only over a short distance", TipOffset(0.0, -0.14)),
                 Triple("Controlled Follow", "Smooth half-tip topspin rolling naturally forward (~30°)", TipOffset(0.0, 0.20)),
-                Triple("Firm Top Follow", "Full 1-tip topspin driving through cushions", TipOffset.fromPreset(CueBallSpinPreset.FOLLOW)),
+                Triple("Firm Top Follow", "Full 1-tip topspin driving through cushions", TipOffset(0.0, 0.35)),
                 Triple("Controlled Draw", "Balanced half-tip backspin for short pullback without wild squirt", TipOffset(0.0, -0.25)),
                 Triple("Firm / Max Draw", "Deep backspin — requires enough speed over distance so draw doesn't fade to roll", TipOffset(0.0, -0.42)),
                 Triple("Controlled Follow + 1/2-Tip Left", "Mixed high-left english to widen/check rail rebound", TipOffset(-0.18, 0.22)),
@@ -727,9 +779,9 @@ fun CueBallSandboxPanel(
     val spinPresets = listOf(
         "Auto" to null,
         "Center" to TipOffset(sideRatio = 0.0, verticalRatio = 0.0),
-        "Drag Stun" to TipOffset(sideRatio = 0.0, verticalRatio = -0.14),
+        "Touch Low" to TipOffset(sideRatio = 0.0, verticalRatio = -0.14),
         "Ctrl Follow" to TipOffset(sideRatio = 0.0, verticalRatio = 0.20),
-        "Firm Follow" to TipOffset.fromPreset(CueBallSpinPreset.FOLLOW),
+        "Firm Follow" to TipOffset(sideRatio = 0.0, verticalRatio = 0.35),
         "Ctrl Draw" to TipOffset(sideRatio = 0.0, verticalRatio = -0.25),
         "Max Draw" to TipOffset(sideRatio = 0.0, verticalRatio = -0.44),
         "1/2 Left" to TipOffset(sideRatio = -0.18, verticalRatio = 0.0),
@@ -739,6 +791,29 @@ fun CueBallSandboxPanel(
         "Lo-Left" to TipOffset(sideRatio = -0.18, verticalRatio = -0.24),
         "Lo-Right" to TipOffset(sideRatio = 0.18, verticalRatio = -0.24),
     )
+
+    // Tips that give the spin state at the object ball for this shot's distance and speed. A state no tip can give
+    // here (a stop over a long, soft shot) stays listed but cannot be chosen.
+    val impactStateChips = remember(cueToObjectDistanceMeters, cueSpeedMps, tableSpec) {
+        val distance = cueToObjectDistanceMeters
+        if (distance == null) {
+            emptyList()
+        } else {
+            listOf(
+                CueBallSpinPreset.STUN to "Stop at ball",
+                CueBallSpinPreset.FOLLOW to "Roll at ball",
+                CueBallSpinPreset.DRAW to "Draw at ball",
+            ).map { (state, label) ->
+                val solved = SpinPhysics.tipForImpactState(state, cueSpeedMps, distance, tableSpec)
+                PanelTipChip(label = if (solved != null) label else "$label (n/a)", tip = solved, isAuto = false, enabled = solved != null)
+            }
+        }
+    }
+    val tipChips = buildList {
+        add(PanelTipChip("Auto", null, isAuto = true, enabled = true))
+        addAll(impactStateChips)
+        spinPresets.drop(1).forEach { (label, tip) -> add(PanelTipChip(label, tip, isAuto = false, enabled = true)) }
+    }
 
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -938,19 +1013,21 @@ fun CueBallSandboxPanel(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                spinPresets.forEach { (label, tip) ->
-                    val isSelected = if (tip == null) {
+                tipChips.forEach { chip ->
+                    val tip = chip.tip
+                    val isSelected = if (chip.isAuto) {
                         customTipOffset == null
                     } else {
-                        customTipOffset != null &&
+                        tip != null && customTipOffset != null &&
                             abs(customTipOffset.clampedSideRatio - tip.clampedSideRatio) < 0.04 &&
                             abs(customTipOffset.clampedVerticalRatio - tip.clampedVerticalRatio) < 0.04
                     }
                     FilterChip(
                         selected = isSelected,
-                        onClick = { onUpdateTip(tip) },
+                        enabled = chip.enabled,
+                        onClick = { if (chip.isAuto || tip != null) onUpdateTip(tip) },
                         modifier = Modifier.height(if (compactVertical) 36.dp else 40.dp),
-                        label = { Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+                        label = { Text(chip.label, style = MaterialTheme.typography.labelSmall, maxLines = 1) },
                     )
                 }
             }
@@ -1115,3 +1192,10 @@ private fun SheetHeaderRow(
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
     }
 }
+
+private data class PanelTipChip(
+    val label: String,
+    val tip: TipOffset?,
+    val isAuto: Boolean,
+    val enabled: Boolean,
+)

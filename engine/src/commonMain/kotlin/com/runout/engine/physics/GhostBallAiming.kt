@@ -36,6 +36,11 @@ object GhostBallAiming {
      * Computes ghost-ball aiming geometry for potting [objectBall] into [pocket] using [cueBall],
      * checking whether any ball in [otherBalls] obstructs the cue-to-ghost or object-to-pocket path.
      *
+     * The object ball is sent at [PocketGeometry.aimPoint], the middle of its entry window into the pocket at a clean
+     * clearance of one ball radius from each jaw tip (or, if that window is closed, at the pocket's slow-ball
+     * clearance). [AimGeometry.isCutPossible] needs that window to be open at the slow-ball clearance: a ball that
+     * cannot pass between the points even when it arrives slowly is not a pot.
+     *
      * When [table] is provided, [AimGeometry.isCutPossible] (and therefore [AimGeometry.isShotPlayable])
      * also requires [AimGeometry.ghostBallCenter] to lie within the playable cushion bounds for
      * [cueBall]'s radius so rail-frozen shots requiring an off-table cue ball are rejected.
@@ -48,7 +53,27 @@ object GhostBallAiming {
         maxCutAngleRad: Double = DEFAULT_MAX_CUT_ANGLE_RAD,
         table: TableSpec? = null,
     ): AimGeometry {
-        val pocketAimPos = pocket.center
+        val pocketAimPos = PocketGeometry.aimPoint(objectBall.position, pocket, objectBall.radiusMeters)
+        val windowOpen = PocketGeometry.entryWindow(
+            objectBall.position, pocket, objectBall.radiusMeters, pocket.jawToleranceSlow,
+        ).isOpen
+        return computeAimGeometryToPoint(cueBall, objectBall, pocketAimPos, otherBalls, maxCutAngleRad, table, windowOpen)
+    }
+
+    /**
+     * Ghost-ball aiming geometry for sending [objectBall] at [targetPoint] (a pocket's aim point, or any point when
+     * [targetReachable] is true), with the same cut-angle, on-table and clearance checks as [computeAimGeometry].
+     */
+    fun computeAimGeometryToPoint(
+        cueBall: Ball,
+        objectBall: Ball,
+        targetPoint: Vec2,
+        otherBalls: List<Ball> = emptyList(),
+        maxCutAngleRad: Double = DEFAULT_MAX_CUT_ANGLE_RAD,
+        table: TableSpec? = null,
+        targetReachable: Boolean = true,
+    ): AimGeometry {
+        val pocketAimPos = targetPoint
         val objectToPocketVec = pocketAimPos - objectBall.position
         val objectToPocketDistance = objectToPocketVec.length()
         val objectBallDirection = objectToPocketVec.normalized()
@@ -65,7 +90,8 @@ object GhostBallAiming {
         val isCutPossible = abs(cutAngleRadians) <= maxCutAngleRad &&
             cueToGhostDistance > 1e-6 &&
             objectToPocketDistance > 1e-6 &&
-            isGhostOnTable
+            isGhostOnTable &&
+            targetReachable
 
         val obstacles = otherBalls.filter {
             it.number != cueBall.number && it.number != objectBall.number

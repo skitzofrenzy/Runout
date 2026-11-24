@@ -12,7 +12,6 @@ import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.GhostBallAiming
 import com.runout.engine.planner.OneShotPlanner
 import com.runout.engine.planner.rankShots
-import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -123,18 +122,18 @@ class OneShotPlannerTest {
 
         val ball1 = Ball(
             number = 1,
-            position = footRight.center - dirToFootRight * 0.45,
+            position = footRight.mouthCenter - dirToFootRight * 0.45,
             radiusMeters = r,
         )
         val cueBall = Ball(
             number = 0,
-            position = footRight.center - dirToFootRight * 0.90,
+            position = footRight.mouthCenter - dirToFootRight * 0.90,
             radiusMeters = r,
         )
         // Blocker sits right on the line between ball 1 and FOOT_RIGHT
         val blocker9 = Ball(
             number = 9,
-            position = footRight.center - dirToFootRight * 0.22,
+            position = footRight.mouthCenter - dirToFootRight * 0.22,
             radiusMeters = r,
         )
 
@@ -210,17 +209,10 @@ class OneShotPlannerTest {
 
     @Test
     fun spinSelectionAvoidsScratchPocketWhenSafeSpinPresetExists() {
-        // By Thales's theorem, placing the ghost ball at (2.54 - 0.635, 0.635) = (1.905, 0.635)
-        // makes the line to FOOT_LEFT (2.54, 0.0) and the line to FOOT_RIGHT (2.54, 1.27)
-        // strictly orthogonal, so the 90-degree STUN tangent heads straight into FOOT_RIGHT.
-        val footLeft = table.pocketById(PocketId.FOOT_LEFT)
-        val ghost = Vec2(2.54 - 0.635, 0.635)
-        val toFootLeft = (footLeft.center - ghost).normalized()
-        val ball1 = Ball(number = 1, position = ghost + toFootLeft * (2.0 * r), radiusMeters = r)
-
-        val tangentToFootRight = toFootLeft.rotate(PI / 2.0)
-        val aimDir = (toFootLeft + tangentToFootRight).normalized()
-        val cueBall = Ball(number = 0, position = ghost - aimDir * 0.60, radiusMeters = r)
+        // A 45° cut into FOOT_LEFT placed so that the stun line (just inside the tangent line) heads into FOOT_RIGHT.
+        val setup = StunIntoCornerFixture.build(table, objectBallNumber = 1, cueSpeedMps = 2.5)
+        val ball1 = setup.objectBall
+        val cueBall = setup.cueBall
 
         val layout = TableLayout(table = table, balls = listOf(cueBall, ball1))
         val ranked = rankShots(

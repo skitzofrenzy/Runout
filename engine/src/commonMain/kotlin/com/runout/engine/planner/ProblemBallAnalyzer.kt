@@ -9,6 +9,7 @@ import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
 import com.runout.engine.physics.CueBallTrajectory
 import com.runout.engine.physics.GhostBallAiming
+import com.runout.engine.physics.PocketGeometry
 
 /** Why an object ball is hard to run out. */
 enum class ProblemBallReason {
@@ -68,13 +69,16 @@ object ProblemBallAnalyzer {
 
         val assessments = inspected.map { ball ->
             val obstacles = objectBalls.filter { it.number != ball.number }
+            // A pocket counts when the ball can pass between its points (at the slow-ball clearance) and its line to the
+            // pocket's aim point is free of other balls.
             val pocketCount = table.pockets.count { pocket ->
-                GhostBallAiming.isSegmentClear(
-                    start = ball.position,
-                    end = pocket.center,
-                    movingRadius = ball.radiusMeters,
-                    obstacles = obstacles,
-                )
+                PocketGeometry.entryWindow(ball.position, pocket, ball.radiusMeters, pocket.jawToleranceSlow).isOpen &&
+                    GhostBallAiming.isSegmentClear(
+                        start = ball.position,
+                        end = PocketGeometry.aimPoint(ball.position, pocket, ball.radiusMeters),
+                        movingRadius = ball.radiusMeters,
+                        obstacles = obstacles,
+                    )
             }
             val neighbourLimit = NEIGHBOUR_RADIUS_FACTOR * ball.radiusMeters
             val neighbours = obstacles
@@ -128,7 +132,8 @@ object ProblemBallAnalyzer {
 
     /**
      * Returns the closest [BreakoutOpportunity] if the cue-ball [trajectory] passes within `2.3` ball radii of a
-     * problem ball other than the ball being potted, otherwise `null`.
+     * problem ball other than the ball being potted, otherwise `null`. The path is read from its sampled curve
+     * ([CueBallTrajectory.sampledPoints]), so a curving cue ball is measured where it really runs.
      */
     fun checkTrajectoryBreakout(
         trajectory: CueBallTrajectory,
@@ -137,7 +142,7 @@ object ProblemBallAnalyzer {
         problemBalls: List<ProblemBallReport>,
         ballRadiusMeters: Double,
     ): BreakoutOpportunity? {
-        val points = trajectory.points
+        val points = trajectory.sampledPoints.ifEmpty { trajectory.points }
         if (points.isEmpty()) return null
         val threshold = BREAKOUT_RADIUS_FACTOR * ballRadiusMeters
 

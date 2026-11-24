@@ -9,11 +9,14 @@ import com.runout.engine.model.PlayerProfile
 import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
+import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.GhostBallAiming
+import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TableCollisionSimulator
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.planner.HeatZoneGenerator
 import com.runout.engine.planner.MultiShotPlanner
+import com.runout.engine.planner.ShotDifficultyTier
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -47,12 +50,16 @@ class TableCollisionAndPlaybackTest {
         )
         assertTrue(aim.isShotPlayable)
 
+        // The cluster sits on the stun tangent, so the cue ball must arrive without spin: a tip below centre.
+        val stunTip = assertNotNull(
+            SpinPhysics.tipForImpactState(CueBallSpinPreset.STUN, 2.6, aim.cueToGhostDistanceMeters, table),
+        )
         val sim = TableCollisionSimulator.simulatePostImpact(
             layout = layout,
             targetBall = targetBall,
             aim = aim,
             cueSpeedMps = 2.6,
-            tip = TipOffset(sideRatio = 0.0, verticalRatio = 0.0),
+            tip = stunTip,
         )
 
         assertNull(sim.resultingLayout.ballByNumber(1), "Potted target ball should leave the evolved layout")
@@ -141,9 +148,12 @@ class TableCollisionAndPlaybackTest {
         assertEquals(2, topPlan.steps.size, "Expected 2-shot runout (#7 then #8)")
         assertEquals(7, topPlan.steps[0].targetBall.number)
         assertEquals(8, topPlan.steps[1].targetBall.number)
-        assertTrue(
-            topPlan.steps[1].uncertainty.makeProbability >= 0.70,
-            "Penultimate shot should leave an easy, high-make final shot on #8 (was ${topPlan.steps[1].uncertainty.makeProbability})",
+        // "Easy" is the app's own tier: the make probability (the player's real chance of the pot) is at least 0.65.
+        // A clean leave on the last ball is one the default player makes at least that often.
+        assertEquals(
+            ShotDifficultyTier.EASY,
+            topPlan.steps[1].makeDifficulty,
+            "Penultimate shot should leave an easy final shot on #8 (make probability ${topPlan.steps[1].uncertainty.makeProbability})",
         )
     }
 
@@ -217,7 +227,7 @@ class TableCollisionAndPlaybackTest {
         val target = Ball(number = 7, position = Vec2(2.05, 0.92))
         // Place a non-playable ball directly along the approach ray from table center toward #7 -> FOOT_RIGHT
         val pocket = table.pockets.first { it.id == PocketId.FOOT_RIGHT }
-        val objDir = (pocket.center - target.position).normalized()
+        val objDir = (pocket.mouthCenter - target.position).normalized()
         val ghostCenter = target.position - objDir * (2.0 * r)
         val approachDir = (Vec2(0.85, 0.50) - ghostCenter).normalized()
         val blocker = Ball(number = 12, position = ghostCenter + approachDir * 0.45)
@@ -266,7 +276,7 @@ class TableCollisionAndPlaybackTest {
     fun friendlyBallBlockingGoalPocketRemovesHeatZoneForThatPocket() {
         val target = Ball(number = 7, position = Vec2(1.75, 0.80))
         val pocket = table.pockets.first { it.id == PocketId.FOOT_RIGHT }
-        val toPocketDir = (pocket.center - target.position).normalized()
+        val toPocketDir = (pocket.mouthCenter - target.position).normalized()
         // Friendly ball sits squarely between #7 and its goal pocket FOOT_RIGHT
         val friendlyBlocker = Ball(number = 2, position = target.position + toPocketDir * 0.30)
 
@@ -294,7 +304,7 @@ class TableCollisionAndPlaybackTest {
     fun backCutSideBehindTargetBallIsOccluded() {
         val target = Ball(number = 9, position = Vec2(1.85, 0.75))
         val pocket = table.pockets.first { it.id == PocketId.FOOT_RIGHT }
-        val toPocketDir = (pocket.center - target.position).normalized()
+        val toPocketDir = (pocket.mouthCenter - target.position).normalized()
         val layout = TableLayout(table = table, balls = listOf(Ball(0, Vec2(0.60, 0.55)), target))
         val visibility = HeatZoneGenerator.computePocketVisibility(layout, target, pocket)
 

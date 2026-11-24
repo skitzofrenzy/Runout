@@ -77,8 +77,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.runout.app.calibration.SampleCalibrationSessions
+import com.runout.app.legal.AboutLegalScreen
+import com.runout.app.legal.LegalConfig
+import com.runout.app.legal.LegalDocument
+import com.runout.app.legal.LegalDocumentScreen
+import com.runout.app.legal.TermsAcknowledgementScreen
+import com.runout.app.planning.PlanCommand
+import com.runout.app.planning.RollingPlanSession
 import com.runout.app.storage.SavedSetupPreferences
 import com.runout.app.storage.TableSizePreset
+import com.runout.app.storage.isTermsAcceptanceCurrent
 import com.runout.app.storage.rememberSetupPreferencesStore
 import com.runout.app.tools.EightBallWalkthrough
 import com.runout.app.tools.InteractiveTutorial
@@ -94,6 +102,8 @@ import com.runout.app.ui.EditBallsSheet
 import com.runout.app.ui.ExtrasAndToolsScreen
 import com.runout.app.ui.FullscreenTableScreen
 import com.runout.app.ui.GameAndTableSetupSheet
+import com.runout.app.ui.pocketPresetOf
+import com.runout.app.ui.withPocketPreset
 import com.runout.app.ui.GlossaryInfoButton
 import com.runout.app.ui.HomeLandingScreen
 import com.runout.app.ui.LearnHubScreen
@@ -124,8 +134,8 @@ import com.runout.app.ui.TutorialDetailPlayerScreen
 import com.runout.app.ui.WalkthroughDetailPlayerScreen
 import com.runout.app.ui.ballBaseColor
 import com.runout.app.ui.computeShotTightness
-import com.runout.app.ui.resolveDisplayedLayoutForStep
 import com.runout.app.ui.shotTightnessLabel
+import com.runout.app.ui.solvedTip
 import com.runout.app.ui.spinColor
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.AssumedSurfacePreset
@@ -138,28 +148,28 @@ import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
 import com.runout.engine.model.PocketId
+import com.runout.engine.model.PocketPreset
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
+import com.runout.engine.planner.FallbackAdvice
+import com.runout.engine.planner.FallbackKind
 import com.runout.engine.planner.MultiShotPlanner
-import com.runout.engine.planner.OneShotPlanner
 import com.runout.engine.planner.PlannedShotStep
 import com.runout.engine.planner.PlanningPauseReason
 import com.runout.engine.planner.PlanningReadinessResult
 import com.runout.engine.planner.PlanningReadinessValidator
 import com.runout.engine.planner.ProblemBallReason
+import com.runout.engine.planner.RollingPlanState
 import com.runout.engine.planner.RunoutPlan
 import com.runout.engine.planner.ShotRecommendation
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.round
 import kotlin.math.roundToInt
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 private const val METERS_TO_CM: Double = 100.0
 private const val METERS_TO_FEET: Double = 3.28084
@@ -178,10 +188,10 @@ private data class TipQuickPreset(
 
 private val TIP_QUICK_PRESETS = listOf(
     TipQuickPreset("Auto Spin", null),
-    TipQuickPreset("Center Stun", TipOffset(sideRatio = 0.0, verticalRatio = 0.0)),
-    TipQuickPreset("Drag Stun", TipOffset(sideRatio = 0.0, verticalRatio = -0.14)),
+    TipQuickPreset("Center", TipOffset(sideRatio = 0.0, verticalRatio = 0.0)),
+    TipQuickPreset("Touch Low", TipOffset(sideRatio = 0.0, verticalRatio = -0.14)),
     TipQuickPreset("Ctrl Follow", TipOffset(sideRatio = 0.0, verticalRatio = 0.20)),
-    TipQuickPreset("Firm Follow", TipOffset.fromPreset(CueBallSpinPreset.FOLLOW)),
+    TipQuickPreset("Firm Follow", TipOffset(sideRatio = 0.0, verticalRatio = 0.35)),
     TipQuickPreset("Ctrl Draw", TipOffset(sideRatio = 0.0, verticalRatio = -0.25)),
     TipQuickPreset("Max Draw", TipOffset(sideRatio = 0.0, verticalRatio = -0.44)),
     TipQuickPreset("1/2 Left", TipOffset(sideRatio = -0.18, verticalRatio = 0.0)),
@@ -209,6 +219,8 @@ private sealed interface ActiveRoute {
     data object BreakSpeedMeter : ActiveRoute
     data object ScorekeeperAndClock : ActiveRoute
     data object PlayerProfileAndBallSet : ActiveRoute
+    data object AboutLegal : ActiveRoute
+    data class LegalDocumentView(val document: LegalDocument) : ActiveRoute
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -235,6 +247,9 @@ fun App() {
         initialBaseScenario.layout
     }
 
+    var termsAccepted by remember(setupStore) {
+        mutableStateOf(isTermsAcceptanceCurrent(setupStore.loadAcceptedTermsVersion(), LegalConfig.TERMS_VERSION))
+    }
     var showOnboarding by remember { mutableStateOf(initialSavedSetup?.hasCompletedSetup != true) }
     var lastPrimaryTab by remember { mutableStateOf(PrimaryTab.HOME) }
     var activeRoute by remember { mutableStateOf<ActiveRoute>(ActiveRoute.MainTab(PrimaryTab.HOME)) }
@@ -254,13 +269,11 @@ fun App() {
     var savedTableProfiles by remember { mutableStateOf(SampleCalibrationSessions.defaultSavedProfiles()) }
     var activeTableProfileId by remember { mutableStateOf<String?>(null) }
 
-    var speedUnitsOverride by remember { mutableStateOf<Double?>(null) }
     var selectedHorizon by remember {
         mutableStateOf(initialSavedSetup?.toPlanningHorizon() ?: PlanningHorizonOption.THREE_BALL)
     }
     var showHeatZone by remember { mutableStateOf(false) }
     var showLandingCloud by remember { mutableStateOf(true) }
-    var customTipOffset by remember { mutableStateOf<TipOffset?>(null) }
     var visibleSpins by remember {
         mutableStateOf(
             setOf(
@@ -279,28 +292,18 @@ fun App() {
     var showResetConfirmDialog by remember { mutableStateOf(false) }
     var showPrivacyDialog by remember { mutableStateOf(false) }
 
-    var selectedPlanIndex by remember { mutableIntStateOf(0) }
     var selectedShotIndex by remember { mutableIntStateOf(0) }
 
     var isDraggingBall by remember { mutableStateOf(false) }
-    var isPlanning by remember { mutableStateOf(false) }
-    var customPocketOverride by remember { mutableStateOf<PocketId?>(null) }
     var showCueSandboxPanel by remember { mutableStateOf(false) }
-    var sandboxTargetBallNumber by remember { mutableStateOf<Int?>(null) }
-    var sandboxPocketId by remember { mutableStateOf<PocketId?>(null) }
-    var defaultTipForActiveShot by remember { mutableStateOf<TipOffset?>(null) }
-    var defaultSpeedForActiveShot by remember { mutableStateOf<Double?>(null) }
-    var focusedStepIndex by remember { mutableIntStateOf(0) }
     var showAllStepsOverlay by remember { mutableStateOf(false) }
     var isFullscreenTable by remember { mutableStateOf(false) }
     var dismissAutoLandscape by remember { mutableStateOf(false) }
-    var runoutPlans by remember { mutableStateOf<List<RunoutPlan>>(emptyList()) }
-    var rankedShots by remember { mutableStateOf<List<ShotRecommendation>>(emptyList()) }
 
-    val hasSandboxOverrides = customTipOffset != null ||
-        speedUnitsOverride != null ||
-        customPocketOverride != null ||
-        sandboxTargetBallNumber != null
+    // The rolling plan: accepted shots, the window from the focus and the edit on the focused shot. Changing the
+    // token plans again from the current table even when nothing else changed (a preset or photo loaded twice).
+    val planSession = remember { RollingPlanSession() }
+    var planRestartToken by remember { mutableIntStateOf(0) }
 
     val planningReadiness = remember(currentLayout, rulesState, ballSetProfile) {
         PlanningReadinessValidator.evaluate(
@@ -310,104 +313,72 @@ fun App() {
         )
     }
 
-    val playablePockets = remember(currentLayout, rulesState, planningReadiness.isReady) {
-        if (!planningReadiness.isReady) {
-            emptyList()
-        } else {
-            val legalTargets = rulesState.legalTargetBalls(currentLayout)
-            val validSet = legalTargets
-                .flatMap { ball -> MultiShotPlanner.playablePocketsForTarget(currentLayout, ball) }
-                .toSet()
-            PocketId.entries.filter { it in validSet }
-        }
-    }
-
-    LaunchedEffect(playablePockets, isDraggingBall) {
-        if (!isDraggingBall && customPocketOverride != null && customPocketOverride !in playablePockets) {
-            customPocketOverride = null
-        }
-    }
+    LaunchedEffect(planSession) { planSession.run() }
 
     LaunchedEffect(
         currentLayout,
         rulesState,
         playerProfile,
         selectedHorizon,
-        customTipOffset,
-        speedUnitsOverride,
-        customPocketOverride,
-        sandboxTargetBallNumber,
-        sandboxPocketId,
+        planRestartToken,
         planningReadiness.isReady,
         isDraggingBall,
     ) {
         if (!planningReadiness.isReady) {
-            runoutPlans = emptyList()
-            rankedShots = emptyList()
-            isPlanning = false
+            planSession.clear()
             return@LaunchedEffect
         }
         if (isDraggingBall) {
             // Keep finger dragging at 60 fps and defer heavy multi-shot tree search until release.
             return@LaunchedEffect
         }
-        isPlanning = true
-        delay(if (showCueSandboxPanel || hasSandboxOverrides) 60L else 150L)
-        val layoutSnapshot = currentLayout
-        val rulesSnapshot = rulesState
-        val profileSnapshot = playerProfile
-        val horizonSnapshot = selectedHorizon
-        val tipSnapshot = customTipOffset
-        val speedSnapshot = speedUnitsOverride
-        val targetSnapshot = sandboxTargetBallNumber
-        val pocketSnapshot = customPocketOverride ?: sandboxPocketId
-        val allowScratchSandbox = tipSnapshot != null || speedSnapshot != null
-        val (plans, shots) = withContext(Dispatchers.Default) {
-            val computedPlans = MultiShotPlanner.planRunout(
-                layout = layoutSnapshot,
-                rulesState = rulesSnapshot,
-                playerProfile = profileSnapshot,
-                horizonShots = horizonSnapshot.horizonShots,
-                deepAnalysis = horizonSnapshot.deepAnalysis,
-                customFirstShotTip = tipSnapshot,
-                customFirstShotTargetBallNumber = targetSnapshot,
-                customFirstShotPocketId = pocketSnapshot,
-                allowHighScratchFirstShot = allowScratchSandbox,
-                customFirstShotSpeedUnits = speedSnapshot,
-            )
-            val computedShots = OneShotPlanner.rankShots(
-                layout = layoutSnapshot,
-                rulesState = rulesSnapshot,
-                playerProfile = profileSnapshot,
-                cueSpeedUnitsOverride = speedSnapshot,
-            )
-            computedPlans to computedShots
-        }
-        runoutPlans = plans
-        rankedShots = shots
-        if (tipSnapshot == null && speedSnapshot == null && targetSnapshot == null && pocketSnapshot == null) {
-            val defaultFirst = plans.firstOrNull()?.steps?.firstOrNull()
-            defaultTipForActiveShot = defaultFirst?.recommendedTip
-            defaultSpeedForActiveShot = defaultFirst?.recommendedSpeedUnits
-        }
-        isPlanning = false
-    }
-
-    val safePlanIndex = selectedPlanIndex.coerceIn(0, (runoutPlans.size - 1).coerceAtLeast(0))
-    val activePlan = runoutPlans.getOrNull(safePlanIndex)
-    val safeShotIndex = selectedShotIndex.coerceIn(0, (rankedShots.size - 1).coerceAtLeast(0))
-    val selectedShot = rankedShots.getOrNull(safeShotIndex)
-    val safeFocusedStepIndex = focusedStepIndex.coerceIn(
-        0,
-        ((activePlan?.steps?.size ?: 1) - 1).coerceAtLeast(0),
-    )
-    val displayedLayout = remember(currentLayout, activePlan, safeFocusedStepIndex) {
-        resolveDisplayedLayoutForStep(
-            baseLayout = currentLayout,
-            plan = activePlan,
-            focusedStepIndex = safeFocusedStepIndex,
+        planSession.submit(
+            PlanCommand.Restart(
+                layout = currentLayout,
+                rules = rulesState,
+                profile = playerProfile,
+                horizon = selectedHorizon.horizonShots,
+                deepAnalysis = selectedHorizon.deepAnalysis,
+            ),
         )
     }
+
+    // The plan on screen. After the table or the rules change it is hidden until the planner has caught up, so
+    // lines never sit on a table they were not planned for.
+    val rollingState = planSession.state
+    val activeRolling: RollingPlanState? = rollingState?.takeIf {
+        planningReadiness.isReady && it.baseLayout == currentLayout && it.baseRules == rulesState
+    }
+    val isPlanning = planningReadiness.isReady && !isDraggingBall && (planSession.isBusy || activeRolling == null)
+    val displayedLayout = activeRolling?.focusLayout ?: currentLayout
+    val rankedShots = if (activeRolling != null) planSession.rankedShots else emptyList()
+    // Advice for a table with no direct pot; hidden while the planner is catching up, like the plan.
+    val fallbackAdvice = if (activeRolling != null && !planSession.isBusy) planSession.fallbackAdvice else null
+
+    // What the user has chosen on the focused shot, as the controls show it.
+    val editedOverride = if (activeRolling != null) planSession.editedOverride else null
+    val editedTip = editedOverride?.tip
+    val editedSpeedUnits = editedOverride?.speedUnits
+    val editedPocket = editedOverride?.pocketId
+    val editedTargetBall = editedOverride?.targetBallNumber
+    val hasSandboxOverrides = editedOverride != null
+    val plannerChoice = if (activeRolling != null) planSession.defaultChoice else null
+
+    val playablePockets = remember(displayedLayout, activeRolling?.focusRules, rulesState, planningReadiness.isReady) {
+        if (!planningReadiness.isReady) {
+            emptyList()
+        } else {
+            val focusRules = activeRolling?.focusRules ?: rulesState
+            val legalTargets = focusRules.legalTargetBalls(displayedLayout)
+            val validSet = legalTargets
+                .flatMap { ball -> MultiShotPlanner.playablePocketsForTarget(displayedLayout, ball) }
+                .toSet()
+            PocketId.entries.filter { it in validSet }
+        }
+    }
+
+    val safeShotIndex = selectedShotIndex.coerceIn(0, (rankedShots.size - 1).coerceAtLeast(0))
+    val selectedShot = rankedShots.getOrNull(safeShotIndex)
 
     fun navigateToTab(tab: PrimaryTab) {
         lastPrimaryTab = tab
@@ -427,103 +398,57 @@ fun App() {
     }
 
     fun handleMoveBall(ballNumber: Int, newPosition: Vec2) {
-        val baseLayout = if (safeFocusedStepIndex > 0) displayedLayout else currentLayout
-        currentLayout = SampleLayouts.moveBallSafely(baseLayout, ballNumber, newPosition)
-        if (safeFocusedStepIndex > 0) focusedStepIndex = 0
-        if (customPocketOverride != null) customPocketOverride = null
-        sandboxTargetBallNumber = null
-        sandboxPocketId = null
+        // Moving a ball while a later shot is shown makes that table the new start of the plan; the group an
+        // accepted 8-ball shot assigned stays with it.
+        val focus = activeRolling
+        val from = focus?.focusLayout ?: currentLayout
+        if (focus != null && focus.focusRules != rulesState) rulesState = focus.focusRules
+        currentLayout = SampleLayouts.moveBallSafely(from, ballNumber, newPosition)
         hasActiveSession = true
     }
 
     fun resetSandboxToPlanDefaults() {
-        customTipOffset = null
-        speedUnitsOverride = null
-        customPocketOverride = null
-        sandboxTargetBallNumber = null
-        sandboxPocketId = null
-        focusedStepIndex = 0
-        selectedPlanIndex = 0
+        planSession.resetFocusedStep()
         selectedShotIndex = 0
     }
 
     fun handleUpdateSandboxTip(nextTip: TipOffset?) {
-        if (nextTip != null) {
-            val activeFirst = activePlan?.steps?.firstOrNull()
-            if (sandboxTargetBallNumber == null) {
-                sandboxTargetBallNumber = activeFirst?.targetBall?.number
-            }
-            if (sandboxPocketId == null && customPocketOverride == null) {
-                sandboxPocketId = activeFirst?.pocketId
-            }
-        }
-        customTipOffset = nextTip
-        if (nextTip == null && speedUnitsOverride == null && customPocketOverride == null) {
-            sandboxTargetBallNumber = null
-            sandboxPocketId = null
-        }
-        focusedStepIndex = 0
-        selectedPlanIndex = 0
+        if (activeRolling == null) return
+        planSession.edit { it.copy(tip = nextTip) }
     }
 
     fun handleUpdateSandboxSpeed(nextUnits: Double?) {
+        if (activeRolling == null) return
         val snapped = nextUnits?.let(PlayerProfile::snapSpeedUnits)
-        if (snapped != null) {
-            val activeFirst = activePlan?.steps?.firstOrNull()
-            if (sandboxTargetBallNumber == null) {
-                sandboxTargetBallNumber = activeFirst?.targetBall?.number
-            }
-            if (sandboxPocketId == null && customPocketOverride == null) {
-                sandboxPocketId = activeFirst?.pocketId
-            }
-        }
-        speedUnitsOverride = snapped
-        if (snapped == null && customTipOffset == null && customPocketOverride == null) {
-            sandboxTargetBallNumber = null
-            sandboxPocketId = null
-        }
-        focusedStepIndex = 0
-        selectedPlanIndex = 0
+        planSession.edit { it.copy(speedUnits = snapped) }
+        selectedShotIndex = 0
+    }
+
+    fun handleSelectPocket(pocket: PocketId?) {
+        if (activeRolling == null) return
+        planSession.edit { it.copy(pocketId = pocket) }
         selectedShotIndex = 0
     }
 
     fun handleToggleCueSandbox() {
-        if (focusedStepIndex > 0) {
-            focusedStepIndex = 0
-        }
         showCueSandboxPanel = !showCueSandboxPanel
     }
 
     fun handlePrevStep() {
-        focusedStepIndex = (safeFocusedStepIndex - 1).coerceAtLeast(0)
+        if (activeRolling?.canGoBack == true && !planSession.isBusy) {
+            planSession.submit(PlanCommand.Back)
+        }
     }
 
     fun handleNextStep() {
-        val maxIdx = ((activePlan?.steps?.size ?: 1) - 1).coerceAtLeast(0)
-        focusedStepIndex = (safeFocusedStepIndex + 1).coerceAtMost(maxIdx)
-        showAllStepsOverlay = false
+        // Busy covers the moment between a tap and the planner returning, so a quick second tap cannot accept twice.
+        if (activeRolling?.canAdvance == true && !planSession.isBusy) {
+            planSession.submit(PlanCommand.Advance)
+        }
     }
 
     fun handleToggleAllStepsOverlay() {
-        if (safeFocusedStepIndex > 0) {
-            focusedStepIndex = 0
-            showAllStepsOverlay = true
-        } else {
-            showAllStepsOverlay = !showAllStepsOverlay
-        }
-    }
-
-    fun handleApplyCurrentStepToTable() {
-        if (safeFocusedStepIndex > 0) {
-            currentLayout = displayedLayout
-            focusedStepIndex = 0
-            customPocketOverride = null
-            sandboxTargetBallNumber = null
-            sandboxPocketId = null
-            selectedPlanIndex = 0
-            selectedShotIndex = 0
-            hasActiveSession = true
-        }
+        showAllStepsOverlay = !showAllStepsOverlay
     }
 
     fun performResetWithUndo() {
@@ -536,16 +461,8 @@ fun App() {
         currentLayout = SampleLayouts.resizeTableLayout(defaultScenario.layout, previousLayout.table)
         rulesState = defaultScenario.rulesState
         selectedPresetIndex = 0
-        customTipOffset = null
-        speedUnitsOverride = null
-        customPocketOverride = null
-        sandboxTargetBallNumber = null
-        sandboxPocketId = null
-        defaultTipForActiveShot = null
-        defaultSpeedForActiveShot = null
-        focusedStepIndex = 0
-        selectedPlanIndex = 0
         selectedShotIndex = 0
+        planRestartToken += 1
         hasActiveSession = false
 
         scope.launch {
@@ -559,7 +476,7 @@ fun App() {
                 rulesState = previousRules
                 selectedPresetIndex = previousPresetIdx
                 hasActiveSession = previousHasSession
-                focusedStepIndex = 0
+                planRestartToken += 1
             }
         }
     }
@@ -586,6 +503,15 @@ fun App() {
     }
 
     MaterialTheme(colorScheme = RunoutDarkColorScheme) {
+        if (!termsAccepted) {
+            TermsAcknowledgementScreen(
+                onAgree = {
+                    setupStore.saveAcceptedTermsVersion(LegalConfig.TERMS_VERSION)
+                    termsAccepted = true
+                },
+            )
+            return@MaterialTheme
+        }
         if (showOnboarding) {
             OnboardingFlowScreen(
                 initialLevel = playerProfile.experienceLevel,
@@ -664,6 +590,7 @@ fun App() {
             if (showFullscreenLandscape) {
                 FullscreenTableScreen(
                     displayMode = displayMode,
+                    fallbackAdvice = fallbackAdvice,
                     onDisplayModeChange = { nextMode ->
                         displayMode = nextMode
                         persistSetupPreferences(mode = nextMode)
@@ -672,9 +599,8 @@ fun App() {
                     rulesState = rulesState,
                     ballSetProfile = ballSetProfile,
                     planningReadiness = planningReadiness,
-                    activePlan = activePlan,
+                    rollingPlan = activeRolling,
                     selectedShot = selectedShot,
-                    focusedStepIndex = safeFocusedStepIndex,
                     showAllStepsOverlay = showAllStepsOverlay,
                     isPlanning = isPlanning,
                     isDraggingBall = isDraggingBall,
@@ -682,19 +608,14 @@ fun App() {
                     showHeatZone = showHeatZone,
                     showLandingCloud = showLandingCloud,
                     playablePockets = playablePockets,
-                    customPocketOverride = customPocketOverride,
-                    onSelectPocketOverride = { pocket ->
-                        customPocketOverride = pocket
-                        focusedStepIndex = 0
-                        selectedPlanIndex = 0
-                        selectedShotIndex = 0
-                    },
+                    customPocketOverride = editedPocket,
+                    onSelectPocketOverride = ::handleSelectPocket,
                     onMoveBall = ::handleMoveBall,
                     onDragStateChanged = { isDraggingBall = it },
                     onPrevStep = ::handlePrevStep,
                     onNextStep = ::handleNextStep,
                     onToggleAllStepsOverlay = ::handleToggleAllStepsOverlay,
-                    onApplyCurrentStepToTable = ::handleApplyCurrentStepToTable,
+                    onResetStep = ::resetSandboxToPlanDefaults,
                     onToggleFullscreen = {
                         if (isFullscreenTable) {
                             isFullscreenTable = false
@@ -707,12 +628,12 @@ fun App() {
                     onOpenQuickSpinSheet = { showQuickSpinSheet = true },
                     onOpenShotOptionsSheet = { showShotOptionsSheet = true },
                     onOpenPhotoScan = { navigateToSubRoute(ActiveRoute.PhotoScan) },
-                    customTipOffset = customTipOffset,
-                    defaultTipForShot = defaultTipForActiveShot,
-                    speedUnitsOverride = speedUnitsOverride,
-                    defaultSpeedUnitsForShot = defaultSpeedForActiveShot,
+                    customTipOffset = editedTip,
+                    defaultTipForShot = plannerChoice?.tip,
+                    speedUnitsOverride = editedSpeedUnits,
+                    defaultSpeedUnitsForShot = plannerChoice?.speedUnits,
                     playerProfile = playerProfile,
-                    sandboxTargetBallNumber = sandboxTargetBallNumber,
+                    sandboxTargetBallNumber = editedTargetBall,
                     showCueSandboxPanel = showCueSandboxPanel,
                     hasSandboxOverrides = hasSandboxOverrides,
                     onToggleCueSandbox = ::handleToggleCueSandbox,
@@ -870,6 +791,15 @@ fun App() {
                                 showPrivacyDialog = true
                             },
                         )
+                        DrawerNavItem(
+                            label = "About & Legal",
+                            icon = RunoutIcon.INFO,
+                            selected = activeRoute == ActiveRoute.AboutLegal,
+                            onClick = {
+                                scope.launch { drawerState.close() }
+                                navigateToSubRoute(ActiveRoute.AboutLegal)
+                            },
+                        )
                     }
                 }
             },
@@ -895,6 +825,8 @@ fun App() {
                         ActiveRoute.BreakSpeedMeter -> "Break-Speed Meter"
                         ActiveRoute.ScorekeeperAndClock -> "Scorekeeper & Clock"
                         ActiveRoute.PlayerProfileAndBallSet -> "Profile & Ball Set"
+                        ActiveRoute.AboutLegal -> "About & Legal"
+                        is ActiveRoute.LegalDocumentView -> r.document.title
                     }
                     TopAppBar(
                         colors = TopAppBarDefaults.topAppBarColors(
@@ -907,7 +839,12 @@ fun App() {
                                     if (isTopLevel) {
                                         scope.launch { drawerState.open() }
                                     } else {
-                                        activeRoute = ActiveRoute.MainTab(lastPrimaryTab)
+                                        val current = activeRoute
+                                        activeRoute = if (current is ActiveRoute.LegalDocumentView) {
+                                            ActiveRoute.AboutLegal
+                                        } else {
+                                            ActiveRoute.MainTab(lastPrimaryTab)
+                                        }
                                     }
                                 },
                                 modifier = Modifier.defaultMinSize(
@@ -1138,11 +1075,8 @@ fun App() {
                                 onSelectRules = { nextRules ->
                                     rulesState = nextRules
                                     hasActiveSession = true
-                                    customPocketOverride = null
-                                    sandboxTargetBallNumber = null
-                                    focusedStepIndex = 0
-                                    selectedPlanIndex = 0
                                     selectedShotIndex = 0
+                                    planRestartToken += 1
                                     persistSetupPreferences(rules = nextRules)
                                 },
                                 onOpenGameSetupSheet = { showGameSetupSheet = true },
@@ -1157,9 +1091,6 @@ fun App() {
                                 ballSetProfile = ballSetProfile,
                                 onAddMissingBall = { ballNumber ->
                                     currentLayout = SampleLayouts.addMissingBall(currentLayout, ballNumber)
-                                    customPocketOverride = null
-                                    sandboxTargetBallNumber = null
-                                    focusedStepIndex = 0
                                     hasActiveSession = true
                                 },
                                 onMoveBall = ::handleMoveBall,
@@ -1169,6 +1100,7 @@ fun App() {
                                 planningReadiness = planningReadiness,
                                 rankedShots = rankedShots,
                                 selectedShotIndex = safeShotIndex,
+                                fallbackAdvice = fallbackAdvice,
                                 onSelectShot = { selectedShotIndex = it },
                                 selectedShot = selectedShot,
                                 visibleSpins = visibleSpins,
@@ -1177,33 +1109,22 @@ fun App() {
                                 },
                                 showHeatZone = showHeatZone,
                                 showLandingCloud = showLandingCloud,
-                                customTipOffset = customTipOffset,
+                                customTipOffset = editedTip,
                                 onUpdateCustomTip = ::handleUpdateSandboxTip,
-                                runoutPlans = runoutPlans,
-                                selectedPlanIndex = safePlanIndex,
-                                onSelectPlan = {
-                                    selectedPlanIndex = it
-                                    focusedStepIndex = 0
-                                },
-                                activePlan = activePlan,
-                                focusedStepIndex = safeFocusedStepIndex,
+                                rollingPlan = activeRolling,
+                                onSelectAlternative = planSession::chooseAlternative,
                                 showAllStepsOverlay = showAllStepsOverlay,
                                 onPrevStep = ::handlePrevStep,
                                 onNextStep = ::handleNextStep,
                                 onToggleAllStepsOverlay = ::handleToggleAllStepsOverlay,
-                                onApplyCurrentStepToTable = ::handleApplyCurrentStepToTable,
+                                onResetStep = ::resetSandboxToPlanDefaults,
                                 playablePockets = playablePockets,
-                                customPocketOverride = customPocketOverride,
-                                onSelectPocketOverride = { pocket ->
-                                    customPocketOverride = pocket
-                                    focusedStepIndex = 0
-                                    selectedPlanIndex = 0
-                                    selectedShotIndex = 0
-                                },
-                                defaultTipForShot = defaultTipForActiveShot,
-                                defaultSpeedUnitsForShot = defaultSpeedForActiveShot,
-                                speedUnitsOverride = speedUnitsOverride,
-                                sandboxTargetBallNumber = sandboxTargetBallNumber,
+                                customPocketOverride = editedPocket,
+                                onSelectPocketOverride = ::handleSelectPocket,
+                                defaultTipForShot = plannerChoice?.tip,
+                                defaultSpeedUnitsForShot = plannerChoice?.speedUnits,
+                                speedUnitsOverride = editedSpeedUnits,
+                                sandboxTargetBallNumber = editedTargetBall,
                                 showCueSandboxPanel = showCueSandboxPanel,
                                 hasSandboxOverrides = hasSandboxOverrides,
                                 onToggleCueSandbox = ::handleToggleCueSandbox,
@@ -1216,7 +1137,6 @@ fun App() {
                                     currentLayout = currentLayout.copy(
                                         table = currentLayout.table.withClothParams(updatedCloth),
                                     )
-                                    focusedStepIndex = 0
                                     hasActiveSession = true
                                 },
                             )
@@ -1232,13 +1152,8 @@ fun App() {
                                     currentLayout = layout
                                     rulesState = rules
                                     selectedPresetIndex = -1
-                                    customTipOffset = null
-                                    speedUnitsOverride = null
-                                    customPocketOverride = null
-                                    sandboxTargetBallNumber = null
-                                    focusedStepIndex = 0
                                     hasActiveSession = true
-                                    selectedPlanIndex = 0
+                                    planRestartToken += 1
                                     selectedShotIndex = 0
                                     navigateToTab(PrimaryTab.PLAN)
                                 },
@@ -1263,13 +1178,8 @@ fun App() {
                                 rulesState = scannedRules
                                 ballSetProfile = scannedBallSet
                                 selectedPresetIndex = -1
-                                customTipOffset = null
-                                speedUnitsOverride = null
-                                customPocketOverride = null
-                                sandboxTargetBallNumber = null
-                                focusedStepIndex = 0
                                 hasActiveSession = true
-                                selectedPlanIndex = 0
+                                planRestartToken += 1
                                 selectedShotIndex = 0
                                 navigateToTab(PrimaryTab.PLAN)
                             },
@@ -1283,12 +1193,8 @@ fun App() {
                                 currentLayout = layout
                                 rulesState = rules
                                 selectedPresetIndex = -1
-                                customTipOffset = null
-                                speedUnitsOverride = null
-                                customPocketOverride = null
-                                sandboxTargetBallNumber = null
                                 hasActiveSession = true
-                                selectedPlanIndex = 0
+                                planRestartToken += 1
                                 selectedShotIndex = 0
                                 navigateToTab(PrimaryTab.PLAN)
                             },
@@ -1302,12 +1208,8 @@ fun App() {
                                 currentLayout = layout
                                 rulesState = rules
                                 selectedPresetIndex = -1
-                                customTipOffset = null
-                                speedUnitsOverride = null
-                                customPocketOverride = null
-                                sandboxTargetBallNumber = null
                                 hasActiveSession = true
-                                selectedPlanIndex = 0
+                                planRestartToken += 1
                                 selectedShotIndex = 0
                                 navigateToTab(PrimaryTab.PLAN)
                             },
@@ -1329,7 +1231,7 @@ fun App() {
                                     newSpec = profile.toEffectiveTableSpec(),
                                 )
                                 hasActiveSession = true
-                                selectedPlanIndex = 0
+                                planRestartToken += 1
                                 selectedShotIndex = 0
                                 navigateToTab(PrimaryTab.PLAN)
                             },
@@ -1343,6 +1245,7 @@ fun App() {
                                 currentLayout = layout
                                 rulesState = rules
                                 selectedPresetIndex = -1
+                                planRestartToken += 1
                                 hasActiveSession = true
                                 navigateToTab(PrimaryTab.PLAN)
                             },
@@ -1358,6 +1261,15 @@ fun App() {
                             playerProfile = playerProfile,
                             focusedDestination = ToolFocusDestination.SCOREKEEPER_AND_CLOCK,
                             onLoadLayoutIntoPlanner = { _, _ -> navigateToTab(PrimaryTab.PLAN) },
+                        )
+
+                        ActiveRoute.AboutLegal -> AboutLegalScreen(
+                            onOpenDocument = { activeRoute = ActiveRoute.LegalDocumentView(it) },
+                        )
+
+                        is ActiveRoute.LegalDocumentView -> LegalDocumentScreen(
+                            document = r.document,
+                            onOpenDocument = { activeRoute = ActiveRoute.LegalDocumentView(it) },
                         )
 
                         ActiveRoute.PlayerProfileAndBallSet -> PlayerProfileScreen(
@@ -1403,13 +1315,8 @@ fun App() {
                         chosen.layout
                     }
                     rulesState = chosen.rulesState
-                    customTipOffset = null
-                    speedUnitsOverride = null
-                    customPocketOverride = null
-                    sandboxTargetBallNumber = null
-                    focusedStepIndex = 0
                     hasActiveSession = true
-                    selectedPlanIndex = 0
+                    planRestartToken += 1
                     selectedShotIndex = 0
                 },
                 onStartBlankTable = {
@@ -1423,32 +1330,38 @@ fun App() {
                         ),
                     )
                     selectedPresetIndex = -1
-                    customTipOffset = null
-                    speedUnitsOverride = null
-                    customPocketOverride = null
-                    sandboxTargetBallNumber = null
-                    focusedStepIndex = 0
+                    planRestartToken += 1
                     hasActiveSession = true
                 },
+                onSelectPocketPreset = { preset ->
+                    // Session only: the pocket cut is not part of the saved setup.
+                    currentLayout = currentLayout.copy(table = currentLayout.table.withPocketPreset(preset))
+                    hasActiveSession = true
+                    planRestartToken += 1
+                    selectedShotIndex = 0
+                },
                 onResizeTable = { newSpec ->
-                    val resizedSpec = newSpec.withClothParams(currentLayout.table.cloth)
+                    val keptPocketPreset = pocketPresetOf(currentLayout.table)
+                    val clothSpec = newSpec.withClothParams(currentLayout.table.cloth)
+                    val resizedSpec = if (keptPocketPreset != null && keptPocketPreset != PocketPreset.SNOOKER &&
+                        PocketPreset.forBallRadius(clothSpec.ballRadiusMeters) != PocketPreset.SNOOKER
+                    ) {
+                        clothSpec.withPocketPreset(keptPocketPreset)
+                    } else {
+                        clothSpec
+                    }
                     activeTableProfileId = null
                     currentLayout = SampleLayouts.resizeTableLayout(
                         layout = currentLayout,
                         newSpec = resizedSpec,
                     )
-                    sandboxTargetBallNumber = null
-                    focusedStepIndex = 0
                     hasActiveSession = true
                     persistSetupPreferences(tableSpec = resizedSpec)
                 },
                 onSelectRules = { nextRules ->
                     rulesState = nextRules
-                    customPocketOverride = null
-                    sandboxTargetBallNumber = null
-                    focusedStepIndex = 0
                     hasActiveSession = true
-                    selectedPlanIndex = 0
+                    planRestartToken += 1
                     selectedShotIndex = 0
                     persistSetupPreferences(rules = nextRules)
                 },
@@ -1462,14 +1375,10 @@ fun App() {
                 ballSet = ballSetProfile,
                 onToggleBall = { num ->
                     currentLayout = SampleLayouts.toggleObjectBall(currentLayout, num)
-                    focusedStepIndex = 0
-                    customPocketOverride = null
-                    sandboxTargetBallNumber = null
                     hasActiveSession = true
                 },
                 onAddMissingCueBall = {
                     currentLayout = SampleLayouts.addMissingBall(currentLayout, 0)
-                    focusedStepIndex = 0
                     hasActiveSession = true
                 },
                 onRequestReset = { showResetConfirmDialog = true },
@@ -1484,9 +1393,9 @@ fun App() {
                 selectedHorizon = selectedHorizon,
                 onSelectHorizon = {
                     selectedHorizon = it
-                    selectedPlanIndex = 0
+                    planRestartToken += 1
                 },
-                speedUnitsOverride = speedUnitsOverride,
+                speedUnitsOverride = editedSpeedUnits,
                 onSelectSpeedUnits = ::handleUpdateSandboxSpeed,
                 showHeatZone = showHeatZone,
                 onToggleHeatZone = { showHeatZone = !showHeatZone },
@@ -1508,7 +1417,7 @@ fun App() {
 
         if (showQuickSpinSheet) {
             QuickSpinSheet(
-                customTipOffset = customTipOffset,
+                customTipOffset = editedTip,
                 onSelectTipOffset = ::handleUpdateSandboxTip,
                 onDismiss = { showQuickSpinSheet = false },
             )
@@ -1576,6 +1485,7 @@ fun RunoutPracticeScreen(
     isPlanning: Boolean,
     planningReadiness: PlanningReadinessResult,
     rankedShots: List<ShotRecommendation>,
+    fallbackAdvice: FallbackAdvice?,
     selectedShotIndex: Int,
     onSelectShot: (Int) -> Unit,
     selectedShot: ShotRecommendation?,
@@ -1585,16 +1495,13 @@ fun RunoutPracticeScreen(
     showLandingCloud: Boolean,
     customTipOffset: TipOffset?,
     onUpdateCustomTip: (TipOffset?) -> Unit,
-    runoutPlans: List<RunoutPlan>,
-    selectedPlanIndex: Int,
-    onSelectPlan: (Int) -> Unit,
-    activePlan: RunoutPlan?,
-    focusedStepIndex: Int,
+    rollingPlan: RollingPlanState?,
+    onSelectAlternative: (RunoutPlan) -> Unit,
     showAllStepsOverlay: Boolean,
     onPrevStep: () -> Unit,
     onNextStep: () -> Unit,
     onToggleAllStepsOverlay: () -> Unit,
-    onApplyCurrentStepToTable: () -> Unit,
+    onResetStep: () -> Unit,
     playablePockets: List<PocketId>,
     customPocketOverride: PocketId?,
     onSelectPocketOverride: (PocketId?) -> Unit,
@@ -1612,10 +1519,13 @@ fun RunoutPracticeScreen(
     onUpdateClothParams: (ClothParams) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val activeStep = activePlan?.steps?.getOrNull(
-        focusedStepIndex.coerceIn(0, (activePlan.steps.size - 1).coerceAtLeast(0)),
-    )
+    val activePlan = rollingPlan?.window
+    val activeStep = rollingPlan?.focusStep
     val activeTargetPocketId = activeStep?.pocketId ?: selectedShot?.pocket?.id
+    // The plan from the focused shot, then the other routes the planner found for that shot.
+    val routePlans = remember(rollingPlan) {
+        listOfNotNull(rollingPlan?.window) + rollingPlan?.alternatives.orEmpty()
+    }
 
     Column(
         modifier = modifier
@@ -1684,34 +1594,39 @@ fun RunoutPracticeScreen(
                         onDragStateChanged = onDragStateChanged,
                         visibleSpins = visibleSpins,
                         activeRunoutPlan = activePlan,
-                        focusedStepIndex = if (showAllStepsOverlay && focusedStepIndex == 0) null else focusedStepIndex,
+                        // The window starts at the focused shot: one line set in Step mode, all of it in All mode.
+                        focusedStepIndex = if (showAllStepsOverlay) null else 0,
                         isDraggingBall = isDraggingBall,
-                        availablePockets = if (focusedStepIndex == 0 && planningReadiness.isReady) playablePockets else emptyList(),
-                        onSelectPocket = if (focusedStepIndex == 0 && planningReadiness.isReady) { pocketId ->
+                        availablePockets = if (planningReadiness.isReady) playablePockets else emptyList(),
+                        onSelectPocket = if (planningReadiness.isReady) { pocketId ->
                             onSelectPocketOverride(if (customPocketOverride == pocketId) null else pocketId)
                         } else null,
                         onTapCueBall = if (planningReadiness.isReady) onToggleCueSandbox else null,
                         highlightCueBall = showCueSandboxPanel || hasSandboxOverrides,
-                        showHeatZone = displayMode == AppDisplayMode.PRO && showHeatZone && focusedStepIndex == 0,
+                        showHeatZone = displayMode == AppDisplayMode.PRO && showHeatZone,
                         showLandingCloud = if (displayMode == AppDisplayMode.SIMPLE) true else showLandingCloud,
+                        displayMode = displayMode,
+                        onToggleFullscreen = onEnterFullscreen,
+                        fallbackAdvice = fallbackAdvice,
                     )
 
                     if (planningReadiness.isReady) {
                         StepPlaybackControlBar(
-                            activePlan = activePlan,
+                            rollingPlan = rollingPlan,
                             selectedShot = selectedShot,
                             ballSetProfile = ballSetProfile,
-                            focusedStepIndex = focusedStepIndex,
+                            tableSpec = currentLayout.table,
                             showAllStepsOverlay = showAllStepsOverlay,
                             isPlanning = isPlanning,
                             onPrevStep = onPrevStep,
                             onNextStep = onNextStep,
                             onToggleAllSteps = onToggleAllStepsOverlay,
-                            onApplyCurrentStepToTable = if (focusedStepIndex > 0) onApplyCurrentStepToTable else null,
+                            onResetStep = onResetStep,
                             onTapCueHitGuide = onToggleCueSandbox,
+                            fallbackAdvice = fallbackAdvice,
                         )
 
-                        if (focusedStepIndex == 0 && (playablePockets.size > 1 || customPocketOverride != null)) {
+                        if (rollingPlan != null && (playablePockets.size > 1 || customPocketOverride != null)) {
                             PocketSelectorStrip(
                                 playablePockets = playablePockets,
                                 activePocketId = activeTargetPocketId,
@@ -1776,7 +1691,7 @@ fun RunoutPracticeScreen(
                             text = when {
                                 isDraggingBall -> "Release ball to re-plan"
                                 isPlanning -> "Updating runout plan…"
-                                playablePockets.size > 1 && focusedStepIndex == 0 ->
+                                playablePockets.size > 1 && rollingPlan != null ->
                                     "Drag balls • Tap white ball for spin & speed • Tap pocket to switch"
                                 else -> "Drag balls • Tap white ball for spin & speed"
                             },
@@ -1830,27 +1745,30 @@ fun RunoutPracticeScreen(
             return@Column
         }
 
-        // 3. Hero Recommended Shot Section (Simple vs. Pro)
-        if (displayMode == AppDisplayMode.SIMPLE) {
-            SimpleModeShotSection(
-                activePlan = activePlan,
-                focusedStepIndex = focusedStepIndex,
-                fallbackShot = selectedShot,
-                allPlans = runoutPlans,
-                selectedPlanIndex = selectedPlanIndex,
-                onSelectPlan = onSelectPlan,
+        // 3. Hero Recommended Shot Section (Simple vs. Pro); a table with no direct pot gets the fallback card instead.
+        if (fallbackAdvice != null && rollingPlan?.window == null) {
+            FallbackAdviceCard(
+                advice = fallbackAdvice,
+                displayMode = displayMode,
                 ballSet = ballSetProfile,
+            )
+        } else if (displayMode == AppDisplayMode.SIMPLE) {
+            SimpleModeShotSection(
+                rollingPlan = rollingPlan,
+                fallbackShot = selectedShot,
+                allPlans = routePlans,
+                onSelectRoute = { index -> if (index > 0) routePlans.getOrNull(index)?.let(onSelectAlternative) },
+                ballSet = ballSetProfile,
+                tableSpec = currentLayout.table,
                 onOpenQuickSpinSheet = onOpenQuickSpinSheet,
                 onToggleCueSandbox = onToggleCueSandbox,
             )
         } else {
             ProModeStrategySection(
-                activePlan = activePlan,
-                focusedStepIndex = focusedStepIndex,
+                rollingPlan = rollingPlan,
                 selectedShot = selectedShot,
-                runoutPlans = runoutPlans,
-                selectedPlanIndex = selectedPlanIndex,
-                onSelectPlan = onSelectPlan,
+                runoutPlans = routePlans,
+                onSelectRoute = { index -> if (index > 0) routePlans.getOrNull(index)?.let(onSelectAlternative) },
                 rankedShots = rankedShots,
                 selectedShotIndex = selectedShotIndex,
                 onSelectShot = onSelectShot,
@@ -1861,34 +1779,148 @@ fun RunoutPracticeScreen(
                 onUpdateCustomTip = onUpdateCustomTip,
                 onOpenQuickSpinSheet = onOpenQuickSpinSheet,
                 onToggleCueSandbox = onToggleCueSandbox,
-                clothParams = currentLayout.table.cloth,
+                tableSpec = currentLayout.table,
                 onUpdateClothParams = onUpdateClothParams,
             )
         }
     }
 }
 
+/** Title of the fallback card: the kind of shot and the balls it involves. */
+internal fun fallbackTitle(advice: FallbackAdvice): String {
+    val balls = advice.targetBallNumbers
+    return when (advice.kind) {
+        FallbackKind.COMBINATION ->
+            "Combination: #${balls.first()} into #${balls.getOrNull(1)} -> ${advice.pocketId?.displayName ?: "pocket"}"
+        FallbackKind.KICK -> "Kick: one cushion to #${balls.first()}"
+        FallbackKind.SAFETY -> "Safety: hit #${balls.first()}, leave no pot"
+    }
+}
+
+/** What the fallback card's chance figure measures, in a few words. */
+internal fun fallbackChanceLabel(kind: FallbackKind): String = when (kind) {
+    FallbackKind.COMBINATION -> "Make"
+    FallbackKind.KICK -> "Legal hit"
+    FallbackKind.SAFETY -> "No pot left"
+}
+
+/**
+ * The card shown in place of the recommended shot when the legal ball has no direct pot: the kind of shot, one
+ * sentence of reasoning and three data points (speed, spin, chance); Pro mode adds the numbers behind them.
+ */
+@Composable
+private fun FallbackAdviceCard(
+    advice: FallbackAdvice,
+    displayMode: AppDisplayMode,
+    ballSet: BallSetProfile,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element)) {
+        RunoutSectionHeader(title = "No Direct Pot")
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            border = BorderStroke(1.2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(RunoutSpacing.Margin),
+                verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    BallNumberBadge(
+                        ballNumber = advice.targetBallNumbers.first(),
+                        ballSet = ballSet,
+                        sizeDp = 24.dp,
+                    )
+                    Text(
+                        text = fallbackTitle(advice),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                Text(
+                    text = advice.reason,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "Speed: ${plainSpeedLabel(advice.speedUnits)} (${PlayerProfile.formatSpeedUnits(advice.speedUnits)}/10)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+                Text(
+                    text = "Spin: ${plainTipLabel(advice.tip)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "${fallbackChanceLabel(advice.kind)}: ${formatPercentInt(advice.outcomeProbability)}%",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                if (displayMode == AppDisplayMode.PRO) {
+                    Text(
+                        text = fallbackProDetails(advice),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** The numbers behind the fallback card, for Pro mode. */
+internal fun fallbackProDetails(advice: FallbackAdvice): String {
+    val parts = mutableListOf(
+        "${fallbackChanceLabel(advice.kind)} ${formatOneDecimal(advice.outcomeProbability * 100.0)}%",
+        "speed ${PlayerProfile.formatSpeedUnits(advice.speedUnits)}/10",
+        "tip side ${formatTwoDecimals(advice.tip.sideRatio)} R, height ${formatTwoDecimals(advice.tip.verticalRatio)} R",
+    )
+    advice.cushionPoint?.let { parts += "cushion point x ${formatTwoDecimals(it.x)} m, y ${formatTwoDecimals(it.y)} m" }
+    advice.cueBallRest?.let { parts += "cue ball stops at x ${formatTwoDecimals(it.x)} m, y ${formatTwoDecimals(it.y)} m" }
+    return parts.joinToString(" · ")
+}
+
+private fun formatTwoDecimals(value: Double): String {
+    val hundredths = (value * 100.0).roundToInt()
+    val sign = if (hundredths < 0) "-" else ""
+    val magnitude = abs(hundredths)
+    return "$sign${magnitude / 100}.${(magnitude % 100).toString().padStart(2, '0')}"
+}
+
 @Composable
 private fun SimpleModeShotSection(
-    activePlan: RunoutPlan?,
-    focusedStepIndex: Int,
+    rollingPlan: RollingPlanState?,
     fallbackShot: ShotRecommendation?,
     allPlans: List<RunoutPlan>,
-    selectedPlanIndex: Int,
-    onSelectPlan: (Int) -> Unit,
+    onSelectRoute: (Int) -> Unit,
     ballSet: BallSetProfile,
+    tableSpec: TableSpec,
     onOpenQuickSpinSheet: () -> Unit,
     onToggleCueSandbox: () -> Unit = onOpenQuickSpinSheet,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element)) {
+        val activePlan = rollingPlan?.window
+        val steps = activePlan?.steps.orEmpty()
+        val activeStep = steps.firstOrNull()
+        val nextStep = steps.getOrNull(1)
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            val steps = activePlan?.steps.orEmpty()
-            val safeStepIdx = focusedStepIndex.coerceIn(0, (steps.size - 1).coerceAtLeast(0))
             RunoutSectionHeader(
-                title = if (steps.size > 1) "Shot ${safeStepIdx + 1} of ${steps.size}" else "Recommended Shot",
+                title = if (activeStep != null) "Shot ${activeStep.stepNumber}" else "Recommended Shot",
                 modifier = Modifier.weight(1f),
             )
             GlossaryInfoButton(
@@ -1897,10 +1929,6 @@ private fun SimpleModeShotSection(
             )
         }
 
-        val steps = activePlan?.steps.orEmpty()
-        val safeStepIdx = if (steps.isNotEmpty()) focusedStepIndex.coerceIn(0, steps.lastIndex) else 0
-        val activeStep = steps.getOrNull(safeStepIdx)
-        val nextStep = steps.getOrNull(safeStepIdx + 1)
         if (activePlan != null && activeStep != null) {
             val speedWord = plainSpeedLabel(activeStep.recommendedSpeedUnits)
             val speedText = PlayerProfile.formatSpeedUnits(activeStep.recommendedSpeedUnits)
@@ -2058,14 +2086,16 @@ private fun SimpleModeShotSection(
                             rank = index + 1,
                             plan = plan,
                             ballSet = ballSet,
-                            isSelected = index == selectedPlanIndex,
-                            onClick = { onSelectPlan(index) },
+                            isSelected = index == 0,
+                            onClick = { onSelectRoute(index) },
                         )
                     }
                 }
             }
         } else if (fallbackShot != null) {
-            val fallbackTip = TipOffset.fromPreset(fallbackShot.recommendedSpin)
+            // The tip that gives the recommended spin state at the object ball for this distance and speed.
+            val solvedTip = fallbackShot.solvedTip(tableSpec)
+            val fallbackTip = solvedTip ?: TipOffset()
             val fallbackTightness = computeShotTightness(fallbackShot)
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -2099,7 +2129,12 @@ private fun SimpleModeShotSection(
                         )
                         val fallbackSpeedText = PlayerProfile.formatSpeedUnits(fallbackShot.recommendedSpeedUnits)
                         Text(
-                            text = "Speed: ${plainSpeedLabel(fallbackShot.recommendedSpeedUnits)} ($fallbackSpeedText/10) • Spin: ${plainTipLabel(fallbackTip)}",
+                            text = "Speed: ${plainSpeedLabel(fallbackShot.recommendedSpeedUnits)} ($fallbackSpeedText/10) • Spin: " +
+                                if (solvedTip != null) {
+                                    plainTipLabel(solvedTip)
+                                } else {
+                                    "${impactStateWord(fallbackShot.recommendedSpin)} is out of reach at this speed"
+                                },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -2117,7 +2152,11 @@ private fun SimpleModeShotSection(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             ) {
                 Text(
-                    text = "No open legal pots found from this cue ball position. Try dragging balls or playing a safety.",
+                    text = if (rollingPlan?.isRackComplete == true) {
+                        "Rack complete. Every ball in the plan has been accepted. Press Prev to revisit a shot."
+                    } else {
+                        "No open legal pots found from this cue ball position. Try dragging balls or playing a safety."
+                    },
                     modifier = Modifier.padding(RunoutSpacing.Margin),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2129,12 +2168,10 @@ private fun SimpleModeShotSection(
 
 @Composable
 private fun ProModeStrategySection(
-    activePlan: RunoutPlan?,
-    focusedStepIndex: Int,
+    rollingPlan: RollingPlanState?,
     selectedShot: ShotRecommendation?,
     runoutPlans: List<RunoutPlan>,
-    selectedPlanIndex: Int,
-    onSelectPlan: (Int) -> Unit,
+    onSelectRoute: (Int) -> Unit,
     rankedShots: List<ShotRecommendation>,
     selectedShotIndex: Int,
     onSelectShot: (Int) -> Unit,
@@ -2145,9 +2182,11 @@ private fun ProModeStrategySection(
     onUpdateCustomTip: (TipOffset?) -> Unit,
     onOpenQuickSpinSheet: () -> Unit,
     onToggleCueSandbox: () -> Unit = onOpenQuickSpinSheet,
-    clothParams: ClothParams,
+    tableSpec: TableSpec,
     onUpdateClothParams: (ClothParams) -> Unit,
 ) {
+    val activePlan = rollingPlan?.window
+    val clothParams = tableSpec.cloth
     Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Section)) {
         // Hero Runout / Shot Card
         Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element)) {
@@ -2180,12 +2219,12 @@ private fun ProModeStrategySection(
                     if (activePlan != null && activePlan.steps.isNotEmpty()) {
                         ActivePlanReadoutBar(
                             plan = activePlan,
-                            focusedStepIndex = focusedStepIndex,
                             onTapCueHitGuide = onToggleCueSandbox,
                         )
                     } else if (selectedShot != null) {
                         SelectedShotReadoutBar(
                             shot = selectedShot,
+                            tableSpec = tableSpec,
                             onTapCueHitGuide = onToggleCueSandbox,
                         )
                     } else {
@@ -2225,7 +2264,8 @@ private fun ProModeStrategySection(
         ) {
             CueTipEnglishCard(
                 customTipOffset = customTipOffset,
-                recommendedStep = activePlan?.steps?.firstOrNull(),
+                recommendedStep = rollingPlan?.focusStep,
+                tableSpec = tableSpec,
                 onUpdateCustomTip = onUpdateCustomTip,
             )
         }
@@ -2256,8 +2296,8 @@ private fun ProModeStrategySection(
                         rank = index + 1,
                         plan = plan,
                         ballSet = ballSetProfile,
-                        isSelected = index == selectedPlanIndex,
-                        onClick = { onSelectPlan(index) },
+                        isSelected = index == 0,
+                        onClick = { onSelectRoute(index) },
                     )
                 }
             }
@@ -2441,13 +2481,16 @@ private fun PlanningPausedCard(
 @Composable
 private fun SelectedShotReadoutBar(
     shot: ShotRecommendation,
+    tableSpec: TableSpec,
     onTapCueHitGuide: (() -> Unit)? = null,
 ) {
     val cutDeg = formatOneDecimal(abs(radiansToDegrees(shot.aim.cutAngleRadians)))
     val cueDistText = formatDistanceMeters(shot.aim.cueToGhostDistanceMeters)
     val obDistText = formatDistanceMeters(shot.aim.objectToPocketDistanceMeters)
     val scratchSpins = shot.cueBallPaths.values.filter { it.hitsScratchPocket != null }
-    val recommendedTip = TipOffset.fromPreset(shot.recommendedSpin)
+    // The tip that gives the recommended spin state at the object ball for this distance and speed, if one does.
+    val solvedTip = shot.solvedTip(tableSpec)
+    val recommendedTip = solvedTip ?: TipOffset()
     val tightness = computeShotTightness(shot)
 
     Row(
@@ -2490,10 +2533,14 @@ private fun SelectedShotReadoutBar(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "Spin: ${plainTipLabel(recommendedTip)} • ${shotTightnessLabel(tightness)} sweet spot",
+                text = if (solvedTip != null) {
+                    "Spin: ${plainTipLabel(solvedTip)} • ${shotTightnessLabel(tightness)} sweet spot"
+                } else {
+                    "Spin: ${impactStateWord(shot.recommendedSpin)} at the ball is out of reach at this speed"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.primary,
+                color = if (solvedTip != null) MaterialTheme.colorScheme.primary else RunoutColors.WarningAmber,
             )
             if (shot.nextTargetBallNumber != null) {
                 Text(
@@ -2525,7 +2572,7 @@ private fun SpinPathToggleRow(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
-            text = "Cue-Ball Post-Impact Paths",
+            text = "Cue-Ball Paths by Spin at the Object Ball",
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -2539,9 +2586,9 @@ private fun SpinPathToggleRow(
                 val isVisible = spin in visibleSpins
                 val color = spinColor(spin)
                 val label = when (spin) {
-                    CueBallSpinPreset.STUN -> "STUN (90°)"
-                    CueBallSpinPreset.FOLLOW -> "FOLLOW (30°)"
-                    CueBallSpinPreset.DRAW -> "DRAW"
+                    CueBallSpinPreset.STUN -> "STUN at ball (90°)"
+                    CueBallSpinPreset.FOLLOW -> "ROLL at ball (30°)"
+                    CueBallSpinPreset.DRAW -> "DRAW at ball"
                 }
                 val suffix = if (spin == recommendedSpin) " ★" else ""
                 FilterChip(
@@ -2643,15 +2690,15 @@ private fun ShotRecommendationCard(
 @Composable
 private fun ActivePlanReadoutBar(
     plan: RunoutPlan,
-    focusedStepIndex: Int = 0,
     onTapCueHitGuide: (() -> Unit)? = null,
 ) {
     val steps = plan.steps
     if (steps.isEmpty()) return
-    val safeIdx = focusedStepIndex.coerceIn(0, steps.lastIndex)
-    val activeStep = steps[safeIdx]
-    val nextStep = steps.getOrNull(safeIdx + 1)
+    // The window starts at the focused shot.
+    val activeStep = steps.first()
+    val nextStep = steps.getOrNull(1)
     val clearPct = formatPercentOneDecimal(plan.cumulativeRunoutProbability)
+    val windowLabel = if (steps.size == 1) "This shot" else "Next ${steps.size} shots"
     val spreadCm = (activeStep.uncertainty.landingSpreadRadiusMeters * METERS_TO_CM).roundToInt()
     val cutDeg = formatOneDecimal(abs(radiansToDegrees(activeStep.compensatedAim.geometricAim.cutAngleRadians)))
     val tightness = computeShotTightness(activeStep, nextStep)
@@ -2673,7 +2720,7 @@ private fun ActivePlanReadoutBar(
                 modifier = Modifier.weight(1f),
             )
             Text(
-                text = "Run-Out: $clearPct%",
+                text = "$windowLabel: $clearPct%",
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.secondary,
@@ -2747,6 +2794,7 @@ private fun ActivePlanReadoutBar(
 private fun CueTipEnglishCard(
     customTipOffset: TipOffset?,
     recommendedStep: PlannedShotStep?,
+    tableSpec: TableSpec,
     onUpdateCustomTip: (TipOffset?) -> Unit,
 ) {
     val displayedTip = customTipOffset ?: recommendedStep?.recommendedTip ?: TipOffset()
@@ -2792,13 +2840,13 @@ private fun CueTipEnglishCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (recommendedStep != null) {
-                        val pocketSpec = TableSpec.nineFootPool().pocketById(recommendedStep.pocketId)
+                        val pocketSpec = tableSpec.pocketById(recommendedStep.pocketId)
                         val transitionText = SpinPhysics.describeShotPowerAndSpin(
                             tip = displayedTip,
                             cueSpeedMps = recommendedStep.cueSpeedMps,
                             aim = recommendedStep.compensatedAim.geometricAim,
                             pocket = pocketSpec,
-                            table = TableSpec.nineFootPool(),
+                            table = tableSpec,
                             targetBallNumber = recommendedStep.targetBall.number,
                         )
                         Text(
@@ -2819,6 +2867,37 @@ private fun CueTipEnglishCard(
                     CompensationMetricRow("Swerve", "${formatSignedDegrees(compAim.swerveAngleRadians)}°")
                     CompensationMetricRow("Total Throw", "${formatSignedDegrees(compAim.totalThrowAngleRadians)}°")
                     CompensationMetricRow("Net Adjust", "${formatSignedDegrees(compAim.netCueAimAdjustmentRadians)}°", highlight = true)
+                }
+            }
+        }
+        if (recommendedStep != null) {
+            // Tips that give the spin state at the object ball for this shot's distance and speed. A state that no
+            // tip can give here (a stop shot that is too long or too soft) is shown but cannot be chosen.
+            val cueToGhost = recommendedStep.compensatedAim.geometricAim.cueToGhostDistanceMeters
+            val impactStates = listOf(
+                CueBallSpinPreset.STUN to "Stun at ball",
+                CueBallSpinPreset.FOLLOW to "Roll at ball",
+                CueBallSpinPreset.DRAW to "Draw at ball",
+            ).map { (state, label) ->
+                label to SpinPhysics.tipForImpactState(state, recommendedStep.cueSpeedMps, cueToGhost, tableSpec)
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                impactStates.forEach { (label, solved) ->
+                    val isSelected = solved != null && customTipOffset != null &&
+                        abs(customTipOffset.clampedSideRatio - solved.clampedSideRatio) < 0.02 &&
+                        abs(customTipOffset.clampedVerticalRatio - solved.clampedVerticalRatio) < 0.02
+                    FilterChip(
+                        selected = isSelected,
+                        enabled = solved != null,
+                        onClick = { if (solved != null) onUpdateCustomTip(solved) },
+                        modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
+                        label = { Text(if (solved != null) label else "$label (out of reach)") },
+                    )
                 }
             }
         }
@@ -3081,3 +3160,9 @@ private fun formatProblemReason(reason: ProblemBallReason): String = when (reaso
 }
 
 private fun formatTipDescription(tip: TipOffset): String = tip.describeSpinLabel(short = false)
+
+private fun impactStateWord(spin: CueBallSpinPreset): String = when (spin) {
+    CueBallSpinPreset.STUN -> "A stun hit"
+    CueBallSpinPreset.FOLLOW -> "A rolling hit"
+    CueBallSpinPreset.DRAW -> "A draw hit"
+}

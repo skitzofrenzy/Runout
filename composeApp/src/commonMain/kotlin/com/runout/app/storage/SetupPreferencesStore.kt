@@ -139,7 +139,27 @@ data class SavedSetupPreferences(
 interface SetupPreferencesStore {
     fun load(): SavedSetupPreferences?
     fun save(preferences: SavedSetupPreferences)
+
+    /** The terms version the person last accepted on this device, or null when they have not accepted any. */
+    fun loadAcceptedTermsVersion(): String?
+
+    /** Records that the person accepted the terms at [version]. */
+    fun saveAcceptedTermsVersion(version: String)
 }
+
+/**
+ * Keys used to remember the Terms of Use acceptance. They sit beside the setup keys in the same private storage.
+ */
+object TermsAcceptanceKeys {
+    const val KEY_TERMS_ACCEPTED: String = "terms_accepted"
+    const val KEY_TERMS_VERSION: String = "terms_accepted_version"
+}
+
+/**
+ * True when [storedVersion] is the current terms version, so the acknowledgement need not be shown again.
+ */
+fun isTermsAcceptanceCurrent(storedVersion: String?, currentVersion: String): Boolean =
+    storedVersion != null && storedVersion == currentVersion
 
 @Composable
 expect fun rememberSetupPreferencesStore(): SetupPreferencesStore

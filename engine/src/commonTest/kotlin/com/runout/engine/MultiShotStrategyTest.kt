@@ -10,6 +10,8 @@ import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.CueBallSpinPreset
+import com.runout.engine.physics.GhostBallAiming
+import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.physics.TrajectoryPath
 import com.runout.engine.planner.HeatZoneGenerator
@@ -198,7 +200,8 @@ class MultiShotStrategyTest {
             "Path next to the shot's own target ball is not a breakout",
         )
 
-        val farAway = nearBall6.copy(points = listOf(Vec2(1.5, 1.0), Vec2(2.0, 1.1)))
+        val farPath = listOf(Vec2(1.5, 1.0), Vec2(2.0, 1.1))
+        val farAway = nearBall6.copy(points = farPath, sampledPoints = farPath)
         assertNull(ProblemBallAnalyzer.checkTrajectoryBreakout(farAway, 7, PocketId.FOOT_LEFT, problems, r))
     }
 
@@ -330,6 +333,47 @@ class MultiShotStrategyTest {
     }
 
     @Test
+    fun noPlannedStepScratchesOnItsNominalPathOrDropsAnotherBall() {
+        val nineBall = GameRulesState(GameType.NINE_BALL)
+        for (layout in listOf(openNineBallLayout(), PlannerScenarios.photoOne, PlannerScenarios.photoTwo, PlannerScenarios.photoThree)) {
+            for (plan in MultiShotPlanner.planRunout(layout, nineBall, horizonShots = 3)) {
+                for (step in plan.steps) {
+                    assertNull(step.uncertainty.nominalTrajectory.hitsScratchPocket, "Step ${step.stepNumber} scratches")
+                    assertTrue(step.uncertainty.targetBallPotted, "Step ${step.stepNumber} pots its ball")
+                    assertTrue(step.disturbedBalls.none { it.pocketedIn != null }, "Step ${step.stepNumber} counts on a carom")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun firstShotsThatDoNotPotRankBelowEveryPlanThatPots() {
+        fun pots(plan: com.runout.engine.planner.RunoutPlan): Boolean = plan.steps.first().uncertainty.let {
+            it.targetBallPotted && it.nominalTrajectory.hitsScratchPocket == null
+        }
+        val plans = MultiShotPlanner.planRunout(openNineBallLayout(), horizonShots = 2, allowHighScratchFirstShot = true)
+        assertTrue(plans.isNotEmpty() && pots(plans.first()), "A plan that pots comes first")
+        assertTrue(plans.dropWhile { pots(it) }.none { pots(it) }, "Every plan that pots ranks above every plan that does not")
+
+        // A stroke too soft to reach the ball is still returned, so its result can be shown, but nothing follows it.
+        val soft = MultiShotPlanner.planRunout(
+            openNineBallLayout(), horizonShots = 2, allowHighScratchFirstShot = true,
+            customFirstShotSpeedUnits = 0.5, customFirstShotTargetBallNumber = 1,
+        )
+        assertTrue(soft.isNotEmpty())
+        assertTrue(soft.all { it.steps.size == 1 && !pots(it) })
+    }
+
+    @Test
+    fun planningIsDeterministic() {
+        fun summary(layout: TableLayout) = MultiShotPlanner.planRunout(layout, horizonShots = 3).map { plan ->
+            plan.expectedValueScore to plan.steps.map { listOf(it.targetBall.number, it.pocketId, it.recommendedSpeedUnits, it.recommendedTip) }
+        }
+        assertEquals(summary(openNineBallLayout()), summary(openNineBallLayout()))
+        assertEquals(summary(PlannerScenarios.photoOne), summary(PlannerScenarios.photoOne))
+    }
+
+    @Test
     fun planRunoutHandlesDegenerateLayouts() {
         assertTrue(MultiShotPlanner.planRunout(layoutOf(ball(1, 1.0, 0.6))).isEmpty(), "No cue ball")
         assertTrue(MultiShotPlanner.planRunout(layoutOf(ball(0, 1.0, 0.6))).isEmpty(), "No object balls")
@@ -445,16 +489,38 @@ class MultiShotStrategyTest {
 
     @Test
     fun easyOpenLeaveScoresSignificantlyHigherThanDemandingMultiRailDrawLeave() {
+        // The 9 sits straight in line between where the stun leaves the cue ball (about (2.23, 0.25), a near-full hit)
+        // and the foot-right pocket. (From (2.02, 0.90) it would be a 26° side-pocket pot or a very thin corner cut.)
         val easyLayout = layoutOf(
             ball(0, 1.92, 0.60),
             ball(1, 2.28, 0.24),
-            ball(9, 2.02, 0.90),
+            ball(9, 2.35, 0.68),
+        )
+        // The easy leave is a stun hit over the short 0.45 m to the object ball: the tip that gives no spin at contact
+        // at this stroke speed (a centre-ball hit would already be rolling by then).
+        val easySpeedUnits = 5.0
+        val easyGhostDistance = GhostBallAiming.computeAimGeometry(
+            cueBall = easyLayout.cueBall()!!,
+            objectBall = easyLayout.ballByNumber(1)!!,
+            pocket = table.pocketById(PocketId.FOOT_LEFT),
+            otherBalls = easyLayout.balls,
+            table = table,
+        ).cueToGhostDistanceMeters
+        val easyStunTip = TipOffset(
+            verticalRatio = assertNotNull(
+                SpinPhysics.verticalTipRatioForImpactSpin(
+                    0.0, PlayerProfile().speedForUnits(easySpeedUnits), easyGhostDistance, table,
+                ),
+            ),
         )
         val easyPlan = assertNotNull(
             MultiShotPlanner.planRunout(
                 layout = easyLayout,
                 rulesState = GameRulesState(GameType.NINE_BALL),
                 horizonShots = 2,
+                customFirstShotTip = easyStunTip,
+                customFirstShotSpeedUnits = easySpeedUnits,
+                customFirstShotTargetBallNumber = 1,
             ).firstOrNull(),
         )
         val easyStep = easyPlan.steps.first()

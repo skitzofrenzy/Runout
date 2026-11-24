@@ -77,8 +77,8 @@ class ShotAnimationTimeline(
 
     private val postPolyline: List<Vec2> = buildList {
         add(ghostPos)
-        if (cueBallTrajectory.points.size >= 2) {
-            for (pt in cueBallTrajectory.points.drop(1)) {
+        if (cueBallTrajectory.sampledPoints.size >= 2) {
+            for (pt in cueBallTrajectory.sampledPoints.drop(1)) {
                 if (last().distanceTo(pt) > 1e-9) {
                     add(pt)
                 }
@@ -160,7 +160,9 @@ class ShotAnimationTimeline(
         val pocketed = mutableSetOf<Int>()
         val safeObjDuration = objectPocketDurationSeconds.coerceAtLeast(1e-6)
         val isTargetPocketed = tPost >= safeObjDuration - 1e-9
-        val objDist = targetBall.position.distanceTo(pocket.center)
+        // The object ball runs to the pocket's aim point on the mouth line and drops into the hole behind it.
+        val objectTarget = compensatedAim.geometricAim.pocketAimPos
+        val objDist = targetBall.position.distanceTo(objectTarget)
         val targetPos: Vec2?
         val targetSpeed: Double
         val traveledObjectPoints: List<Vec2>
@@ -169,11 +171,11 @@ class ShotAnimationTimeline(
             pocketed += targetBall.number
             targetPos = null
             targetSpeed = 0.0
-            traveledObjectPoints = listOf(targetBall.position, pocket.center)
+            traveledObjectPoints = listOf(targetBall.position, objectTarget, pocket.holeCenter)
         } else {
             val vObj = (tPost / safeObjDuration).coerceIn(0.0, 1.0)
             val sObj = (1.12 * vObj - 0.12 * vObj * vObj).coerceIn(0.0, 1.0)
-            val objPos = targetBall.position.lerp(pocket.center, sObj)
+            val objPos = targetBall.position.lerp(objectTarget, sObj)
             targetPos = objPos
             targetSpeed = if (phase == ShotAnimationPhase.BALLS_AT_REST) {
                 0.0
@@ -431,7 +433,7 @@ object ShotTimelineAnimator {
         val objectPocketDurationSeconds =
             (geom.objectToPocketDistanceMeters / objLaunchSpeed).coerceIn(0.15, 2.2)
 
-        val cueLeaveLength = computeCueLeaveLength(comp.compensatedGhostBallCenter, traj.points)
+        val cueLeaveLength = computeCueLeaveLength(comp.compensatedGhostBallCenter, traj.sampledPoints)
         val cueLeaveDurationSeconds = if (cueLeaveLength <= 1e-4) {
             0.20
         } else {

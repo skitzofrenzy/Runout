@@ -10,7 +10,9 @@ import com.runout.engine.vision.ArgbImageFrame
 import com.runout.engine.vision.BallIdentificationAndAssignment
 import com.runout.engine.vision.ClothHueCategory
 import com.runout.engine.vision.PerspectiveHomography
+import com.runout.engine.vision.RawFrameDetectionSummary
 import com.runout.engine.vision.RawImageTableDetector
+import com.runout.engine.vision.RawImageTableDetector.SyntheticCushionStyle
 import com.runout.engine.vision.Vec3
 import kotlin.math.abs
 import kotlin.math.sqrt
@@ -98,6 +100,7 @@ class RawImageTableDetectorTest {
             cameraPoseMeters = camera,
             clothCategory = cloth,
             ballSet = ballSet,
+            cushions = SyntheticCushionStyle.SHADED,
         )
         val summary = RawImageTableDetector.analyzeArgbFrame(frame)
         assertEquals(cloth, summary.clothSurface.category)
@@ -161,7 +164,7 @@ class RawImageTableDetectorTest {
     fun detectClothSurfaceClassifiesAllFourClothCategories() {
         val expectedHueRange = mapOf(
             ClothHueCategory.TOURNAMENT_BLUE to 175.0..255.0,
-            ClothHueCategory.SIMONIS_GREEN to 75.0..175.0,
+            ClothHueCategory.CLASSIC_GREEN to 75.0..175.0,
         )
         for (category in ClothHueCategory.values()) {
             val frame = RawImageTableDetector.renderSyntheticTablePhotoArgb(
@@ -195,21 +198,40 @@ class RawImageTableDetectorTest {
             layout = nineBallLayout(),
             quadCornersPx = angledQuad,
             cameraPoseMeters = camera,
-            clothCategory = ClothHueCategory.SIMONIS_GREEN,
+            clothCategory = ClothHueCategory.CLASSIC_GREEN,
         )
         val cloth = RawImageTableDetector.detectClothSurface(frame)
-        assertEquals(ClothHueCategory.SIMONIS_GREEN, cloth.category)
+        assertEquals(ClothHueCategory.CLASSIC_GREEN, cloth.category)
         assertTrue(RawImageTableDetector.isClothPixel(frame.pixelAt(300, 200), cloth))
         assertTrue(!RawImageTableDetector.isClothPixel(frame.pixelAt(2, 2), cloth), "Rail must not be cloth")
     }
 
     @Test
-    fun detectTableQuadCornersRecoversPerspectiveCornersWithinFourPixels() {
+    fun detectOuterClothQuadRecoversPerspectiveCornersWithinFourPixels() {
         for (quad in listOf(angledQuad, trapezoidQuad, greenGameQuad)) {
             val frame = RawImageTableDetector.renderSyntheticTablePhotoArgb(
                 layout = nineBallLayout(),
                 quadCornersPx = quad,
                 cameraPoseMeters = camera,
+            )
+            val cloth = RawImageTableDetector.detectClothSurface(frame)
+            val detected = RawImageTableDetector.detectOuterClothQuadCornersPx(frame, cloth)
+            assertEquals(4, detected.size)
+            for (i in 0 until 4) {
+                val error = detected[i].distanceTo(quad[i])
+                assertTrue(error < 4.0, "Corner $i error $error px: ${detected[i]} vs ${quad[i]}")
+            }
+        }
+    }
+
+    @Test
+    fun detectTableQuadCornersRecoversNoseCornersWithinFourPixels() {
+        for (quad in listOf(angledQuad, trapezoidQuad, greenGameQuad)) {
+            val frame = RawImageTableDetector.renderSyntheticTablePhotoArgb(
+                layout = nineBallLayout(),
+                quadCornersPx = quad,
+                cameraPoseMeters = camera,
+                cushions = SyntheticCushionStyle.SHADED,
             )
             val cloth = RawImageTableDetector.detectClothSurface(frame)
             val detected = RawImageTableDetector.detectTableQuadCornersPx(frame, cloth)
@@ -218,6 +240,124 @@ class RawImageTableDetectorTest {
                 val error = detected[i].distanceTo(quad[i])
                 assertTrue(error < 4.0, "Corner $i error $error px: ${detected[i]} vs ${quad[i]}")
             }
+        }
+    }
+
+    /** End-on broadcast-style view rendered from the default pose that orientation assumes. */
+    private val endOnRawQuad = listOf(
+        Vec2(210.0, 40.0),
+        Vec2(470.0, 40.0),
+        Vec2(560.0, 330.0),
+        Vec2(110.0, 330.0),
+    )
+
+    /** Landscape view from the head end, `[TL, TR, BR, BL]`. */
+    private val landscapeRawQuad = listOf(
+        Vec2(90.0, 70.0),
+        Vec2(550.0, 70.0),
+        Vec2(590.0, 300.0),
+        Vec2(50.0, 300.0),
+    )
+
+    /** Ball 2 frozen to the `y = W` rail; balls 0, 3 and 9 in open table. */
+    private fun frozenToRightRailLayout() = TableLayout(
+        table,
+        listOf(
+            ball(0, 0.80, 0.50),
+            ball(2, 1.40, table.widthMeters - table.ballRadiusMeters - 0.0005),
+            ball(3, 1.70, 0.80),
+            ball(9, 1.20, 0.70),
+        ),
+    )
+
+    private fun renderAtDefaultPose(
+        rawQuad: List<Vec2>,
+        cloth: ClothHueCategory,
+        cushions: SyntheticCushionStyle,
+    ) = RawImageTableDetector.orientQuadForHomography(rawQuad, table).let { (oriented, pose) ->
+        RawImageTableDetector.renderSyntheticTablePhotoArgb(
+            layout = frozenToRightRailLayout(),
+            quadCornersPx = oriented,
+            cameraPoseMeters = pose,
+            clothCategory = cloth,
+            ballRadiusPx = 9,
+            cushions = cushions,
+        )
+    }
+
+    /** Distance from the `y = W` cushion nose to the detected ball nearest ball 2, in metres. */
+    private fun frozenBallDistanceFromRightNose(summary: RawFrameDetectionSummary): Double {
+        val (oriented, pose) = RawImageTableDetector.orientQuadForHomography(summary.detectedQuadCornersPx, table)
+        val homography = PerspectiveHomography.fromTableQuad(oriented, table)
+        val truth = frozenToRightRailLayout().balls.first { it.number == 2 }.position
+        val mapped = summary.detectedCandidates
+            .map { homography.imageToBallCenterMeters(it.imageCenterPx, table.ballRadiusMeters, pose) }
+            .minByOrNull { it.distanceTo(truth) }
+        assertNotNull(mapped, "The frozen ball must be detected")
+        return table.widthMeters - mapped.y
+    }
+
+    @Test
+    fun noseQuadSitsAtTheCushionNosesNotAtTheClothCoveredCushionBacks() {
+        for (rawQuad in listOf(endOnRawQuad, landscapeRawQuad)) {
+            for (cloth in ClothHueCategory.values()) {
+                val frame = renderAtDefaultPose(rawQuad, cloth, SyntheticCushionStyle.SHADED)
+                val summary = RawImageTableDetector.analyzeArgbFrame(frame)
+                val label = "${if (rawQuad === endOnRawQuad) "end-on" else "landscape"} $cloth"
+                for (i in 0 until 4) {
+                    val noseError = summary.detectedQuadCornersPx[i].distanceTo(rawQuad[i])
+                    val outerError = summary.outerQuadCornersPx[i].distanceTo(rawQuad[i])
+                    assertTrue(noseError < 2.0, "$label nose corner $i off by $noseError px")
+                    // The cushions pass the cloth test, so the cloth outline is the cushion backs.
+                    assertTrue(outerError > 8.0, "$label outer corner $i only $outerError px out")
+                }
+                assertEquals(4, summary.quadEdges.size)
+                assertTrue(!summary.quadNeedsCornerReview, "$label: no side should need the fallback")
+                assertTrue(summary.quadEdges.all { it.confidence >= 0.8 }, "$label confidences ${summary.quadEdges}")
+
+                val distance = frozenBallDistanceFromRightNose(summary)
+                assertTrue(
+                    abs(distance - table.ballRadiusMeters) < 0.005,
+                    "$label frozen ball is ${distance * 1000} mm from the nose",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun cushionsMatchingTheBedFallBackToTheCushionWidthAndAskForReview() {
+        val frame = renderAtDefaultPose(endOnRawQuad, ClothHueCategory.TOURNAMENT_BLUE, SyntheticCushionStyle.CLOTH_MATCHED)
+        val summary = RawImageTableDetector.analyzeArgbFrame(frame)
+        assertTrue(summary.quadNeedsCornerReview)
+        assertTrue(summary.quadEdges.all { it.usedFallback && it.confidence < 0.5 }, "edges ${summary.quadEdges}")
+        for (i in 0 until 4) {
+            val error = summary.detectedQuadCornersPx[i].distanceTo(endOnRawQuad[i])
+            assertTrue(error < 10.0, "Fallback corner $i off by $error px")
+            assertTrue(summary.quadEdges[i].insetFromOuterPx > 2.0, "Side $i was not inset: ${summary.quadEdges[i]}")
+        }
+        val distance = frozenBallDistanceFromRightNose(summary)
+        assertTrue(
+            abs(distance - table.ballRadiusMeters) < 0.015,
+            "Fallback frozen ball is ${distance * 1000} mm from the nose",
+        )
+    }
+
+    @Test
+    fun clothMeetingTheRailWithoutAVisibleCushionIsTreatedAsHiddenCushions() {
+        val frame = RawImageTableDetector.renderSyntheticTablePhotoArgb(
+            layout = nineBallLayout(),
+            quadCornersPx = trapezoidQuad,
+            cameraPoseMeters = camera,
+        )
+        val cloth = RawImageTableDetector.detectClothSurface(frame)
+        val quads = RawImageTableDetector.detectTableQuads(frame, cloth)
+        assertTrue(quads.needsCornerReview)
+        for (i in 0 until 4) {
+            assertTrue(quads.outerQuadCornersPx[i].distanceTo(trapezoidQuad[i]) < 4.0)
+            assertTrue(
+                RawImageTableDetector.pointInQuad(quads.noseQuadCornersPx[i].x, quads.noseQuadCornersPx[i].y, trapezoidQuad, 2.0),
+                "Fallback corner $i must lie inside the cloth outline: ${quads.noseQuadCornersPx[i]}",
+            )
         }
     }
 
@@ -278,7 +418,7 @@ class RawImageTableDetectorTest {
         assertRoundTrip(
             layout = tvEightBallLayout(),
             quad = greenGameQuad,
-            cloth = ClothHueCategory.SIMONIS_GREEN,
+            cloth = ClothHueCategory.CLASSIC_GREEN,
             ballSet = BallSetProfile.tvTournamentPool(),
         )
     }
@@ -346,11 +486,11 @@ class RawImageTableDetectorTest {
         )
         val summary = RawImageTableDetector.analyzeArgbFrame(frame)
         assertEquals(ClothHueCategory.CHAMPIONSHIP_RED, summary.clothSurface.category)
-        assertEquals(4, summary.detectedQuadCornersPx.size)
+        assertEquals(4, summary.outerQuadCornersPx.size)
         for (i in 0 until 4) {
             assertTrue(
-                summary.detectedQuadCornersPx[i].distanceTo(steepRedQuad[i]) < 5.0,
-                "Steep red corner $i mismatch: ${summary.detectedQuadCornersPx[i]} vs ${steepRedQuad[i]}",
+                summary.outerQuadCornersPx[i].distanceTo(steepRedQuad[i]) < 5.0,
+                "Steep red corner $i mismatch: ${summary.outerQuadCornersPx[i]} vs ${steepRedQuad[i]}",
             )
         }
         assertEquals(4, summary.detectedCandidates.size)

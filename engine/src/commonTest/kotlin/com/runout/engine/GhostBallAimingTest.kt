@@ -22,7 +22,7 @@ class GhostBallAimingTest {
         val pocket = table.pocketById(PocketId.FOOT_RIGHT) // (2.54, 1.27)
         val pocketDir = Vec2(1.0, 0.0)
         // Place pocket along +x axis for a clean horizontal straight-in test
-        val customPocket = pocket.copy(center = Vec2(2.50, 0.635))
+        val customPocket = targetPocket(Vec2(2.50, 0.635))
         val objectBall = Ball(number = 1, position = Vec2(1.50, 0.635), radiusMeters = r)
         val cueBall = Ball(number = 0, position = Vec2(0.50, 0.635), radiusMeters = r)
 
@@ -46,7 +46,7 @@ class GhostBallAimingTest {
 
     @Test
     fun thirtyAndFortyFiveDegreeCutsMatchAnalyticAngles() {
-        val customPocket = table.pocketById(PocketId.FOOT_RIGHT).copy(center = Vec2(2.50, 0.635))
+        val customPocket = targetPocket(Vec2(2.50, 0.635))
         val objectBall = Ball(number = 2, position = Vec2(1.50, 0.635), radiusMeters = r)
         val expectedGhost = Vec2(1.50 - 2.0 * r, 0.635)
 
@@ -73,7 +73,7 @@ class GhostBallAimingTest {
 
     @Test
     fun backCutBeyondEightyDegreesIsRejected() {
-        val customPocket = table.pocketById(PocketId.FOOT_RIGHT).copy(center = Vec2(2.50, 0.635))
+        val customPocket = targetPocket(Vec2(2.50, 0.635))
         val objectBall = Ball(number = 3, position = Vec2(1.50, 0.635), radiusMeters = r)
         val expectedGhost = Vec2(1.50 - 2.0 * r, 0.635)
 
@@ -95,7 +95,7 @@ class GhostBallAimingTest {
 
     @Test
     fun obstructingBallsAreDetectedOnCueToGhostAndObjectToPocketCorridors() {
-        val customPocket = table.pocketById(PocketId.FOOT_RIGHT).copy(center = Vec2(2.50, 0.635))
+        val customPocket = targetPocket(Vec2(2.50, 0.635))
         val objectBall = Ball(number = 1, position = Vec2(1.50, 0.635), radiusMeters = r)
         val cueBall = Ball(number = 0, position = Vec2(0.50, 0.635), radiusMeters = r)
 

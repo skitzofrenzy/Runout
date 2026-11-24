@@ -5,7 +5,6 @@ import com.runout.engine.model.Ball
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
-import com.runout.engine.model.PocketId
 import com.runout.engine.model.PocketSpec
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
@@ -14,10 +13,8 @@ import com.runout.engine.physics.CueBallPath
 import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.GhostBallAiming
 import com.runout.engine.physics.SpinPhysics
-import com.runout.engine.physics.TipOffset
 import com.runout.engine.physics.TrajectoryPath
 import kotlin.math.abs
-import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -37,10 +34,6 @@ object OneShotPlanner {
     private val CANDIDATE_SPEED_UNITS: List<Double> = listOf(2.5, 3.5, 4.5, 5.5, 7.0)
 
     private const val DEFAULT_CUE_SPEED_MPS: Double = 2.0
-    private const val CUE_DISTANCE_WEIGHT: Double = 0.45
-    private const val OBJECT_DISTANCE_WEIGHT: Double = 0.65
-    private const val AIM_ERROR_DISTANCE_GAIN: Double = 15.0
-    private const val POCKET_WIDTH_NORMALIZATION: Double = 1.15
     private const val ALL_SCRATCH_PENALTY_FACTOR: Double = 0.15
     private const val POSITION_BONUS_WEIGHT: Double = 0.25
     private const val FINAL_BALL_POSITION_BONUS_WEIGHT: Double = 0.42
@@ -94,7 +87,6 @@ object OneShotPlanner {
                 val baseScore = computeBaseShotScore(
                     aim = aim,
                     pocket = pocket,
-                    table = table,
                     aimErrorStdRad = playerProfile.aimErrorStdRad,
                 )
 
@@ -162,32 +154,15 @@ object OneShotPlanner {
         }
     }
 
+    /**
+     * The pot's make probability for this player ([HeatZoneGenerator.shotQuality], the same function the run-out
+     * planner and the position maps use), floored at `1e-6` so every playable shot keeps a rank.
+     */
     private fun computeBaseShotScore(
         aim: AimGeometry,
         pocket: PocketSpec,
-        table: TableSpec,
         aimErrorStdRad: Double,
-    ): Double {
-        val cutFactor = cos(abs(aim.cutAngleRadians)).coerceAtLeast(0.0)
-        val extraAimPenalty = (aimErrorStdRad - PlayerProfile.DEFAULT_AIM_ERROR_STD_RAD)
-            .coerceAtLeast(0.0) * AIM_ERROR_DISTANCE_GAIN
-        val effectiveObjectWeight = OBJECT_DISTANCE_WEIGHT + extraAimPenalty
-        val distanceFactor = 1.0 / (
-            1.0 +
-                CUE_DISTANCE_WEIGHT * aim.cueToGhostDistanceMeters +
-                effectiveObjectWeight * aim.objectToPocketDistanceMeters
-            )
-        val pocketWidthBonus = pocket.mouthWidthMeters / (table.ballRadiusMeters * 4.0)
-        val sideApproachPenalty = if (pocket.id == PocketId.SIDE_LEFT || pocket.id == PocketId.SIDE_RIGHT) {
-            val ny = abs(aim.objectBallDirection.y)
-            if (ny < 0.58) (ny * ny * 1.48).coerceIn(0.25, 0.85) else 1.0
-        } else {
-            1.0
-        }
-        val normalizedPocketFactor = ((pocketWidthBonus / POCKET_WIDTH_NORMALIZATION) * sideApproachPenalty)
-            .coerceIn(0.25, 1.0)
-        return (cutFactor * distanceFactor * normalizedPocketFactor).coerceIn(1e-6, 1.0)
-    }
+    ): Double = HeatZoneGenerator.shotQuality(aim, pocket, aimErrorStdRad).coerceIn(1e-6, 1.0)
 
     private fun nextLegalTargetsAfterPotting(
         remainingLayout: TableLayout,
@@ -234,7 +209,6 @@ object OneShotPlanner {
                 val nextScore = computeBaseShotScore(
                     aim = nextAim,
                     pocket = nextPocket,
-                    table = table,
                     aimErrorStdRad = aimErrorStdRad,
                 )
                 if (best == null || nextScore > best.score) {
@@ -270,13 +244,24 @@ object OneShotPlanner {
                 PlayerProfile.MIN_SPEED_SCALE,
                 PlayerProfile.MAX_SPEED_SCALE,
             )
-            val paths = CueBallPath.computePostImpactPaths(
+            // Paths from the stroke: each preset's tip, the speed and spin it leaves the cue ball with at contact, and the
+            // contact and slide that follow.
+            val paths = CueBallPath.computePostImpactPathsForStroke(
                 aim = aim,
                 table = table,
-                initialCueSpeedMps = speedMps,
+                cueSpeedMps = speedMps,
             )
 
             for (spin in SPIN_CANDIDATES) {
+                // The preset names the spin at the object ball. Only offer it
+                // when some tip gives that state after this distance at this speed (a stop shot over a long
+                // distance at a soft speed needs more backspin than a tip can give).
+                val tip = SpinPhysics.tipForImpactState(
+                    preset = spin,
+                    cueSpeedMps = speedMps,
+                    cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+                    table = table,
+                ) ?: continue
                 val chosenPath = paths.getValue(spin)
                 val scratches = chosenPath.hitsScratchPocket != null
                 val cueStop = chosenPath.points.lastOrNull() ?: aim.ghostBallCenter
@@ -284,7 +269,7 @@ object OneShotPlanner {
                 val centerDistance = cueStop.distanceTo(tableCenter)
                 val preImpact = SpinPhysics.computePreImpactCueState(
                     cueSpeedMps = speedMps,
-                    tip = TipOffset.fromPreset(spin),
+                    tip = tip,
                     cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
                     table = table,
                 )
@@ -328,7 +313,7 @@ object OneShotPlanner {
                         }
                         val ease = (
                             1.0 -
-                                0.05 * ((chosenPath.points.size - 2).coerceAtLeast(0) - 1).coerceAtLeast(0) -
+                                0.05 * (chosenPath.cushionContacts - 1).coerceAtLeast(0) -
                                 0.02 * abs(speedUnits - 4.0) -
                                 (if (spin == CueBallSpinPreset.DRAW) 0.04 else 0.0)
                             ).coerceIn(0.70, 1.0)
@@ -336,7 +321,7 @@ object OneShotPlanner {
                     } else {
                         val controlEase = (
                             1.0 -
-                                0.04 * ((chosenPath.points.size - 2).coerceAtLeast(0) - 1).coerceAtLeast(0) -
+                                0.04 * (chosenPath.cushionContacts - 1).coerceAtLeast(0) -
                                 (if (spin == CueBallSpinPreset.DRAW) 0.025 else 0.0)
                             ).coerceIn(0.78, 1.0)
                         positionWeight * bestNext.score * controlEase
@@ -353,12 +338,7 @@ object OneShotPlanner {
                 } else {
                     0.0
                 }
-                val distanceSpinPenalty = when {
-                    preImpact.state == SpinPhysics.ImpactSpinState.STOPPED_SHORT -> 0.35
-                    spin == CueBallSpinPreset.DRAW && preImpact.impactSpinFactorK >= 0.0 -> 0.14
-                    spin == CueBallSpinPreset.STUN && preImpact.impactSpinFactorK >= 0.70 -> 0.05
-                    else -> 0.0
-                }
+                val distanceSpinPenalty = if (preImpact.state == SpinPhysics.ImpactSpinState.STOPPED_SHORT) 0.35 else 0.0
                 val candidateScore = ((baseWithCenter + positionBonus) * scratchFactor - drawPenalty - distanceSpinPenalty)
                     .coerceIn(1e-6, 1.0)
 

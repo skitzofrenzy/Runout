@@ -27,5 +27,16 @@ actual fun rememberSetupPreferencesStore(): SetupPreferencesStore = remember {
                 defaults.setObject(value, forKey = "$SETUP_KEY_PREFIX$key")
             }
         }
+
+        override fun loadAcceptedTermsVersion(): String? {
+            val accepted = defaults.stringForKey("$SETUP_KEY_PREFIX${TermsAcceptanceKeys.KEY_TERMS_ACCEPTED}")
+            if (accepted != "true") return null
+            return defaults.stringForKey("$SETUP_KEY_PREFIX${TermsAcceptanceKeys.KEY_TERMS_VERSION}")
+        }
+
+        override fun saveAcceptedTermsVersion(version: String) {
+            defaults.setObject("true", forKey = "$SETUP_KEY_PREFIX${TermsAcceptanceKeys.KEY_TERMS_ACCEPTED}")
+            defaults.setObject(version, forKey = "$SETUP_KEY_PREFIX${TermsAcceptanceKeys.KEY_TERMS_VERSION}")
+        }
     }
 }

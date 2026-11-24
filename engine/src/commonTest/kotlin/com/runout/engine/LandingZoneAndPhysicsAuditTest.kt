@@ -11,11 +11,13 @@ import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.GhostBallAiming
+import com.runout.engine.physics.MotionPhysics
 import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TableCollisionSimulator
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.planner.HeatZoneGenerator
 import com.runout.engine.planner.MultiShotPlanner
+import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -156,6 +158,10 @@ class LandingZoneAndPhysicsAuditTest {
         val layout = TableLayout(table, listOf(cue, obj))
         val aim = GhostBallAiming.computeAimGeometry(cue, obj, footLeft, layout.balls, table = table)
         assertTrue(aim.isShotPlayable)
+        // Mild follow: the cue ball is part way to natural roll (k = 0.5) when it reaches the object ball.
+        val mildFollowVertical = assertNotNull(
+            SpinPhysics.verticalTipRatioForImpactSpin(0.5, 2.6, aim.cueToGhostDistanceMeters, table),
+        )
 
         val evaluation = com.runout.engine.planner.ExecutionErrorModel.evaluateShotUncertainty(
             layout = layout,
@@ -163,13 +169,13 @@ class LandingZoneAndPhysicsAuditTest {
             pocket = footLeft,
             aim = aim,
             cueSpeedMps = 2.6,
-            tip = TipOffset(sideRatio = 0.0, verticalRatio = 0.14),
+            tip = TipOffset(sideRatio = 0.0, verticalRatio = mildFollowVertical),
             playerProfile = PlayerProfile(aimErrorStdRad = 0.025),
         )
         assertNull(evaluation.nominalTrajectory.hitsScratchPocket, "Nominal trajectory should clear FOOT_RIGHT")
         val footRight = table.pocketById(PocketId.FOOT_RIGHT)
         assertTrue(
-            evaluation.meanLandingPosition.distanceTo(footRight.center) > footRight.acceptanceRadiusMeters,
+            evaluation.meanLandingPosition.distanceTo(footRight.mouthCenter) > footRight.mouthWidthMeters * 0.5,
             "Safe nominal shot should keep meanLandingPosition out of scratch pocket",
         )
         assertTrue(
@@ -237,7 +243,7 @@ class LandingZoneAndPhysicsAuditTest {
     @Test
     fun verticalSpinFollowStunDrawProducesMonotonicForwardProjectionAlongObjectLine() {
         val obj = Ball(1, Vec2(1.50, 0.635), r)
-        val pocket = table.pocketById(PocketId.FOOT_RIGHT).copy(center = Vec2(2.50, 0.635))
+        val pocket = targetPocket(Vec2(2.50, 0.635))
         val aimDir = Vec2(1.0, 0.0).rotate(-kotlin.math.PI / 8.0)
         val ghost = Vec2(1.50 - 2.0 * r, 0.635)
         val cue = Ball(0, ghost - aimDir * 0.65, r)
@@ -245,15 +251,18 @@ class LandingZoneAndPhysicsAuditTest {
         assertTrue(aim.isShotPlayable)
 
         val speed = 2.2
-        val followEnd = SpinPhysics.traceCueBallPathWithSpin(
-            aim, speed, TipOffset.fromPreset(CueBallSpinPreset.FOLLOW), table, r,
-        ).points.last()
-        val stunEnd = SpinPhysics.traceCueBallPathWithSpin(
-            aim, speed, TipOffset.fromPreset(CueBallSpinPreset.STUN), table, r,
-        ).points.last()
-        val drawEnd = SpinPhysics.traceCueBallPathWithSpin(
-            aim, speed, TipOffset.fromPreset(CueBallSpinPreset.DRAW), table, r,
-        ).points.last()
+        // Each preset names the spin at the object ball; over 0.65 m a centre-ball strike has already started to
+        // roll, so the stun and draw states take a tip below centre.
+        fun tipAtImpact(preset: CueBallSpinPreset): TipOffset = assertNotNull(
+            SpinPhysics.tipForImpactState(preset, speed, aim.cueToGhostDistanceMeters, table),
+            "$preset must be reachable at $speed m/s over ${aim.cueToGhostDistanceMeters} m",
+        )
+        val followEnd = SpinPhysics.traceCueBallPathWithSpin(aim, speed, tipAtImpact(CueBallSpinPreset.FOLLOW), table, r)
+            .points.last()
+        val stunEnd = SpinPhysics.traceCueBallPathWithSpin(aim, speed, tipAtImpact(CueBallSpinPreset.STUN), table, r)
+            .points.last()
+        val drawEnd = SpinPhysics.traceCueBallPathWithSpin(aim, speed, tipAtImpact(CueBallSpinPreset.DRAW), table, r)
+            .points.last()
 
         val followProj = (followEnd - aim.ghostBallCenter).dot(aim.objectBallDirection)
         val stunProj = (stunEnd - aim.ghostBallCenter).dot(aim.objectBallDirection)
@@ -264,7 +273,7 @@ class LandingZoneAndPhysicsAuditTest {
     }
 
     @Test
-    fun leftAndRightSideEnglishDeflectSymmetricallyOffFootRail() {
+    fun leftAndRightSideEnglishActOppositelyAtTheFootRail() {
         val sideRight = table.pocketById(PocketId.SIDE_RIGHT)
         val obj = Ball(1, Vec2(1.27, 0.60), r)
         val cue = Ball(0, Vec2(0.95, 0.25), r)
@@ -272,38 +281,28 @@ class LandingZoneAndPhysicsAuditTest {
         assertTrue(aim.isShotPlayable)
 
         val speed = 1.0
-        val leftPath = SpinPhysics.traceCueBallPathWithSpin(
-            aim, speed, TipOffset(sideRatio = -0.35, verticalRatio = 0.35), table, r, maxBounces = 1,
-        )
-        val centerPath = SpinPhysics.traceCueBallPathWithSpin(
-            aim, speed, TipOffset(sideRatio = 0.0, verticalRatio = 0.35), table, r, maxBounces = 1,
-        )
-        val rightPath = SpinPhysics.traceCueBallPathWithSpin(
-            aim, speed, TipOffset(sideRatio = 0.35, verticalRatio = 0.35), table, r, maxBounces = 1,
-        )
-        assertNull(leftPath.hitsScratchPocket)
-        assertNull(centerPath.hitsScratchPocket)
-        assertNull(rightPath.hitsScratchPocket)
-        assertEquals(3, centerPath.points.size, "Center english should rebound once off foot rail")
-
-        val leftY = leftPath.points.last().y
-        val centerY = centerPath.points.last().y
-        val rightY = rightPath.points.last().y
-
-        assertEquals(3, leftPath.points.size)
-        assertEquals(3, rightPath.points.size)
-        assertTrue(leftY < centerY - 0.015, "Left english ($leftY) must kick inward relative to center ($centerY)")
-        assertTrue(rightY > centerY + 0.015, "Right english ($rightY) must kick wider relative to center ($centerY)")
-
-        val leftHeading = (leftPath.points[2] - leftPath.points[1]).normalized()
-        val centerHeading = (centerPath.points[2] - centerPath.points[1]).normalized()
-        val rightHeading = (rightPath.points[2] - centerPath.points[1]).normalized()
-        val leftDelta = centerHeading.angleTo(leftHeading)
-        val rightDelta = centerHeading.angleTo(rightHeading)
-        assertTrue(
-            leftDelta * rightDelta < 0.0,
-            "Left ($leftDelta rad) and right ($rightDelta rad) english must deflect to opposite sides of neutral rebound",
-        )
+        val tips = listOf(-0.35, 0.0, 0.35).map { TipOffset(sideRatio = it, verticalRatio = 0.35) }
+        val paths = tips.map { SpinPhysics.traceCueBallPathWithSpin(aim, speed, it, table, r, maxBounces = 1) }
+        for (path in paths) {
+            assertNull(path.hitsScratchPocket)
+            assertEquals(3, path.points.size, "every english should rebound once off the foot rail")
+        }
+        // The cushion contact itself, from the full simulation of the same shot.
+        val layout = TableLayout(table, listOf(cue, obj))
+        val (left, center, right) = tips.map { tip ->
+            TableCollisionSimulator.simulatePostImpact(layout, obj, aim, speed, tip)
+                .cueBallEvents.first { it.kind == com.runout.engine.physics.CueBallEventKind.CUSHION }
+        }
+        // The ball moves toward +y along the foot rail, so right english is running and left english reverse. On the
+        // slow, long way to the rail most of the english wears off on the cloth, but its sign survives.
+        val report = "left $left, center $center, right $right"
+        assertTrue(left.sideSpinBefore < 0.0 && right.sideSpinBefore > 0.0, report)
+        assertTrue(abs(left.sideSpinBefore) < 0.35 && abs(right.sideSpinBefore) < 0.35, report)
+        // Friction along the rail puts running english on every ball; it turns the reverse english round, and the ball
+        // that brought running english leaves with the most.
+        assertTrue(center.sideSpinAfter > 0.05, report)
+        assertTrue(left.sideSpinAfter > 0.0, report)
+        assertTrue(right.sideSpinAfter > center.sideSpinAfter && center.sideSpinAfter > left.sideSpinAfter, report)
     }
 
     @Test
@@ -311,7 +310,7 @@ class LandingZoneAndPhysicsAuditTest {
         // Straight-in shot directly into FOOT_RIGHT with forced FOLLOW intentionally scratches.
         val footRight = table.pocketById(PocketId.FOOT_RIGHT)
         val obj = Ball(9, Vec2(2.05, 0.88), r)
-        val dirToPocket = (footRight.center - obj.position).normalized()
+        val dirToPocket = (footRight.mouthCenter - obj.position).normalized()
         val cue = Ball(0, obj.position - dirToPocket * 0.55, r)
         val layout = TableLayout(table, listOf(cue, obj))
         val followTip = TipOffset.fromPreset(CueBallSpinPreset.FOLLOW)
@@ -380,7 +379,7 @@ class LandingZoneAndPhysicsAuditTest {
     @Test
     fun halfTableMaxDrawAtSpeedTwoPointFiveTransitionsFromDrawToForwardRoll() {
         val profile = PlayerProfile()
-        val pocket = table.pocketById(PocketId.FOOT_RIGHT).copy(center = Vec2(2.50, 0.635))
+        val pocket = targetPocket(Vec2(2.50, 0.635))
         val obj = Ball(1, Vec2(1.80, 0.635), r)
         val ghost = Vec2(1.80 - 2.0 * r, 0.635)
         // Cue ball half a 9-ft table away (1.27 m cue-to-ghost)
@@ -425,14 +424,36 @@ class LandingZoneAndPhysicsAuditTest {
         assertEquals(SpinPhysics.ImpactSpinState.BACKSPIN_DRAW, preAt65.state)
         val pathAt65 = SpinPhysics.traceCueBallPathWithSpin(halfTableAim, speed65Mps, maxDrawTip, table, r)
         val projAt65 = (pathAt65.points.last() - halfTableAim.ghostBallCenter).dot(halfTableAim.objectBallDirection)
-        assertTrue(projAt65 < -0.05, "At speed 6.5 over 1.27m, max draw must pull backward, got $projAt65")
+        val expectedAt65 = straightDrawTravel(preAt65)
+        assertTrue(expectedAt65 < 0.0, "Backspin at contact must outweigh the speed the cue ball keeps")
+        assertEquals(expectedAt65, projAt65, 1e-6, "At speed 6.5 over 1.27m, max draw must pull backward as the slide law says")
 
         // At close range (0.22 m), even speed 2.5 holds backspin and draws backward
         val closeCue = Ball(0, ghost - Vec2(0.22, 0.0), r)
         val closeAim = GhostBallAiming.computeAimGeometry(closeCue, obj, pocket, listOf(closeCue, obj), table = table)
         val closePath25 = SpinPhysics.traceCueBallPathWithSpin(closeAim, speed25Mps, maxDrawTip, table, r)
         val closeProj25 = (closePath25.points.last() - closeAim.ghostBallCenter).dot(closeAim.objectBallDirection)
-        assertTrue(closeProj25 < -0.02, "Close-range speed 2.5 max draw must still draw back, got $closeProj25")
+        val closePre25 = SpinPhysics.computePreImpactCueState(speed25Mps, maxDrawTip, closeAim.cueToGhostDistanceMeters, table)
+        val expectedClose = straightDrawTravel(closePre25)
+        assertTrue(expectedClose < 0.0)
+        assertEquals(expectedClose, closeProj25, 1e-6, "Close-range speed 2.5 max draw must still draw back")
+    }
+
+    /**
+     * Distance a cue ball that arrives straight on with [pre]'s speed and spin ends up from the contact point, along
+     * the object ball's line (negative: drawn back). It keeps (1 - e)/2 of its approach speed and all of its spin;
+     * the slide changes its speed to (5 v' + 2 w) / 7, and it then rolls to rest.
+     */
+    private fun straightDrawTravel(pre: SpinPhysics.PreImpactCueState): Double {
+        val vKept = 0.5 * (1.0 - MotionPhysics.BALL_BALL_RESTITUTION) * pre.impactSpeedMps
+        val wKept = pre.impactSpinFactorK * pre.impactSpeedMps
+        val slideDecel = table.cloth.slidingFrictionMuS * MotionPhysics.GRAVITY_M_S2
+        val slip = vKept - wKept
+        val slideTime = 2.0 * kotlin.math.abs(slip) / (7.0 * slideDecel)
+        val slideTravel = vKept * slideTime - kotlin.math.sign(slip) * 0.5 * slideDecel * slideTime * slideTime
+        val vRoll = (5.0 * vKept + 2.0 * wKept) / 7.0
+        return slideTravel +
+            kotlin.math.sign(vRoll) * vRoll * vRoll / (2.0 * table.cloth.rollingResistanceMuR * MotionPhysics.GRAVITY_M_S2)
     }
 
     @Test
@@ -455,8 +476,10 @@ class LandingZoneAndPhysicsAuditTest {
             assertEquals(profile.speedForScale(intScale), profile.speedForUnits(intScale.toDouble()), 1e-12)
         }
 
-        assertEquals("Center Ball (Stun)", TipOffset(0.0, 0.0).describeSpinLabel())
-        assertEquals("Touch of Low (Drag Stun)", TipOffset(0.0, -0.12).describeSpinLabel())
+        assertEquals("Center Ball", TipOffset(0.0, 0.0).describeSpinLabel())
+        assertEquals("Center", TipOffset(0.0, 0.0).describeSpinLabel(short = true))
+        assertEquals("Touch of Low", TipOffset(0.0, -0.12).describeSpinLabel())
+        assertEquals("Touch Low + Touch of Left", TipOffset(-0.10, -0.12).describeSpinLabel())
         assertEquals("Controlled Follow + 1/2-Tip Left", TipOffset(-0.20, 0.22).describeSpinLabel())
         assertEquals("Firm Draw + Touch of Right", TipOffset(0.11, -0.34).describeSpinLabel())
         assertEquals("Max Power Draw", TipOffset(0.0, -0.45).describeSpinLabel())
@@ -519,7 +542,7 @@ class LandingZoneAndPhysicsAuditTest {
         val pocket = table.pocketById(PocketId.FOOT_RIGHT)
         // Object ball 1.65 m from Foot Right corner with a thin ~50-degree cut from nearby cue ball
         val obj = Ball(9, Vec2(1.08, 0.48), r)
-        val dirToPocket = (pocket.center - obj.position).normalized()
+        val dirToPocket = (pocket.mouthCenter - obj.position).normalized()
         val ghost = obj.position - dirToPocket * (2.0 * r)
         val cutAimDir = dirToPocket.rotate(0.92) // ~52.7 deg cut so cos|cut| ~ 0.606 transfers partial speed
         val cue = Ball(0, ghost - cutAimDir * 0.28, r)
@@ -554,7 +577,7 @@ class LandingZoneAndPhysicsAuditTest {
         val obTravelled = stoppedNine.position.distanceTo(obj.position)
         assertTrue(obTravelled > 0.10, "Ball #9 should move forward after impact, moved $obTravelled m")
         assertTrue(
-            stoppedNine.position.distanceTo(pocket.center) > pocket.acceptanceRadiusMeters * 2.0,
+            stoppedNine.position.distanceTo(pocket.mouthCenter) > pocket.mouthWidthMeters,
             "Ball #9 should stop well short of the pocket jaws",
         )
         val targetPathEnd = assertNotNull(softSim.targetBallTrajectory).points.last()

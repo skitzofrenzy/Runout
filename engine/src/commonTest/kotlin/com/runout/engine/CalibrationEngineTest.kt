@@ -14,13 +14,12 @@ import com.runout.engine.calibration.TrajectoryEventType
 import com.runout.engine.calibration.VideoBallTracker
 import com.runout.engine.calibration.VideoFrameBallObservation
 import com.runout.engine.math.Vec2
+import com.runout.engine.model.ClothParams
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.MotionPhysics
 import com.runout.engine.physics.SpinPhysics
-import com.runout.engine.physics.TipOffset
 import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.sin
@@ -256,62 +255,110 @@ class CalibrationEngineTest {
     }
 
     @Test
-    fun fitCushionRestitutionAndSpinCouplingRecoverBounceParameters() {
+    fun fitCushionRestitutionAndFrictionRecoverTheCushionModelParameters() {
         assertEquals(0.75, TableCalibrationFitter.fitCushionRestitutionEc(emptyList()), 1e-9)
-        assertEquals(0.55, TableCalibrationFitter.fitCushionSpinCoupling(emptyList(), 0.75), 1e-9)
+        assertEquals(0.20, TableCalibrationFitter.fitCushionFrictionFc(emptyList(), 0.75), 1e-9)
 
+        // Synthetic drills generated from the cushion model with known e_c and f_c.
         val trueEc = 0.83
+        val trueFc = 0.27
+        val trueCloth = ClothParams(cushionRestitutionEc = trueEc, cushionFrictionFc = trueFc)
+        val headOnRatio = TableCalibrationFitter.predictHeadOnReboundRatio(trueCloth)
+        // The head-on rebound is a little below e_c: the contact normal tilts down and friction acts.
+        assertTrue(headOnRatio < trueEc && headOnRatio > trueEc - 0.12, "head-on ratio $headOnRatio")
         val cushionTrials = listOf(0.8, 1.2, 1.6, 2.0, 2.4, 2.8).mapIndexed { i, vIn ->
             val factor = if (i % 2 == 0) 1.006 else 0.994
-            CushionSpeedDrillTrial(vIn, vIn * trueEc * factor)
+            CushionSpeedDrillTrial(vIn, vIn * headOnRatio * factor)
         } + CushionSpeedDrillTrial(2.0, 0.70) // outlier
 
-        val fittedEc = TableCalibrationFitter.fitCushionRestitutionEc(cushionTrials)
-        assertEquals(trueEc, fittedEc, 0.01)
-
-        val trueKSpin = 0.68
         val bankConfigs = listOf(
             Triple(1.5, 0.35, 0.30),
             Triple(1.8, 0.45, -0.35),
             Triple(2.1, 0.25, 0.40),
             Triple(1.6, 0.50, -0.25),
-            Triple(1.9, 0.30, 0.0), // zero side-spin must be ignored cleanly
+            Triple(1.9, 0.30, 0.0),
+            Triple(1.7, 0.60, 0.20),
         )
-        val bankTrials = bankConfigs.map { (v, thetaIn, side) ->
-            val vn = v * cos(thetaIn)
-            val vt = v * sin(thetaIn)
-            val vnOut = fittedEc * vn
-            val vtOut = 0.82 * vt + trueKSpin * side * vn
-            BankSpinDrillTrial(v, thetaIn, side, atan2(vtOut, vnOut))
+        val bankTrials = bankConfigs.mapIndexed { i, (v, thetaIn, side) ->
+            val angle = TableCalibrationFitter.predictBankReboundAngleRad(v, thetaIn, side, trueCloth)
+            BankSpinDrillTrial(v, thetaIn, side, angle + if (i % 2 == 0) 0.002 else -0.002)
         }
 
-        val fittedSpin = TableCalibrationFitter.fitCushionSpinCoupling(bankTrials, fittedEc)
-        assertEquals(trueKSpin, fittedSpin, 0.015)
+        val fitted = TableCalibrationFitter.fitAllDrills(
+            lagTrials = emptyList(),
+            stunTrials = emptyList(),
+            cushionTrials = cushionTrials,
+            bankSpinTrials = bankTrials,
+        )
+        assertEquals(trueEc, fitted.cloth.cushionRestitutionEc, 0.01)
+        assertEquals(trueFc, fitted.cloth.cushionFrictionFc, 0.02)
 
-        // Physical clamping checks
-        val maxClamped = TableCalibrationFitter.fitCushionSpinCoupling(
-            listOf(BankSpinDrillTrial(2.0, 0.2, 0.25, atan2(2.0, 0.4))),
+        // Noise-free trials at a known e_c give f_c essentially exactly.
+        val exactBank = bankConfigs.map { (v, thetaIn, side) ->
+            BankSpinDrillTrial(v, thetaIn, side, TableCalibrationFitter.predictBankReboundAngleRad(v, thetaIn, side, trueCloth))
+        }
+        assertEquals(trueFc, TableCalibrationFitter.fitCushionFrictionFc(exactBank, trueEc), 1e-3)
+
+        // Physical clamping: a rebound no cushion model can produce pins the fit to a bound.
+        val livelyHeadOn = listOf(CushionSpeedDrillTrial(1.0, 0.99), CushionSpeedDrillTrial(2.0, 1.98))
+        assertEquals(0.92, TableCalibrationFitter.fitCushionRestitutionEc(livelyHeadOn), 1e-9)
+        val deadHeadOn = listOf(CushionSpeedDrillTrial(1.0, 0.20), CushionSpeedDrillTrial(2.0, 0.40))
+        assertEquals(0.50, TableCalibrationFitter.fitCushionRestitutionEc(deadHeadOn), 1e-9)
+        val fc = TableCalibrationFitter.fitCushionFrictionFc(
+            listOf(BankSpinDrillTrial(2.0, 0.4, 0.3, 1.5)),
             fittedEc = 0.75,
         )
-        assertEquals(1.00, maxClamped, 1e-9)
+        assertTrue(fc in 0.05..0.40)
+    }
+
+    private val dtCuts = listOf(0.45, -0.50, 0.55, -0.60, 0.52, -0.48, 0.58, -0.54)
+    private val dtSpeeds = listOf(2.0, 2.5, 3.0, 2.2, 3.4, 2.8, 2.4, 3.2)
+
+    private fun throwTrials(trueMuB: Double, k: Double = 0.0, noise: Double = 0.0004): List<CutThrowDrillTrial> =
+        dtCuts.indices.map { i ->
+            val exactThrow = SpinPhysics.computeThrowAnglesRadians(
+                cutAngleSignedRadians = dtCuts[i],
+                impactSpeedMps = dtSpeeds[i],
+                impactSpinFactorK = k,
+                ballBallFrictionMu = trueMuB,
+            ).totalRadians
+            CutThrowDrillTrial(dtCuts[i], dtSpeeds[i], exactThrow + (if (i % 2 == 0) noise else -noise), k)
+        }
+
+    @Test
+    fun fitBallBallFrictionMuBRecoversTheFrictionOfTheThrowLaw() {
+        assertEquals(
+            SpinPhysics.DEFAULT_BALL_BALL_FRICTION_MU,
+            TableCalibrationFitter.fitBallBallFrictionMuB(emptyList()),
+            1e-9,
+        )
+        for (trueMuB in listOf(0.03, SpinPhysics.DEFAULT_BALL_BALL_FRICTION_MU, 0.06, 0.09)) {
+            val fitted = TableCalibrationFitter.fitBallBallFrictionMuB(throwTrials(trueMuB))
+            assertEquals(trueMuB, fitted, 0.004, "true mu_b $trueMuB fitted as $fitted")
+        }
+        // Noise-free trials are recovered essentially exactly.
+        assertEquals(0.05, TableCalibrationFitter.fitBallBallFrictionMuB(throwTrials(0.05, noise = 0.0)), 1e-4)
     }
 
     @Test
-    fun fitBallBallFrictionMuBInvertsThrowModelAccurately() {
-        assertEquals(0.055, TableCalibrationFitter.fitBallBallFrictionMuB(emptyList()), 1e-9)
+    fun fitBallBallFrictionMuBUsesTheSpinAtImpactAndRejectsAnOutlierTrial() {
+        // The same drill hit with a rolling cue ball throws far less; the fit must account for the spin.
+        val rolling = throwTrials(0.07, k = 1.0)
+        assertEquals(0.07, TableCalibrationFitter.fitBallBallFrictionMuB(rolling), 0.005)
 
-        val trueMuB = 0.082
-        val centerTip = TipOffset()
-        val cuts = listOf(0.35, -0.45, 0.52, -0.60, 0.28, -0.50)
-        val speeds = listOf(0.7, 1.0, 1.3, 0.9, 1.5, 1.1)
-        val trials = cuts.indices.map { i ->
-            val exactThrow = SpinPhysics.computeThrowAnglesRadians(cuts[i], speeds[i], centerTip, trueMuB).first
-            val noisyThrow = exactThrow + (if (i % 2 == 0) 0.0004 else -0.0004)
-            CutThrowDrillTrial(cuts[i], speeds[i], noisyThrow)
+        val trials = throwTrials(0.06).toMutableList()
+        trials[3] = trials[3].copy(measuredThrowAngleRad = trials[3].measuredThrowAngleRad * 3.0)
+        assertEquals(0.06, TableCalibrationFitter.fitBallBallFrictionMuB(trials), 0.006)
+    }
+
+    @Test
+    fun fitBallBallFrictionMuBStaysWithinPhysicalBounds() {
+        val none = dtCuts.indices.map { CutThrowDrillTrial(dtCuts[it], dtSpeeds[it], 0.0) }
+        assertEquals(0.02, TableCalibrationFitter.fitBallBallFrictionMuB(none), 1e-6)
+        val huge = dtCuts.indices.map {
+            CutThrowDrillTrial(dtCuts[it], dtSpeeds[it], if (dtCuts[it] > 0.0) 0.4 else -0.4)
         }
-
-        val fittedMuB = TableCalibrationFitter.fitBallBallFrictionMuB(trials)
-        assertEquals(trueMuB, fittedMuB, 0.003)
+        assertEquals(0.12, TableCalibrationFitter.fitBallBallFrictionMuB(huge), 1e-6)
     }
 
     @Test
@@ -321,7 +368,6 @@ class CalibrationEngineTest {
         val trueEc = 0.84
         val trueMuB = 0.040
         val g = MotionPhysics.GRAVITY_M_S2
-        val centerTip = TipOffset()
 
         val lagTrials = listOf(0.9, 1.1, 1.3, 1.5, 1.7, 1.9).mapIndexed { i, v ->
             val d = MotionPhysics.rollingStoppingDistanceMeters(v, trueMuR) * (1.0 + (i % 2 - 0.5) * 0.015)
@@ -334,20 +380,19 @@ class CalibrationEngineTest {
                 measuredSlideDistanceMeters = (12.0 * v * v) / (49.0 * trueMuS * g),
             )
         }
+        val trueCloth = ClothParams(cushionRestitutionEc = trueEc, cushionFrictionFc = 0.26)
+        val headOnRatio = TableCalibrationFitter.predictHeadOnReboundRatio(trueCloth)
         val cushionTrials = listOf(1.0, 1.4, 1.8, 2.2, 2.6).map { v ->
-            CushionSpeedDrillTrial(v, v * trueEc)
+            CushionSpeedDrillTrial(v, v * headOnRatio)
         }
-        val bankSpinTrials = listOf(0.30, -0.35, 0.40, -0.25).map { side ->
+        val bankSpinTrials = listOf(0.30, -0.35, 0.40, -0.25).mapIndexed { i, side ->
             val v = 1.8
-            val thetaIn = 0.40
-            val vn = v * cos(thetaIn)
-            val vt = v * sin(thetaIn)
-            val thetaOut = atan2(0.82 * vt + 0.62 * side * vn, trueEc * vn)
-            BankSpinDrillTrial(v, thetaIn, side, thetaOut)
+            val thetaIn = 0.30 + 0.08 * i
+            BankSpinDrillTrial(v, thetaIn, side, TableCalibrationFitter.predictBankReboundAngleRad(v, thetaIn, side, trueCloth))
         }
         val cutThrowTrials = listOf(0.30, -0.45, 0.55, -0.35, 0.40).mapIndexed { i, cut ->
-            val speed = 0.8 + i * 0.25
-            val thrown = SpinPhysics.computeThrowAnglesRadians(cut, speed, centerTip, trueMuB).first
+            val speed = 1.6 + i * 0.4
+            val thrown = SpinPhysics.computeThrowAnglesRadians(cut, speed, ballBallFrictionMu = trueMuB).totalRadians
             CutThrowDrillTrial(cut, speed, thrown)
         }
 
@@ -367,9 +412,9 @@ class CalibrationEngineTest {
                 initialRollingSpeedMps = vRoll,
                 trueStoppingDistanceMeters = MotionPhysics.rollingStoppingDistanceMeters(vRoll, trueMuR),
                 incomingCushionSpeedMps = vCush,
-                trueReboundSpeedMps = vCush * trueEc,
+                trueReboundSpeedMps = vCush * headOnRatio,
                 cutAngleRad = cut,
-                trueThrowAngleRad = SpinPhysics.computeThrowAnglesRadians(cut, vRoll, centerTip, trueMuB).first,
+                trueThrowAngleRad = SpinPhysics.computeThrowAnglesRadians(cut, vRoll, ballBallFrictionMu = trueMuB).totalRadians,
             )
         }
 

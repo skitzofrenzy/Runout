@@ -78,8 +78,10 @@ object SampleLayouts {
     }
 
     /**
-     * 10-Ball scenario where cutting the `1` ball into the foot-left corner puts the 90° stun
-     * tangent line directly into the foot-right corner pocket, requiring follow or draw to stay safe.
+     * 10-Ball scenario where cutting the `1` ball into the foot-left corner puts the stun
+     * tangent line directly into the foot-right corner pocket, requiring follow or draw to stay safe. A real stun shot
+     * leaves a few degrees inside the tangent line, so the object ball sits where that slightly inside line still
+     * reaches the pocket (it also does for about 2.5 cm either side along the table length).
      */
     fun tenBallCutAndScratchAvoidance(): SampleScenario {
         val table = TableSpec.nineFootPool()
@@ -87,13 +89,13 @@ object SampleLayouts {
             table = table,
             balls = listOf(
                 Ball(number = 0, position = Vec2(x = 1.10, y = 0.635)),
-                Ball(number = 1, position = Vec2(x = 1.9454, y = 0.5946)),
+                Ball(number = 1, position = Vec2(x = 1.88, y = 0.57)),
                 Ball(number = 10, position = Vec2(x = 0.72, y = 0.32)),
             ),
         )
         return SampleScenario(
             title = "10-Ball: Cut & Scratch Avoidance",
-            description = "Cutting the 1-ball into Foot Left sends the 90° stun line toward a Foot Right scratch; follow or draw avoids the pocket.",
+            description = "Cutting the 1-ball into Foot Left sends the stun line toward a Foot Right scratch; follow or draw avoids the pocket.",
             layout = layout,
             rulesState = GameRulesState(gameType = GameType.TEN_BALL),
         )

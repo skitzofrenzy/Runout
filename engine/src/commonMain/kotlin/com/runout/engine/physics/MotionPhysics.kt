@@ -92,6 +92,97 @@ object MotionPhysics {
     }
 
     /**
+     * Speed in m/s of a ball that starts rolling at [rollingSpeedMps] and has rolled [distanceMeters] under
+     * rolling resistance [muR]: `v = sqrt(v0^2 - 2 * mu_r * g * d)`, or `0.0` once it has come to rest.
+     */
+    fun rollingSpeedAfterDistanceMps(
+        rollingSpeedMps: Double,
+        distanceMeters: Double,
+        muR: Double,
+        g: Double = GRAVITY_M_S2,
+    ): Double {
+        val remaining = rollingStoppingDistanceMeters(rollingSpeedMps, muR, g) - distanceMeters.coerceAtLeast(0.0)
+        return if (remaining <= 0.0) 0.0 else initialRollingSpeedForDistance(remaining, muR, g)
+    }
+
+    /**
+     * Centre speed in m/s at which a ball struck at [initialSpeedMps] with spin factor
+     * [initialSpinFactorK] (`k = R * omega / v`: `+1` natural roll, `0` no spin, negative backspin)
+     * stops slipping and starts to roll: `v_roll = v0 * (5 + 2 * k0) / 7`.
+     *
+     * For `k0 = 0` this is the `5/7` stun rule of [stunRollingSpeed]; it is valid while `k0 > -2.5`
+     * (the cue-tip offset limit keeps `k0` above `-1.25`), so the ball never reverses on the line of travel.
+     */
+    fun slidingEndSpeedMps(initialSpeedMps: Double, initialSpinFactorK: Double): Double =
+        (initialSpeedMps * (5.0 + 2.0 * initialSpinFactorK) / 7.0).coerceAtLeast(0.0)
+
+    /**
+     * Distance in metres a sliding ball needs to change its centre speed from [fromSpeedMps] to [toSpeedMps]
+     * under sliding friction [muS]: `d = |v_a^2 - v_b^2| / (2 * mu_s * g)`.
+     */
+    fun slidingDistanceBetweenSpeedsMeters(
+        fromSpeedMps: Double,
+        toSpeedMps: Double,
+        muS: Double,
+        g: Double = GRAVITY_M_S2,
+    ): Double {
+        require(muS > 0.0) { "Sliding friction coefficient muS must be positive." }
+        require(g > 0.0) { "Gravity g must be positive." }
+        return abs(fromSpeedMps * fromSpeedMps - toSpeedMps * toSpeedMps) / (2.0 * muS * g)
+    }
+
+    /**
+     * Centre speed in m/s of a ball that is struck at [initialSpeedMps] with spin factor [initialSpinFactorK] and
+     * has slid [distanceMeters] under [muS]. Friction opposes the slip, so a ball with less spin than natural roll
+     * (`k0 < 1`) slows down, `v^2 = v0^2 - 2 * mu_s * g * d`, and one with overspin (`k0 > 1`) speeds up,
+     * `v^2 = v0^2 + 2 * mu_s * g * d`. Only valid until slipping stops, see [slidingEndSpeedMps].
+     */
+    fun slidingSpeedAfterDistanceMps(
+        initialSpeedMps: Double,
+        initialSpinFactorK: Double,
+        distanceMeters: Double,
+        muS: Double,
+        g: Double = GRAVITY_M_S2,
+    ): Double {
+        require(muS > 0.0) { "Sliding friction coefficient muS must be positive." }
+        require(g > 0.0) { "Gravity g must be positive." }
+        val delta = 2.0 * muS * g * distanceMeters.coerceAtLeast(0.0)
+        val vSq = if (initialSpinFactorK > 1.0) {
+            initialSpeedMps * initialSpeedMps + delta
+        } else {
+            initialSpeedMps * initialSpeedMps - delta
+        }
+        return sqrt(vSq.coerceAtLeast(0.0))
+    }
+
+    /**
+     * Speed in m/s of a ball moving in a straight line that starts at [initialSpeedMps] with spin factor
+     * [initialSpinFactorK] along its travel (`0` for a ball just struck by another ball) and has covered
+     * [distanceMeters]: it slides under [muS] until it rolls at `v0 * (5 + 2 * k0) / 7`
+     * ([slidingEndSpeedMps]), then rolls under [muR]; `0.0` once it has stopped. The object ball after a contact
+     * slides this way, so this is its speed on the way to the pocket.
+     */
+    fun slideThenRollSpeedAfterDistanceMps(
+        initialSpeedMps: Double,
+        distanceMeters: Double,
+        muS: Double,
+        muR: Double,
+        initialSpinFactorK: Double = 0.0,
+        g: Double = GRAVITY_M_S2,
+    ): Double {
+        val v0 = abs(initialSpeedMps)
+        if (v0 <= 1e-9) return 0.0
+        val d = distanceMeters.coerceAtLeast(0.0)
+        val vRoll = slidingEndSpeedMps(v0, initialSpinFactorK)
+        val dSlide = slidingDistanceBetweenSpeedsMeters(v0, vRoll, muS, g)
+        return if (d < dSlide) {
+            slidingSpeedAfterDistanceMps(v0, initialSpinFactorK, d, muS, g)
+        } else {
+            rollingSpeedAfterDistanceMps(vRoll, d - dSlide, muR, g)
+        }
+    }
+
+    /**
      * Inverse of [rollingStoppingDistanceMeters]: the initial rolling speed in m/s required
      * to roll [distanceMeters] before stopping.
      *

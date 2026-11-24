@@ -208,7 +208,7 @@ class SnookerAndBreakSpeedTest {
 
         assertEquals(SnookerBallType.RED, advice.breakSequence[2].ballType)
         assertNull(advice.breakSequence[2].respottedToSpotMeters)
-        assertTrue(advice.expectedBreakPoints > 2.0)
+        assertTrue(advice.expectedBreakPoints > 2.0, "expected break points ${advice.expectedBreakPoints}")
         assertNotNull(advice.bestSafety)
     }
 

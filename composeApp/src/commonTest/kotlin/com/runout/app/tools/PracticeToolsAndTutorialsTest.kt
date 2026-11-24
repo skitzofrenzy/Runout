@@ -9,6 +9,8 @@ import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.Camera3DOrbitSpec
 import com.runout.engine.physics.CueBallSpinPreset
+import com.runout.engine.physics.GhostBallAiming
+import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.ShotTimelineAnimator
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.planner.OneShotPlanner
@@ -524,6 +526,87 @@ class PracticeToolsAndTutorialsTest {
                 tipOffset = t.recommendedTipOffset,
                 speedScale = t.recommendedSpeedScale,
             )
+        }
+    }
+
+    @Test
+    fun spinLessonsUseTheTipThatGivesTheirStateAtTheObjectBall() {
+        val tutorials = TutorialsAndDrillsCatalog.allTutorials().associateBy { it.id }
+        val walkthroughs = TutorialsAndDrillsCatalog.eightBallWalkthroughs().associateBy { it.id }
+        val profile = PlayerProfile()
+
+        fun impactState(
+            layout: com.runout.engine.model.TableLayout,
+            targetBallNumber: Int,
+            pocketId: PocketId,
+            speedScale: Int,
+            tip: TipOffset,
+        ): SpinPhysics.ImpactSpinState {
+            val cue = assertNotNull(layout.cueBall())
+            val target = assertNotNull(layout.ballByNumber(targetBallNumber))
+            val aim = GhostBallAiming.computeAimGeometry(
+                cueBall = cue,
+                objectBall = target,
+                pocket = layout.table.pocketById(pocketId),
+                otherBalls = layout.balls.filter { it.number != cue.number && it.number != target.number },
+                table = layout.table,
+            )
+            return SpinPhysics.computePreImpactCueState(
+                cueSpeedMps = profile.speedForScale(speedScale),
+                tip = tip,
+                cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+                table = layout.table,
+            ).state
+        }
+
+        val rolling = setOf(
+            SpinPhysics.ImpactSpinState.NATURAL_FORWARD_ROLL,
+            SpinPhysics.ImpactSpinState.PARTIAL_FORWARD_ROLL,
+        )
+        val speedControl = assertNotNull(tutorials["tutorial-speed-control"])
+        assertTrue(
+            impactState(
+                speedControl.practiceLayout,
+                speedControl.primaryTargetBallNumber,
+                speedControl.primaryPocketId,
+                speedControl.recommendedSpeedScale,
+                speedControl.recommendedTipOffset,
+            ) in rolling,
+            "the speed-control lesson teaches a rolling cue ball",
+        )
+
+        val drawLessons = listOf(
+            assertNotNull(tutorials["tutorial-tangent-rules"]).let {
+                Triple(it.practiceLayout, it.primaryTargetBallNumber, it.primaryPocketId) to
+                    (it.recommendedSpeedScale to it.recommendedTipOffset)
+            },
+            assertNotNull(walkthroughs["walkthrough-8ball-final-eight-avoid-scratch"]).let {
+                Triple(it.layout, it.primaryTargetBallNumber, it.primaryPocketId) to
+                    (it.recommendedSpeedScale to it.recommendedTipOffset)
+            },
+        )
+        for ((shot, stroke) in drawLessons) {
+            val (layout, target, pocket) = shot
+            val (speed, tip) = stroke
+            assertEquals(
+                SpinPhysics.ImpactSpinState.BACKSPIN_DRAW,
+                impactState(layout, target, pocket, speed, tip),
+                "a draw lesson must arrive with backspin; tip below centre: ${tip.verticalRatio}",
+            )
+            assertTrue(tip.verticalRatio < 0.0, "a draw tip is below centre")
+        }
+
+        for (id in listOf("walkthrough-8ball-cluster-breakout-insurance", "walkthrough-8ball-ball-in-hand-placement")) {
+            val w = assertNotNull(walkthroughs[id])
+            val state = impactState(
+                w.layout,
+                w.primaryTargetBallNumber,
+                w.primaryPocketId,
+                w.recommendedSpeedScale,
+                w.recommendedTipOffset,
+            )
+            assertEquals(SpinPhysics.ImpactSpinState.STUN_SLIDE, state, "$id teaches a stun hit")
+            assertTrue(w.recommendedTipOffset.verticalRatio < 0.0, "$id: a stun needs a tip below centre")
         }
     }
 }

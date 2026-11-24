@@ -97,7 +97,8 @@ private val DiagramGhostCyan = Color(0xFF7DD3FC)
 private val DiagramImpactCoral = Color(0xFFFF6B4A)
 private val DiagramBackdropDark = Color(0xFF070D1A)
 
-private const val OUTER_RAIL_MARGIN_METERS: Double = 0.095
+/** Width of the 3D rail around the nose rectangle: wide enough for every hole. */
+private fun outerRailMarginMeters(table: TableSpec): Double = requiredRailBandMeters(table)
 
 private enum class CameraPreset3D(val label: String) {
     BEHIND_CUE("Behind Cue 3D"),
@@ -721,48 +722,26 @@ private fun Stage2DVisualDiagramCanvas(
             .aspectRatio(aspectRatio)
             .clip(RoundedCornerShape(8.dp)),
     ) {
-        val railPad = min(size.width, size.height) * 0.075f
-        val availW = (size.width - 2f * railPad).coerceAtLeast(1f)
-        val availH = (size.height - 2f * railPad).coerceAtLeast(1f)
-        val pxPerMeter = min(
-            availW / table.lengthMeters.toFloat(),
-            availH / table.widthMeters.toFloat(),
-        ).coerceAtLeast(1f)
-        val playW = table.lengthMeters.toFloat() * pxPerMeter
-        val playH = table.widthMeters.toFloat() * pxPerMeter
-        val playLeft = (size.width - playW) * 0.5f
-        val playTop = (size.height - playH) * 0.5f
-
-        fun toOffset(pos: Vec2): Offset = Offset(
-            x = playLeft + (pos.x * pxPerMeter).toFloat(),
-            y = playTop + (pos.y * pxPerMeter).toFloat(),
+        val geom = computeTableCanvasGeometry(size.width, size.height, table)
+        val pxPerMeter = geom.pxPerMeter
+        val palette = TableDrawPalette(
+            woodOuter = DiagramRailWoodOuter,
+            woodInner = DiagramRailWoodInner,
+            cloth = DiagramFeltBed,
+            cushion = DiagramCushionCloth,
+            throat = DiagramPocketHole,
+            holeRim = DiagramPocketRim,
         )
 
-        drawRoundRect(
-            color = DiagramRailWoodOuter,
-            topLeft = Offset.Zero,
-            size = size,
-            cornerRadius = CornerRadius(railPad * 0.7f, railPad * 0.7f),
-        )
-        val inset = railPad * 0.2f
-        drawRoundRect(
-            color = DiagramRailWoodInner,
-            topLeft = Offset(inset, inset),
-            size = Size(size.width - 2f * inset, size.height - 2f * inset),
-            cornerRadius = CornerRadius(railPad * 0.5f, railPad * 0.5f),
-        )
-        val cushionMargin = railPad * 0.34f
-        drawRoundRect(
-            color = DiagramCushionCloth,
-            topLeft = Offset(playLeft - cushionMargin, playTop - cushionMargin),
-            size = Size(playW + 2f * cushionMargin, playH + 2f * cushionMargin),
-            cornerRadius = CornerRadius(railPad * 0.2f, railPad * 0.2f),
-        )
-        drawRect(
-            color = DiagramFeltBed,
-            topLeft = Offset(playLeft, playTop),
-            size = Size(playW, playH),
-        )
+        fun toOffset(pos: Vec2): Offset = geom.toCanvasOffset(pos)
+
+        drawRect(color = DiagramRailWoodOuter, topLeft = Offset.Zero, size = size)
+        drawTableBody(table, geom, palette)
+        drawTableCushions(table, geom, palette)
+        val playLeft = geom.playLeft
+        val playTop = geom.playTop
+        val playW = geom.playWidth
+        val playH = geom.playHeight
 
         val headStringX = playLeft + (0.25 * table.lengthMeters * pxPerMeter).toFloat()
         drawLine(
@@ -776,23 +755,24 @@ private fun Stage2DVisualDiagramCanvas(
         drawCircle(color = DiagramMarkingLine, radius = spotR, center = toOffset(table.footSpot()))
 
         for (pocket in table.pockets) {
-            val pCenter = toOffset(pocket.center)
-            val pRad = (pocket.acceptanceRadiusMeters * pxPerMeter).toFloat()
-            val isTarget = pocket.id == pocketId
+            if (pocket.id != pocketId) continue
+            val (mouthA, mouthB) = geom.mouthSegment(pocket)
+            val (holeCenterPx, holeRadiusPx) = geom.holeCircle(pocket)
+            val strokeWidth = max(1.8f, pxPerMeter * 0.005f)
+            drawCircle(color = DiagramPotGold.copy(alpha = 0.30f), radius = holeRadiusPx, center = holeCenterPx)
             drawCircle(
-                color = if (isTarget) DiagramPotGold.copy(alpha = 0.45f) else DiagramPocketRim,
-                radius = pRad * 1.12f,
-                center = pCenter,
+                color = DiagramPotGold,
+                radius = holeRadiusPx,
+                center = holeCenterPx,
+                style = Stroke(width = strokeWidth),
             )
-            drawCircle(color = DiagramPocketHole, radius = pRad, center = pCenter)
-            if (isTarget) {
-                drawCircle(
-                    color = DiagramPotGold,
-                    radius = pRad * 1.18f,
-                    center = pCenter,
-                    style = Stroke(width = max(1.8f, pxPerMeter * 0.005f)),
-                )
-            }
+            drawLine(
+                color = DiagramPotGold,
+                start = mouthA,
+                end = mouthB,
+                strokeWidth = strokeWidth * 1.3f,
+                cap = StrokeCap.Round,
+            )
         }
 
         val ballRadiusPx = (table.ballRadiusMeters * pxPerMeter).toFloat()
@@ -812,9 +792,15 @@ private fun Stage2DVisualDiagramCanvas(
             drawLine(
                 color = DiagramPotGold.copy(alpha = 0.45f),
                 start = toOffset(timeline.targetBall.position),
-                end = toOffset(timeline.pocket.center),
+                end = toOffset(timeline.compensatedAim.geometricAim.pocketAimPos),
                 strokeWidth = max(1.4f, pxPerMeter * 0.0045f),
                 pathEffect = guideDash,
+            )
+            drawLine(
+                color = DiagramPotGold.copy(alpha = 0.25f),
+                start = toOffset(timeline.compensatedAim.geometricAim.pocketAimPos),
+                end = toOffset(timeline.pocket.holeCenter),
+                strokeWidth = max(1.4f, pxPerMeter * 0.0045f),
             )
             drawCircle(color = DiagramGhostCyan.copy(alpha = 0.14f), radius = ballRadiusPx, center = ghostOff)
             drawCircle(
@@ -919,17 +905,18 @@ private fun Table3DPerspectiveCanvas(
                 sphereRadiusMeters = radiusM,
             )
 
+        val railMargin = outerRailMarginMeters(table)
         val outerRail = listOf(
-            proj(-OUTER_RAIL_MARGIN_METERS, -OUTER_RAIL_MARGIN_METERS, 0.038, 0.0),
-            proj(l + OUTER_RAIL_MARGIN_METERS, -OUTER_RAIL_MARGIN_METERS, 0.038, 0.0),
-            proj(l + OUTER_RAIL_MARGIN_METERS, w + OUTER_RAIL_MARGIN_METERS, 0.038, 0.0),
-            proj(-OUTER_RAIL_MARGIN_METERS, w + OUTER_RAIL_MARGIN_METERS, 0.038, 0.0),
+            proj(-railMargin, -railMargin, 0.038, 0.0),
+            proj(l + railMargin, -railMargin, 0.038, 0.0),
+            proj(l + railMargin, w + railMargin, 0.038, 0.0),
+            proj(-railMargin, w + railMargin, 0.038, 0.0),
         )
         val outerSkirt = listOf(
-            proj(-OUTER_RAIL_MARGIN_METERS, -OUTER_RAIL_MARGIN_METERS, -0.025, 0.0),
-            proj(l + OUTER_RAIL_MARGIN_METERS, -OUTER_RAIL_MARGIN_METERS, -0.025, 0.0),
-            proj(l + OUTER_RAIL_MARGIN_METERS, w + OUTER_RAIL_MARGIN_METERS, -0.025, 0.0),
-            proj(-OUTER_RAIL_MARGIN_METERS, w + OUTER_RAIL_MARGIN_METERS, -0.025, 0.0),
+            proj(-railMargin, -railMargin, -0.025, 0.0),
+            proj(l + railMargin, -railMargin, -0.025, 0.0),
+            proj(l + railMargin, w + railMargin, -0.025, 0.0),
+            proj(-railMargin, w + railMargin, -0.025, 0.0),
         )
 
         val boundsPoints = outerRail + outerSkirt
@@ -952,6 +939,7 @@ private fun Table3DPerspectiveCanvas(
             table = table,
             cameraSpec = cameraSpec,
             targetPocketId = pocketId,
+            railMarginMeters = railMargin,
             outerRail = outerRail,
             outerSkirt = outerSkirt,
             scalePx = scalePx,
@@ -1030,6 +1018,7 @@ private fun DrawScope.draw3DTableStructure(
     table: TableSpec,
     cameraSpec: Camera3DOrbitSpec,
     targetPocketId: PocketId,
+    railMarginMeters: Double,
     outerRail: List<Projected3DPoint>,
     outerSkirt: List<Projected3DPoint>,
     scalePx: Float,
@@ -1064,10 +1053,10 @@ private fun DrawScope.draw3DTableStructure(
 
     drawFilledQuad(points = skirtScreen, fillColor = Color(0x66000000))
     val skirtVisibility = listOf(
-        camCenterY < -(w * 0.5 + OUTER_RAIL_MARGIN_METERS),
-        camCenterX > (l * 0.5 + OUTER_RAIL_MARGIN_METERS),
-        camCenterY > (w * 0.5 + OUTER_RAIL_MARGIN_METERS),
-        camCenterX < -(l * 0.5 + OUTER_RAIL_MARGIN_METERS),
+        camCenterY < -(w * 0.5 + railMarginMeters),
+        camCenterX > (l * 0.5 + railMarginMeters),
+        camCenterY > (w * 0.5 + railMarginMeters),
+        camCenterX < -(l * 0.5 + railMarginMeters),
     )
     for (edgeIdx in 0..3) {
         if (!skirtVisibility[edgeIdx]) continue
@@ -1105,52 +1094,6 @@ private fun DrawScope.draw3DTableStructure(
         center = toScreen(footSpotProj),
     )
 
-    // Six 3D perspective pocket mouths on the cloth bed
-    for (pocket in table.pockets) {
-        val isTarget = pocket.id == targetPocketId
-        val pocketPath = Path().apply {
-            val steps = 14
-            for (i in 0 until steps) {
-                val angle = (2.0 * PI * i) / steps
-                val px = (pocket.center.x + pocket.acceptanceRadiusMeters * cos(angle))
-                    .coerceIn(-OUTER_RAIL_MARGIN_METERS * 0.45, l + OUTER_RAIL_MARGIN_METERS * 0.45)
-                val py = (pocket.center.y + pocket.acceptanceRadiusMeters * sin(angle))
-                    .coerceIn(-OUTER_RAIL_MARGIN_METERS * 0.45, w + OUTER_RAIL_MARGIN_METERS * 0.45)
-                val pt = toScreen(proj(px, py, 0.0, 0.0))
-                if (i == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
-            }
-            close()
-        }
-        drawPath(path = pocketPath, color = DiagramPocketHole)
-        drawPath(
-            path = pocketPath,
-            color = if (isTarget) DiagramPotGold else DiagramPocketRim,
-            style = Stroke(width = if (isTarget) 2.4f else 1.3f),
-        )
-    }
-
-    // Visible inner cushion walls (z = 0.036 m -> 0.0 m)
-    val cushionVisibility = listOf(
-        camCenterY > -w * 0.5,
-        camCenterX < l * 0.5,
-        camCenterY < w * 0.5,
-        camCenterX > -l * 0.5,
-    )
-    for (edgeIdx in 0..3) {
-        if (!cushionVisibility[edgeIdx]) continue
-        val nextIdx = (edgeIdx + 1) % 4
-        drawFilledQuad(
-            points = listOf(
-                cushionTopScreen[edgeIdx],
-                cushionTopScreen[nextIdx],
-                clothScreen[nextIdx],
-                clothScreen[edgeIdx],
-            ),
-            fillColor = DiagramCushionCloth,
-            strokeColor = Color(0x44000000),
-        )
-    }
-
     // Wooden rail aprons (outer z = 0.038 m -> inner cushion nose z = 0.036 m)
     val railOrder = (0..3).sortedByDescending { edgeIdx ->
         outerRail[edgeIdx].depthMeters + outerRail[(edgeIdx + 1) % 4].depthMeters
@@ -1169,7 +1112,74 @@ private fun DrawScope.draw3DTableStructure(
         )
     }
 
-    val sightOffset = OUTER_RAIL_MARGIN_METERS * 0.5
+    // Pocket openings cut into the rail: the throat between the facings and the hole behind the nose line
+    val railTopZ = 0.037
+    for (pocket in table.pockets) {
+        val isTarget = pocket.id == targetPocketId
+        drawFilledQuad(
+            points = pocketThroat(table, pocket).map { toScreen(proj(it.x, it.y, railTopZ, 0.0)) },
+            fillColor = DiagramPocketHole,
+        )
+        val holePoints = (0 until 24).map { i ->
+            val angle = (2.0 * PI * i) / 24
+            toScreen(
+                proj(
+                    pocket.holeCenter.x + pocket.holeRadiusMeters * cos(angle),
+                    pocket.holeCenter.y + pocket.holeRadiusMeters * sin(angle),
+                    railTopZ,
+                    0.0,
+                ),
+            )
+        }
+        drawFilledQuad(
+            points = holePoints,
+            fillColor = DiagramPocketHole,
+            strokeColor = if (isTarget) DiagramPotGold else DiagramPocketRim,
+        )
+    }
+
+    // Cushion strips ending at the jaw tips: sloped nose wall (z = 0.036 m -> 0.0 m) where it faces the camera, then the top
+    val cushionVisibility = listOf(
+        camCenterY > -w * 0.5,
+        camCenterX < l * 0.5,
+        camCenterY < w * 0.5,
+        camCenterX > -l * 0.5,
+    )
+    // cushionSegments order: top rail twice, bottom rail twice, head rail, foot rail
+    val segmentEdges = listOf(0, 0, 2, 2, 3, 1)
+    val segments = cushionSegments(table)
+    segments.forEachIndexed { index, segment ->
+        if (!cushionVisibility[segmentEdges[index]]) return@forEachIndexed
+        drawFilledQuad(
+            points = listOf(
+                toScreen(proj(segment.noseStart.x, segment.noseStart.y, 0.036, 0.0)),
+                toScreen(proj(segment.noseEnd.x, segment.noseEnd.y, 0.036, 0.0)),
+                toScreen(proj(segment.noseEnd.x, segment.noseEnd.y, 0.0, 0.0)),
+                toScreen(proj(segment.noseStart.x, segment.noseStart.y, 0.0, 0.0)),
+            ),
+            fillColor = DiagramCushionCloth,
+            strokeColor = Color(0x44000000),
+        )
+    }
+    for (segment in segments) {
+        drawFilledQuad(
+            points = segment.polygon.map { toScreen(proj(it.x, it.y, 0.036, 0.0)) },
+            fillColor = DiagramCushionCloth,
+            strokeColor = Color(0x44000000),
+        )
+    }
+    for (pocket in table.pockets) {
+        if (pocket.id != targetPocketId) continue
+        drawLine(
+            color = DiagramPotGold,
+            start = toScreen(proj(pocket.jawTipA.x, pocket.jawTipA.y, 0.036, 0.0)),
+            end = toScreen(proj(pocket.jawTipB.x, pocket.jawTipB.y, 0.036, 0.0)),
+            strokeWidth = 2.6f,
+            cap = StrokeCap.Round,
+        )
+    }
+
+    val sightOffset = (CUSHION_DEPTH_METERS + railMarginMeters) * 0.5
     for (i in listOf(1, 2, 3, 5, 6, 7)) {
         val sx = l * (i / 8.0)
         drawCircle(color = DiagramDiamondSight, radius = 2.0f, center = toScreen(proj(sx, -sightOffset, 0.038, 0.0)))
@@ -1201,9 +1211,23 @@ private fun DrawScope.draw3DShotPathsAndGhostRing(
     drawLine(
         color = DiagramPotGold.copy(alpha = 0.36f),
         start = proj(timeline.targetBall.position.x, timeline.targetBall.position.y, ballRadiusMeters * 0.15),
-        end = proj(timeline.pocket.center.x, timeline.pocket.center.y, ballRadiusMeters * 0.15),
+        end = proj(
+            timeline.compensatedAim.geometricAim.pocketAimPos.x,
+            timeline.compensatedAim.geometricAim.pocketAimPos.y,
+            ballRadiusMeters * 0.15,
+        ),
         strokeWidth = 1.6f,
         pathEffect = aimPathEffect,
+    )
+    drawLine(
+        color = DiagramPotGold.copy(alpha = 0.2f),
+        start = proj(
+            timeline.compensatedAim.geometricAim.pocketAimPos.x,
+            timeline.compensatedAim.geometricAim.pocketAimPos.y,
+            ballRadiusMeters * 0.15,
+        ),
+        end = proj(timeline.pocket.holeCenter.x, timeline.pocket.holeCenter.y, ballRadiusMeters * 0.15),
+        strokeWidth = 1.6f,
     )
 
     draw3DHorizontalRing(

@@ -21,6 +21,13 @@ enum class ShaftType {
 
 /**
  * Calibrated player stroke profile in SI units (metres/second, radians).
+ *
+ * [aimErrorStdRad] is the standard deviation of the angle between the cue line the player means to play and the one he
+ * plays. The defaults are not measured: they are anchored to drill percentages estimated for each level, on straight-in
+ * pots into a tournament corner pocket on a 9 ft table played at pocket speed. With 1 m from cue ball to object ball
+ * and 1 m from object ball to pocket a beginner makes about 1 in 3, an intermediate about 2 in 3 and an advanced
+ * player about 9 in 10; on the long straight-in drill (1.2 m and 1.2 m) about 1 in 5, 1 in 2 and 7 in 10. The
+ * player's own calibration replaces them.
  */
 data class PlayerProfile(
     val name: String = "Default Player",
@@ -89,7 +96,7 @@ data class PlayerProfile(
         const val MIN_SPEED_UNITS: Double = 0.5
         const val MAX_SPEED_UNITS: Double = 10.0
         const val SPEED_UNIT_STEP: Double = 0.5
-        const val DEFAULT_AIM_ERROR_STD_RAD: Double = 0.015
+        const val DEFAULT_AIM_ERROR_STD_RAD: Double = 0.0025
 
         /** All 20 player-selectable speed points (`0.5, 1.0, 1.5, ..., 10.0`). */
         val TWENTY_POINT_SPEED_UNITS: List<Double> = (1..20).map { it * SPEED_UNIT_STEP }
@@ -125,9 +132,9 @@ data class PlayerProfile(
             val clampedSpin = spinRating.coerceIn(1, 5)
 
             val (minBase, maxBase, aimBase, drawOffset) = when (experience) {
-                ExperienceLevel.BEGINNER -> Quad(0.80, 3.60, 0.028, -0.10)
-                ExperienceLevel.INTERMEDIATE -> Quad(0.65, 4.10, 0.015, 0.0)
-                ExperienceLevel.ADVANCED -> Quad(0.50, 4.60, 0.008, 0.15)
+                ExperienceLevel.BEGINNER -> Quad(0.80, 3.60, 0.0059, -0.10)
+                ExperienceLevel.INTERMEDIATE -> Quad(0.65, 4.10, DEFAULT_AIM_ERROR_STD_RAD, 0.0)
+                ExperienceLevel.ADVANCED -> Quad(0.50, 4.60, 0.00155, 0.15)
             }
 
             val speedMin = (minBase - (clampedSpeed - 3) * 0.05).coerceAtLeast(0.35)

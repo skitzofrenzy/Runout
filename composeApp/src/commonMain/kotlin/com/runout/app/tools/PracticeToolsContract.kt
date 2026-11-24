@@ -3,6 +3,8 @@ package com.runout.app.tools
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.*
 import com.runout.engine.physics.CueBallSpinPreset
+import com.runout.engine.physics.GhostBallAiming
+import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.snooker.*
 import com.runout.engine.tools.*
@@ -274,7 +276,7 @@ object TutorialsAndDrillsCatalog {
                     stage1Badge = "2R = 57.15 mm Extension",
                     stage1Text = "Extend the Foot Left pocket line backward through the #1 ball by one ball diameter (57.15 mm) to locate the phantom ghost-ball target.",
                     stage2Badge = "~13° Cut Aim Line",
-                    stage2Text = "Step straight down the cue-to-ghost line at medium speed (4/10) with center stun so the cue ball travels cleanly to the contact ring.",
+                    stage2Text = "Step straight down the cue-to-ghost line at medium speed (4/10) with a center-ball stroke so the cue ball travels cleanly to the contact ring.",
                     stage3Badge = "Ghost-Ball Contact",
                     stage3Text = "At contact, the cue ball fills the ghost-ball ring and sends the #1 directly down the Foot Left pot line with minimal throw.",
                     stage4Badge = "Center-Table Leave",
@@ -344,9 +346,9 @@ object TutorialsAndDrillsCatalog {
                 practiceRulesState = GameRulesState(gameType = GameType.NINE_BALL),
                 visualStages = buildVisualStages(
                     stage1Badge = "Speed-Squared Planning",
-                    stage1Text = "Assess the 9° cut on #1 into Foot Left: with #2 waiting at (1.82, 0.92), pocket speed 4/10 with topspin rolls gently into shape.",
-                    stage2Badge = "Smooth 4/10 Topspin Stroke",
-                    stage2Text = "Strike above center (Follow) at 4/10 speed so rolling distance d = v^2 / (2 mu_r g) stays well short of the end rail.",
+                    stage1Text = "Assess the 9° cut on #1 into Foot Left: with #2 waiting at (1.82, 0.92), pocket speed 4/10 with a rolling cue ball glides gently into shape.",
+                    stage2Badge = "Smooth 4/10 Rolling Stroke",
+                    stage2Text = "Strike through the center of the cue ball at 4/10 speed: a ball struck at center slides for only about half a metre, so it is rolling when it meets #1, and its rolling distance d = v^2 / (2 mu_r g) stays well short of the end rail.",
                     stage3Badge = "Low-Speed Pocket Acceptance",
                     stage3Text = "Gentle contact minimizes cut-induced throw and widens the effective acceptance mouth of Foot Left as #1 heads toward the corner.",
                     stage4Badge = "Ideal Leave on #2",
@@ -356,7 +358,7 @@ object TutorialsAndDrillsCatalog {
                 primaryPocketId = PocketId.FOOT_LEFT,
                 recommendedTipOffset = TipOffset.fromPreset(CueBallSpinPreset.FOLLOW),
                 recommendedSpeedScale = 4,
-            ),
+            ).teaching(CueBallSpinPreset.FOLLOW),
             InteractiveTutorial(
                 id = "tutorial-spin-physics",
                 title = "Spin, Squirt, Swerve & Throw",
@@ -396,9 +398,9 @@ object TutorialsAndDrillsCatalog {
                 id = "tutorial-tangent-rules",
                 title = "The 90\u00b0 and 30\u00b0 Tangent Rules",
                 category = "Cue Ball Paths",
-                summary = "Predict where the cue ball goes after contact: 90 degrees for stun, ~30 degrees forward for natural roll.",
+                summary = "Predict where the cue ball goes after contact: 90 degrees when it arrives with no spin (stun), ~30 degrees forward when it arrives rolling.",
                 keyTakeaways = listOf(
-                    "A sliding (stun) cue ball leaves strictly at 90 degrees to the object-ball line immediately after impact.",
+                    "A cue ball that arrives sliding with no spin (stun) leaves close to the tangent line, about 90 degrees to the object ball's path and a few degrees inside it, immediately after impact. A center-ball hit is already rolling after about half a metre, so a true stun needs a tip below center that suits the distance and speed.",
                     "A naturally rolling cue ball deflects roughly 30 degrees forward along a wide range of medium cut angles.",
                     "Toggle follow, stun, and draw on this layout to steer clear of the Foot Right scratch pocket.",
                 ),
@@ -414,19 +416,19 @@ object TutorialsAndDrillsCatalog {
                 practiceRulesState = GameRulesState(gameType = GameType.NINE_BALL),
                 visualStages = buildVisualStages(
                     stage1Badge = "Scratch Danger on 90° Line",
-                    stage1Text = "Notice how a pure 90° stun tangent off #1 toward Foot Left aims directly across the table into the Foot Right scratch pocket.",
-                    stage2Badge = "Draw Selection (-0.38 R)",
-                    stage2Text = "Switch below center (Draw) at 4/10 speed so backspin remains on the cue ball when it reaches the ~41° cut ghost ball.",
+                    stage1Text = "Notice how the stun line (close to the 90° tangent) off #1 toward Foot Left aims directly across the table into the Foot Right scratch pocket.",
+                    stage2Badge = "Draw Selection (Below Center)",
+                    stage2Text = "Strike well below center (Draw) at 6/10 speed so backspin is still on the cue ball when it reaches the ~44° cut ghost ball; at a softer speed it would wear off before contact.",
                     stage3Badge = "Bent Off the Tangent",
-                    stage3Text = "After sending #1 into Foot Left, backspin curves the cue ball behind the 90° stun line, away from Foot Right.",
+                    stage3Text = "After sending #1 into Foot Left, backspin curves the cue ball behind the stun line, away from Foot Right.",
                     stage4Badge = "Safe Shape on #2",
                     stage4Text = "#1 drops cleanly while the cue ball settles safely mid-table without scratching, leaving an open shot on #2.",
                 ),
                 primaryTargetBallNumber = 1,
                 primaryPocketId = PocketId.FOOT_LEFT,
                 recommendedTipOffset = TipOffset.fromPreset(CueBallSpinPreset.DRAW),
-                recommendedSpeedScale = 4,
-            ),
+                recommendedSpeedScale = 6,
+            ).teaching(CueBallSpinPreset.DRAW),
             InteractiveTutorial(
                 id = "tutorial-pattern-heat-zones",
                 title = "Pattern Play & Position Heat Zones",
@@ -455,7 +457,7 @@ object TutorialsAndDrillsCatalog {
                 visualStages = buildVisualStages(
                     stage1Badge = "3-Ball Heat-Zone Plan",
                     stage1Text = "Map #2 -> #4 -> #6 -> #8 backward: cutting #2 into Side Left lets the natural tangent drift straight into the green zone behind #4.",
-                    stage2Badge = "Controlled Stun (4/10)",
+                    stage2Badge = "Center Ball (4/10)",
                     stage2Text = "Strike center ball at 4/10 speed into the #2 ghost ball so post-impact speed lands softly in the widest heat-zone window.",
                     stage3Badge = "Tangent Leave Activation",
                     stage3Text = "As #2 travels into Side Left, the cue ball slides cleanly off the contact point toward the center-foot corridor.",
@@ -492,7 +494,7 @@ object TutorialsAndDrillsCatalog {
                     stage1Badge = "Two-Way Risk Check",
                     stage1Text = "Evaluate #1 into Foot Left with #5 and #9 in mid-table: at pocket speed 3/10, even a tight miss sends #1 to a rail safely.",
                     stage2Badge = "Soft 3/10 Two-Way Touch",
-                    stage2Text = "Play pure center stun at 3/10 so the cue ball stops or settles near the foot-left quadrant without running wild.",
+                    stage2Text = "Play a soft center-ball stroke at 3/10 so the cue ball slows and settles near the foot-left quadrant without running wild.",
                     stage3Badge = "Controlled Contact & Separation",
                     stage3Text = "Soft ball-ball transfer sends #1 toward Foot Left while limiting post-impact cue-ball rebound speed.",
                     stage4Badge = "Safe Result or Clean Pot",
@@ -558,7 +560,7 @@ object TutorialsAndDrillsCatalog {
                 stepByStepGuide = listOf(
                     "Scan both groups before aiming: notice solids #1, #2, and #3 all have open pockets whereas the stripes cluster needs a breakout.",
                     "Even though a stripe fell on the break, treat the table as Open and step onto solid #1.",
-                    "Call \"#1 in Foot Right\" clearly and strike at medium speed (4/10) with light stun/follow so the cue ball stays mid-table.",
+                    "Call \"#1 in Foot Right\" clearly and strike at medium speed (4/10) with a light follow stroke so the cue ball stays mid-table.",
                     "Once #1 drops legally into Foot Right, Solids are locked in and you have a natural next angle onto #2 or #3.",
                 ),
                 commonMistakeToAvoid = "Assuming you must shoot Stripes simply because a stripe dropped on the break—or forgetting to call the pocket in call-pocket leagues (WPA/BCAPL).",
@@ -602,7 +604,7 @@ object TutorialsAndDrillsCatalog {
                 ruleApplied = "Pattern Play & Call-Shot Sequencing: You must clear all seven group balls before calling and pocketing the #8 on a separate stroke.",
                 stepByStepGuide = listOf(
                     "Start at the #8 (near the foot spot, aligned to Foot Right) and note the comfortable ~20° approach window around center-right cloth.",
-                    "Pick #6 near Foot Left as your Key Ball: pocketing #6 with light stun/follow drifts the cue ball straight into that ideal ~20° angle on the #8.",
+                    "Pick #6 near Foot Left as your Key Ball: pocketing #6 with a gentle rolling stroke drifts the cue ball straight into that ideal ~20° angle on the #8.",
                     "Work backward one more step: #4 plays cleanly into Side Left and routes onto #6, while #2 plays into Side Right to feed #4.",
                     "Execute #2 -> #4 -> #6 -> #8 in sequence using controlled pocket speed (4–5/10) instead of forcing hard draw recoveries.",
                 ),
@@ -626,7 +628,7 @@ object TutorialsAndDrillsCatalog {
                 visualStages = buildVisualStages(
                     stage1Badge = "Key Ball = #6 -> #8",
                     stage1Text = "Work backward from #8 -> #6 -> #4 -> #2. Start with #2 into Side Right so the cue ball stays in mid-table for #4.",
-                    stage2Badge = "Controlled Stun (4/10)",
+                    stage2Badge = "Center Ball (4/10)",
                     stage2Text = "Align down the ~9° cut on #2 into Side Right with a calm 4/10 center-ball stroke so position stays under control.",
                     stage3Badge = "9° Ghost-Ball Impact",
                     stage3Text = "Crisp contact drops #2 smoothly toward Side Right while directing the cue ball off the right side pocket line.",
@@ -646,7 +648,7 @@ object TutorialsAndDrillsCatalog {
                 stepByStepGuide = listOf(
                     "Identify the problem ball (#3 frozen beside #14) and verify that #5 is wide open as an insurance ball—do NOT pot #5 before solving #3.",
                     "Call #2 into Foot Left and check the 90° stun tangent path from #2's ghost ball straight into the #3/#14 pair.",
-                    "Strike #2 with medium-firm stun (6/10) so #2 drops in Foot Left and the cue ball separates #3 from #14 cleanly.",
+                    "Strike #2 with a touch of low (below center) at 6/10 so the cue ball arrives with no spin (stun), #2 drops in Foot Left and the cue ball separates #3 from #14 cleanly.",
                     "If #3 lands hidden after the breakout, switch straight to your open insurance ball #5 to regain shape on #3 and then the #8.",
                 ),
                 commonMistakeToAvoid = "Potting your wide-open insurance ball (#5) first, which leaves no fallback shot if the #3 breakout kisses a stripe or stops on a rail.",
@@ -669,8 +671,8 @@ object TutorialsAndDrillsCatalog {
                 visualStages = buildVisualStages(
                     stage1Badge = "Keep #5 as Insurance",
                     stage1Text = "#3 and #14 are frozen together. Leave #5 untouched as your safety net and use #2 into Foot Left to send the cue ball into the cluster.",
-                    stage2Badge = "Firm Stun Breakout (6/10)",
-                    stage2Text = "Strike dead center at 6/10 speed into #2's ghost ball (~42° cut) so the 90° stun line aims squarely at #3/#14.",
+                    stage2Badge = "Firm Low-Tip Stun (6/10)",
+                    stage2Text = "Strike just below center at 6/10 speed into #2's ghost ball (~42° cut) so the cue ball arrives with no spin and the 90° stun line aims squarely at #3/#14.",
                     stage3Badge = "90° Tangent Toward Cluster",
                     stage3Text = "At impact, #2 accelerates into Foot Left while the cue ball launches along the perpendicular tangent straight toward #3/#14.",
                     stage4Badge = "Breakout + Insurance Fallback",
@@ -680,7 +682,7 @@ object TutorialsAndDrillsCatalog {
                 primaryPocketId = PocketId.FOOT_LEFT,
                 recommendedTipOffset = TipOffset(sideRatio = 0.0, verticalRatio = 0.0),
                 recommendedSpeedScale = 6,
-            ),
+            ).teaching(CueBallSpinPreset.STUN),
             EightBallWalkthrough(
                 id = "walkthrough-8ball-legal-safety-rail-rule",
                 title = "4. Legal 8-Ball Safety: First Contact + Cushion Rule",
@@ -732,8 +734,8 @@ object TutorialsAndDrillsCatalog {
                 stepByStepGuide = listOf(
                     "Look at the #8 first: its cleanest pocket is Foot Right, so imagine the straight-in extension line backward from Foot Right through #8 toward center table.",
                     "Rather than placing the cue ball directly behind #7 (which would force a long follow or awkward draw across the table), place the cue ball at (1.18, 0.32) m.",
-                    "From that ball-in-hand angle (~28° half-ball cut on #7 into Foot Left), a clean stun stroke sends the cue ball along the 90° tangent straight onto the #8's Foot Right line.",
-                    "Pot #7 at speed 4/10 with center stun to land on a virtually straight-in #8 for the rack.",
+                    "From that ball-in-hand angle (~28° half-ball cut on #7 into Foot Left), a clean stun stroke (a low-center tip, so no spin is left at contact) sends the cue ball along the 90° tangent straight onto the #8's Foot Right line.",
+                    "Pot #7 at speed 4/10 with a low-center tip (stun at the ball) to land on a virtually straight-in #8 for the rack.",
                 ),
                 commonMistakeToAvoid = "Placing the cue ball dead straight behind #7 out of habit, which creates unnecessary follow/draw speed guesswork for position on the #8.",
                 layout = TableLayout(
@@ -752,9 +754,9 @@ object TutorialsAndDrillsCatalog {
                 ),
                 visualStages = buildVisualStages(
                     stage1Badge = "Place at ~25° Angle",
-                    stage1Text = "With ball in hand, avoid placing dead straight behind #7; instead place at (1.18, 0.32) m so the natural 90° stun line points at the #8.",
-                    stage2Badge = "Center Stun (4/10)",
-                    stage2Text = "Strike pure center ball at 4/10 speed into #7's Foot Left ghost ball so sliding stun holds true at impact.",
+                    stage1Text = "With ball in hand, avoid placing dead straight behind #7; instead place at (1.18, 0.32) m so the natural stun line, close to 90°, points at the #8.",
+                    stage2Badge = "Low-Center Stun (4/10)",
+                    stage2Text = "Strike below center at 4/10 speed into #7's Foot Left ghost ball so the cue ball reaches it sliding with no spin (stun).",
                     stage3Badge = "90° Tangent Onto #8 Line",
                     stage3Text = "#7 heads cleanly into Foot Left while the cue ball peels off at 90° straight up toward the #8-to-Foot-Right line.",
                     stage4Badge = "Easy Straight-In #8",
@@ -764,24 +766,24 @@ object TutorialsAndDrillsCatalog {
                 primaryPocketId = PocketId.FOOT_LEFT,
                 recommendedTipOffset = TipOffset(sideRatio = 0.0, verticalRatio = 0.0),
                 recommendedSpeedScale = 4,
-            ),
+            ).teaching(CueBallSpinPreset.STUN),
             EightBallWalkthrough(
                 id = "walkthrough-8ball-final-eight-avoid-scratch",
                 title = "6. Pocketing the 8-Ball Without Scratching on the Tangent Line",
-                situationSummary = "Only the #8 (plus two opponent stripes) remains. Cutting the #8 at 45° into Foot Left puts the 90° stun tangent line straight into the opposite Foot Right corner pocket.",
+                situationSummary = "Only the #8 (plus two opponent stripes) remains. Cutting the #8 at 45° into Foot Left puts the stun line, close to the 90° tangent, into the opposite Foot Right corner pocket.",
                 ruleApplied = "8-Ball Scratch Loss Rule: Pocketing the #8 while scratching the cue ball is an immediate loss of rack (whereas missing the #8 and scratching while it stays up is only a standard foul).",
                 stepByStepGuide = listOf(
                     "Verify the call: clearly designate \"#8 in Foot Left\" before stepping into your stance.",
-                    "Trace the 90° stun path before choosing spin: here a pure stun hit travels directly from the #8's ghost ball into Foot Right—an instant loss of game!",
-                    "Select DRAW (backspin, tip below center) at controlled speed 4/10 to bend the cue ball backward off the tangent line toward center-right cloth.",
+                    "Trace the stun path (close to the 90° tangent) before choosing spin: here a pure stun hit travels directly from the #8's ghost ball into Foot Right—an instant loss of game!",
+                    "Select DRAW (backspin, tip well below center) at firm speed 6/10 to bend the cue ball backward off the tangent line toward center-right cloth.",
                     "Preview the Draw trajectory in the Table & Planner to confirm the cue ball clears Foot Right cleanly while the #8 drops into Foot Left.",
                 ),
-                commonMistakeToAvoid = "Hitting a 45° 8-ball cut with center-ball stun without checking where the 90° tangent line points—scratching on the made 8-ball loses the rack immediately.",
+                commonMistakeToAvoid = "Hitting a 45° 8-ball cut with a spin-free cue ball without checking where the near-90° tangent line points—scratching on the made 8-ball loses the rack immediately.",
                 layout = TableLayout(
                     table = table,
                     balls = listOf(
                         Ball(number = 0, position = Vec2(1.10, 0.635)),
-                        Ball(number = 8, position = Vec2(1.9454, 0.5946)),
+                        Ball(number = 8, position = Vec2(1.88, 0.57)),
                         Ball(number = 10, position = Vec2(0.62, 0.34)),
                         Ball(number = 13, position = Vec2(0.74, 1.04)),
                     ),
@@ -791,10 +793,10 @@ object TutorialsAndDrillsCatalog {
                     eightBallGroup = EightBallGroup.EIGHT_BALL,
                 ),
                 visualStages = buildVisualStages(
-                    stage1Badge = "Stun = Foot Right Scratch!",
-                    stage1Text = "Before shooting #8 into Foot Left, check the 90° stun tangent: center ball walks straight into Foot Right—an instant rack loss.",
-                    stage2Badge = "Draw (-0.38 R) at 4/10",
-                    stage2Text = "Drop the tip below center (Draw) at 4/10 speed and lock onto the Foot Left ghost ball so backspin activates at contact.",
+                    stage1Badge = "No Spin = Foot Right Scratch!",
+                    stage1Text = "Before shooting #8 into Foot Left, check the stun line (close to the 90° tangent): a cue ball that arrives with no spin walks straight into Foot Right, an instant rack loss.",
+                    stage2Badge = "Draw (Below Center) at 6/10",
+                    stage2Text = "Drop the tip well below center (Draw) at 6/10 speed and lock onto the Foot Left ghost ball so backspin activates at contact.",
                     stage3Badge = "Backspin Clears Scratch Pocket",
                     stage3Text = "At impact, #8 drives cleanly toward Foot Left while backspin pulls the cue ball sharply behind the 90° scratch line.",
                     stage4Badge = "Rack Won Safely",
@@ -803,10 +805,63 @@ object TutorialsAndDrillsCatalog {
                 primaryTargetBallNumber = 8,
                 primaryPocketId = PocketId.FOOT_LEFT,
                 recommendedTipOffset = TipOffset.fromPreset(CueBallSpinPreset.DRAW),
-                recommendedSpeedScale = 4,
-            ),
+                recommendedSpeedScale = 6,
+            ).teaching(CueBallSpinPreset.DRAW),
         )
     }
+
+    /**
+     * The tip that gives the cue ball the spin state [state] names when it reaches the object ball, for this
+     * layout's shot at its recommended speed; the setup's own tip if no tip within the miscue limit does. A
+     * centre-ball hit is rolling after about half a metre, so a stun or draw lesson needs a tip below centre that
+     * depends on the distance and the speed.
+     */
+    private fun impactStateTip(
+        layout: TableLayout,
+        targetBallNumber: Int,
+        pocketId: PocketId,
+        speedScale: Int,
+        state: CueBallSpinPreset,
+        fallback: TipOffset,
+    ): TipOffset {
+        val cue = layout.cueBall() ?: return fallback
+        val target = layout.ballByNumber(targetBallNumber) ?: return fallback
+        val aim = GhostBallAiming.computeAimGeometry(
+            cueBall = cue,
+            objectBall = target,
+            pocket = layout.table.pocketById(pocketId),
+            otherBalls = layout.balls.filter { it.number != cue.number && it.number != target.number },
+            table = layout.table,
+        )
+        return SpinPhysics.tipForImpactState(
+            preset = state,
+            cueSpeedMps = PlayerProfile().speedForScale(speedScale),
+            cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+            table = layout.table,
+        ) ?: fallback
+    }
+
+    private fun InteractiveTutorial.teaching(state: CueBallSpinPreset): InteractiveTutorial = copy(
+        recommendedTipOffset = impactStateTip(
+            practiceLayout,
+            primaryTargetBallNumber,
+            primaryPocketId,
+            recommendedSpeedScale,
+            state,
+            recommendedTipOffset,
+        ),
+    )
+
+    private fun EightBallWalkthrough.teaching(state: CueBallSpinPreset): EightBallWalkthrough = copy(
+        recommendedTipOffset = impactStateTip(
+            layout,
+            primaryTargetBallNumber,
+            primaryPocketId,
+            recommendedSpeedScale,
+            state,
+            recommendedTipOffset,
+        ),
+    )
 
     private fun buildVisualStages(
         stage1Badge: String,
