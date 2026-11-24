@@ -15,6 +15,11 @@ import kotlin.math.sqrt
  */
 object MotionPhysics {
     const val GRAVITY_M_S2: Double = 9.81
+
+    /**
+     * Default ball-ball restitution of phenolic balls; a table carries its own as
+     * [com.runout.engine.model.BallContactParams.restitution].
+     */
     const val BALL_BALL_RESTITUTION: Double = 0.93
 
     /**

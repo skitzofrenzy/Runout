@@ -36,7 +36,8 @@ data class CalibrationSessionPreset(
 )
 
 /**
- * Platform MEMS tilt-sensor bridge providing paired 0/180-degree readings across a 3x3 table grid.
+ * Source of paired 0/180-degree tilt readings across a 3x3 table grid. In this version both platforms return
+ * the bundled sample sessions; no device sensor is read.
  */
 expect class PlatformTiltSensorController() {
     val sensorBackendName: String

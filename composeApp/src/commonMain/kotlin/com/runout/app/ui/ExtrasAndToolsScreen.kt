@@ -1220,7 +1220,7 @@ private fun BreakSpeedMeterSection(
             )
             ToolsStatusBadge(
                 text = if (inMemoryOnly) {
-                    "In-memory transient PCM only (no audio recorded)"
+                    "Nothing is recorded"
                 } else {
                     "Buffered PCM"
                 },

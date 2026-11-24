@@ -29,11 +29,16 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val MAX_DECODED_IMAGE_SIDE_PX: Int = 960
+
+/** Whether the camera temp folder has been swept in this process yet. */
+private var cameraTempSweptInProcess: Boolean = false
 
 @Composable
 actual fun rememberPlatformPhotoPicker(
@@ -46,6 +51,18 @@ actual fun rememberPlatformPhotoPicker(
     val latestOnError by rememberUpdatedState(onError)
 
     var pendingCameraPath by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Once per process, before any capture result can arrive, remove what an earlier interrupted capture left
+    // behind. A capture that is still pending after a restore is kept so its result can still be read.
+    remember(context) {
+        if (!cameraTempSweptInProcess) {
+            cameraTempSweptInProcess = true
+            sweepCameraTempDirectory(
+                File(context.cacheDir, CAMERA_TEMP_DIR_NAME),
+                keep = pendingCameraPath?.let { File(it) },
+            )
+        }
+    }
 
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
@@ -90,13 +107,13 @@ actual fun rememberPlatformPhotoPicker(
             return@rememberLauncherForActivityResult
         }
 
-        scope.launch {
-            val result = withContext(Dispatchers.Default) {
-                try {
-                    decodeFileToArgbFrame(file)
-                } finally {
-                    runCatching { file.delete() }
-                }
+        // ATOMIC starts the body even if the scope is already cancelled, so the finally below always runs and
+        // the full-size file is deleted whatever happens to the coroutine.
+        scope.launch(start = CoroutineStart.ATOMIC) {
+            val result = try {
+                withContext(Dispatchers.Default) { decodeFileToArgbFrame(file) }
+            } finally {
+                withContext(NonCancellable) { runCatching { file.delete() } }
             }
             result.fold(
                 onSuccess = { frame ->
@@ -123,8 +140,9 @@ actual fun rememberPlatformPhotoPicker(
 
             override fun launchCamera() {
                 runCatching {
-                    val tempDir = File(context.cacheDir, "camera_temp").apply { mkdirs() }
+                    val tempDir = File(context.cacheDir, CAMERA_TEMP_DIR_NAME).apply { mkdirs() }
                     val file = File(tempDir, "capture_${System.currentTimeMillis()}.jpg")
+                    sweepCameraTempDirectory(tempDir, keep = file)
                     val uri = FileProvider.getUriForFile(
                         context,
                         "${context.packageName}.fileprovider",
@@ -172,7 +190,7 @@ private fun decodeUriToArgbFrame(
         }
     }
 
-    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+    val bytes = resolver.openInputStream(uri)?.use { readAtMost(it) }
         ?: error("Unable to open image stream.")
     decodeBytesFallback(bytes)
 }
@@ -188,8 +206,8 @@ private fun decodeFileToArgbFrame(file: File): Result<ArgbImageFrame> = runCatch
         }
     }
 
-    val bytes = file.takeIf { it.exists() }?.readBytes()
-        ?: error("Unable to read captured photo file.")
+    if (!file.exists() || exceedsFallbackReadLimit(file.length())) error("Unable to read captured photo file.")
+    val bytes = file.readBytes()
     decodeBytesFallback(bytes)
 }
 

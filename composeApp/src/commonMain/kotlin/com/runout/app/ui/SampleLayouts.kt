@@ -108,27 +108,17 @@ object SampleLayouts {
     )
 
     /**
-     * Scales all ball positions proportionally from `layout.table` to [newSpec], updates ball radii
-     * for snooker vs pool tables, clamps every ball inside playable cushion bounds, and resolves any
-     * resulting overlaps.
+     * Scales all ball positions proportionally from `layout.table` to [newSpec], gives the balls the ball size of
+     * the table's [TableSpec.kind] (pockets rebuilt in the same cut if that differs from the spec's), clamps every
+     * ball inside playable cushion bounds, and resolves any resulting overlaps.
      */
     fun resizeTableLayout(layout: TableLayout, newSpec: TableSpec): TableLayout {
         val oldLength = layout.table.lengthMeters.coerceAtLeast(1e-6)
         val oldWidth = layout.table.widthMeters.coerceAtLeast(1e-6)
-        val targetRadius = if (newSpec.name.contains("Snooker", ignoreCase = true)) {
-            TableSpec.SNOOKER_BALL_RADIUS_METERS
-        } else {
-            TableSpec.POOL_BALL_RADIUS_METERS
-        }
+        val targetRadius = newSpec.kind.defaultBallRadiusMeters
         val effectiveSpec = if (abs(newSpec.ballRadiusMeters - targetRadius) > 1e-9) {
-            newSpec.copy(
-                ballRadiusMeters = targetRadius,
-                pockets = TableSpec.defaultPockets(
-                    lengthMeters = newSpec.lengthMeters,
-                    widthMeters = newSpec.widthMeters,
-                    ballRadiusMeters = targetRadius,
-                ),
-            )
+            newSpec.copy(ballRadiusMeters = targetRadius)
+                .withPocketPreset(newSpec.pocketPreset ?: newSpec.kind.defaultPocketPreset)
         } else {
             newSpec
         }

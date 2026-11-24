@@ -3,7 +3,6 @@ package com.runout.engine.planner
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.Ball
 import com.runout.engine.model.GameRulesState
-import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
 import com.runout.engine.model.PocketSpec
 import com.runout.engine.model.TableLayout
@@ -19,10 +18,27 @@ import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 /**
- * Shot planner that enumerates legal target-ball and pocket combinations, filters blocked or
- * impossible cuts (`> 80°`) and off-table ghost balls, evaluates spin presets across candidate
- * player speed scales (`3, 5, 7` or an explicit override), scores 2-ball position play against the
- * next legal target ball, and ranks candidates with scores normalized in `1e-6..1.0`.
+ * Shot planner that enumerates legal target-ball and pocket combinations, filters blocked or impossible cuts (`> 80°`)
+ * and off-table ghost balls, evaluates the stun, follow and draw presets across candidate speeds (or an explicit
+ * override), and ranks each pot by the best of its strokes.
+ *
+ * A stroke's score, in `(0, 1]`, is a product of factors that are each at most 1, so it needs no clipping and two
+ * different shots seldom tie:
+ *
+ * > score = P(make) x centre x position x scratch x draw x reach
+ *
+ * - **P(make)** is [ExecutionErrorModel.makeProbability] of the stroke (its speed and the preset's tip, with the other
+ *   balls narrowing the window), floored at `1e-6` so that every playable pot keeps a rank. It is reported as
+ *   [ShotRecommendation.makeProbability].
+ * - **centre** is `0.90 + 0.10 x c`, `c` in `0..1` how close to the middle of the table the cue ball stops.
+ * - **position** is `(1 - w) + w x v`: `v` in `0..1` the best stroke-free make probability
+ *   ([HeatZoneGenerator.shotQuality]) of the next legal ball from where the cue ball stops, times a control factor
+ *   for cushions and draw (and, when it sets up the game ball, for a rail-tight leave and the pace); `w` is
+ *   [POSITION_BONUS_WEIGHT], or [FINAL_BALL_POSITION_BONUS_WEIGHT] when the next ball is the game ball. With no next
+ *   ball (the game ball itself) it is a small ease factor for pace and draw instead.
+ * - **scratch** is [ALL_SCRATCH_PENALTY_FACTOR] when the cue ball's path scratches; **draw** is
+ *   `1 - `[LOW_DRAW_SCORE_PENALTY] for a draw stroke by a player with little draw; **reach** is `1 - 0.35` when the
+ *   cue ball would stop short of the object ball.
  */
 object OneShotPlanner {
     private val SPIN_CANDIDATES: List<CueBallSpinPreset> = listOf(
@@ -39,7 +55,9 @@ object OneShotPlanner {
     private const val FINAL_BALL_POSITION_BONUS_WEIGHT: Double = 0.42
     private const val LOW_DRAW_RATIO_THRESHOLD: Double = 0.8
     private const val LOW_DRAW_SCORE_PENALTY: Double = 0.15
+    private const val STOPPED_SHORT_PENALTY: Double = 0.35
     private const val PREFERRED_DEFAULT_SPEED_UNITS: Double = 4.5
+    private const val MIN_MAKE_PROBABILITY: Double = 1e-6
 
     fun rankShots(
         layout: TableLayout,
@@ -84,18 +102,14 @@ object OneShotPlanner {
                 )
                 if (!aim.isShotPlayable) continue
 
-                val baseScore = computeBaseShotScore(
-                    aim = aim,
-                    pocket = pocket,
-                    aimErrorStdRad = playerProfile.aimErrorStdRad,
-                )
-
                 val isSettingUpFinalBall = nextTargets.size == 1 &&
                     nextTargets.first().number == rulesState.gameType.requiredEndBallNumber
                 val bestCandidate = selectBestSpinAndSpeed(
                     cueBall = cueBall,
+                    targetBall = targetBall,
+                    pocket = pocket,
                     aim = aim,
-                    baseScore = baseScore,
+                    layout = layout,
                     table = table,
                     tableCenter = tableCenter,
                     halfDiagonal = halfDiagonal,
@@ -118,6 +132,7 @@ object OneShotPlanner {
                     recommendedSpeedUnits = bestCandidate.speedUnits,
                     nextTargetBallNumber = bestCandidate.nextTargetBallNumber,
                     nextTargetPositionLine = bestCandidate.nextTargetPositionLine,
+                    makeProbability = bestCandidate.makeProbability,
                 )
             }
         }
@@ -155,29 +170,17 @@ object OneShotPlanner {
     }
 
     /**
-     * The pot's make probability for this player ([HeatZoneGenerator.shotQuality], the same function the run-out
-     * planner and the position maps use), floored at `1e-6` so every playable shot keeps a rank.
+     * The legal balls once [pottedBall] has been potted from [remainingLayout]: none after the game ball; otherwise the
+     * legal targets under the rules that follow the pot ([MultiShotPlanner.rulesAfterPotting]), so that on an open
+     * 8-ball table the group of the potted ball is assigned and the 8 follows the last ball of that group.
      */
-    private fun computeBaseShotScore(
-        aim: AimGeometry,
-        pocket: PocketSpec,
-        aimErrorStdRad: Double,
-    ): Double = HeatZoneGenerator.shotQuality(aim, pocket, aimErrorStdRad).coerceIn(1e-6, 1.0)
-
-    private fun nextLegalTargetsAfterPotting(
+    internal fun nextLegalTargetsAfterPotting(
         remainingLayout: TableLayout,
         pottedBall: Ball,
         rulesState: GameRulesState,
-    ): List<Ball> = when (rulesState.gameType) {
-        GameType.NINE_BALL -> {
-            if (pottedBall.number == 9) emptyList() else rulesState.legalTargetBalls(remainingLayout)
-        }
-        GameType.TEN_BALL -> {
-            if (pottedBall.number == 10) emptyList() else rulesState.legalTargetBalls(remainingLayout)
-        }
-        GameType.EIGHT_BALL -> {
-            if (pottedBall.number == 8) emptyList() else rulesState.legalTargetBalls(remainingLayout)
-        }
+    ): List<Ball> {
+        if (pottedBall.number == rulesState.gameType.requiredEndBallNumber) return emptyList()
+        return MultiShotPlanner.rulesAfterPotting(rulesState, pottedBall).legalTargetBalls(remainingLayout)
     }
 
     private fun evaluateBestNextShot(
@@ -206,11 +209,7 @@ object OneShotPlanner {
                 )
                 if (!nextAim.isShotPlayable) continue
 
-                val nextScore = computeBaseShotScore(
-                    aim = nextAim,
-                    pocket = nextPocket,
-                    aimErrorStdRad = aimErrorStdRad,
-                )
+                val nextScore = HeatZoneGenerator.shotQuality(nextAim, nextPocket, aimErrorStdRad, remainingLayout.balls)
                 if (best == null || nextScore > best.score) {
                     best = NextShotEvaluation(
                         nextBallNumber = nextBall.number,
@@ -225,8 +224,10 @@ object OneShotPlanner {
 
     private fun selectBestSpinAndSpeed(
         cueBall: Ball,
+        targetBall: Ball,
+        pocket: PocketSpec,
         aim: AimGeometry,
-        baseScore: Double,
+        layout: TableLayout,
         table: TableSpec,
         tableCenter: Vec2,
         halfDiagonal: Double,
@@ -286,18 +287,19 @@ object OneShotPlanner {
                     null
                 }
 
-                val baseWithCenterRaw = baseScore * (0.90 + 0.10 * centerCloseness)
-                val baseWithCenter = if (nextTargets.isEmpty()) {
-                    val terminalEase = (
-                        1.0 -
-                            0.015 * abs(speedUnits - 4.0) -
-                            (if (spin == CueBallSpinPreset.DRAW) 0.02 else 0.0)
-                        ).coerceIn(0.85, 1.0)
-                    baseWithCenterRaw * terminalEase
-                } else {
-                    baseWithCenterRaw
-                }
-                val positionBonus = if (bestNext != null) {
+                val make = ExecutionErrorModel.makeProbability(
+                    table = table,
+                    targetBall = targetBall,
+                    cueBallRadiusMeters = cueBall.radiusMeters,
+                    pocket = pocket,
+                    aim = aim,
+                    cueSpeedMps = speedMps,
+                    tip = tip,
+                    playerProfile = playerProfile,
+                    otherBalls = layout.balls,
+                ).coerceAtLeast(MIN_MAKE_PROBABILITY)
+                val centreFactor = 0.90 + 0.10 * centerCloseness
+                val positionValue = if (bestNext != null) {
                     if (isSettingUpFinalBall) {
                         val minRailDist = minOf(
                             cueStop.x,
@@ -317,30 +319,43 @@ object OneShotPlanner {
                                 0.02 * abs(speedUnits - 4.0) -
                                 (if (spin == CueBallSpinPreset.DRAW) 0.04 else 0.0)
                             ).coerceIn(0.70, 1.0)
-                        positionWeight * bestNext.score * comfort * ease
+                        bestNext.score * comfort * ease
                     } else {
                         val controlEase = (
                             1.0 -
                                 0.04 * (chosenPath.cushionContacts - 1).coerceAtLeast(0) -
                                 (if (spin == CueBallSpinPreset.DRAW) 0.025 else 0.0)
                             ).coerceIn(0.78, 1.0)
-                        positionWeight * bestNext.score * controlEase
+                        bestNext.score * controlEase
                     }
                 } else {
                     0.0
                 }
+                val positionFactor = if (nextTargets.isEmpty()) {
+                    // The game ball: no position to play for, only an easy pace and no draw.
+                    (
+                        1.0 -
+                            0.015 * abs(speedUnits - 4.0) -
+                            (if (spin == CueBallSpinPreset.DRAW) 0.02 else 0.0)
+                        ).coerceIn(0.85, 1.0)
+                } else {
+                    (1.0 - positionWeight) + positionWeight * positionValue
+                }
                 val scratchFactor = if (scratches) ALL_SCRATCH_PENALTY_FACTOR else 1.0
-                val drawPenalty = if (
+                val drawFactor = if (
                     spin == CueBallSpinPreset.DRAW &&
                     playerProfile.maxEffectiveDrawRatio < LOW_DRAW_RATIO_THRESHOLD
                 ) {
-                    LOW_DRAW_SCORE_PENALTY
+                    1.0 - LOW_DRAW_SCORE_PENALTY
                 } else {
-                    0.0
+                    1.0
                 }
-                val distanceSpinPenalty = if (preImpact.state == SpinPhysics.ImpactSpinState.STOPPED_SHORT) 0.35 else 0.0
-                val candidateScore = ((baseWithCenter + positionBonus) * scratchFactor - drawPenalty - distanceSpinPenalty)
-                    .coerceIn(1e-6, 1.0)
+                val reachFactor = if (preImpact.state == SpinPhysics.ImpactSpinState.STOPPED_SHORT) {
+                    1.0 - STOPPED_SHORT_PENALTY
+                } else {
+                    1.0
+                }
+                val candidateScore = make * centreFactor * positionFactor * scratchFactor * drawFactor * reachFactor
 
                 val candidate = CandidateEvaluation(
                     spin = spin,
@@ -353,6 +368,7 @@ object OneShotPlanner {
                     centerDistance = centerDistance,
                     nextTargetBallNumber = bestNext?.nextBallNumber,
                     nextTargetPositionLine = bestNext?.let { cueStop to it.nextGhostCenter },
+                    makeProbability = make,
                 )
 
                 if (best == null || isBetterCandidate(candidate, best)) {
@@ -394,6 +410,7 @@ object OneShotPlanner {
         val centerDistance: Double,
         val nextTargetBallNumber: Int?,
         val nextTargetPositionLine: Pair<Vec2, Vec2>?,
+        val makeProbability: Double,
     )
 }
 

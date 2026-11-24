@@ -31,6 +31,8 @@ enum class CueBallSpinPreset {
  *   slide after contact is over, on open cloth: the angle of the 90° and 30° rules.
  * @property cushionContacts Cushions the cue ball touched.
  * @property ballContacts Balls the cue ball touched after the object ball.
+ * @property truncated True when the simulation's event budget ran out with balls still moving, so the later part of
+ *   the path was run on without contacts between balls (see [PostShotTableSimulation.truncated]).
  */
 data class TrajectoryPath(
     val spin: CueBallSpinPreset,
@@ -41,6 +43,7 @@ data class TrajectoryPath(
     val rollingDeflectionAngleRad: Double = initialDeflectionAngleRad,
     val cushionContacts: Int = 0,
     val ballContacts: Int = 0,
+    val truncated: Boolean = false,
 )
 
 /**

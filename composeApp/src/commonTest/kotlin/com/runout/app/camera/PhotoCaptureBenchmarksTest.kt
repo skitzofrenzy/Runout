@@ -206,18 +206,18 @@ class PhotoCaptureBenchmarksTest {
     }
 
     @Test
-    fun rawArgbFrameDecodingOnTournamentBlueRecoversClothAndSubFifteenMmAccuracy() {
+    fun rawArgbFrameDecodingOnBlueClothRecoversClothAndSubFifteenMmAccuracy() {
         assertRawPixelRoundTrip(
             preset = SampleCapturedPhotos.angledNineFootNineBall(),
-            expectedCloth = ClothHueCategory.TOURNAMENT_BLUE,
+            expectedCloth = ClothHueCategory.BLUE,
         )
     }
 
     @Test
-    fun rawArgbFrameDecodingOnClassicGreenRecoversClothAndSubFifteenMmAccuracy() {
+    fun rawArgbFrameDecodingOnGreenClothRecoversClothAndSubFifteenMmAccuracy() {
         assertRawPixelRoundTrip(
             preset = SampleCapturedPhotos.overheadNineFootTenBall(),
-            expectedCloth = ClothHueCategory.CLASSIC_GREEN,
+            expectedCloth = ClothHueCategory.GREEN,
         )
     }
 
@@ -270,7 +270,7 @@ class PhotoCaptureBenchmarksTest {
         val preset = SampleCapturedPhotos.angledNineFootNineBall()
         val frame = SampleCapturedPhotos.renderPresetAsRawArgbFrame(
             preset = preset,
-            clothCategory = ClothHueCategory.TOURNAMENT_BLUE,
+            clothCategory = ClothHueCategory.BLUE,
         )
 
         val bundle = PhotoCaptureEvaluator.createCapturedPhotoFromRawFrame(

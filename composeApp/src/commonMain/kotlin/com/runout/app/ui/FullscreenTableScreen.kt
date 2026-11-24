@@ -56,6 +56,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.runout.app.fallbackChanceLabel
 import com.runout.app.fallbackTitle
+import com.runout.app.planning.showsFocusEdit
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.BallSetProfile
 import com.runout.engine.model.GameRulesState
@@ -123,6 +124,7 @@ fun FullscreenTableScreen(
     onSelectSpeedUnits: (Double?) -> Unit = {},
     onResetSandboxDefaults: () -> Unit = {},
     fallbackAdvice: FallbackAdvice? = null,
+    planError: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val activePlan = rollingPlan?.window
@@ -221,6 +223,16 @@ fun FullscreenTableScreen(
                             },
                         )
                     }
+                }
+
+                if (planError != null) {
+                    Text(
+                        text = planError,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = RunoutColors.DangerCoral,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
 
                 // Expanded Pool Table Canvas
@@ -508,7 +520,8 @@ fun StepPlaybackControlBar(
     } else {
         null
     }
-    val isEdited = rollingPlan?.isFocusEdited == true && !isRackComplete
+    // The same word as the "Reset Defaults" chip beside the table: the planner's own answer.
+    val isEdited = rollingPlan?.showsFocusEdit == true
     val resetInMainRow = isEdited && compactLandscape
 
     Surface(
@@ -625,7 +638,7 @@ fun StepPlaybackControlBar(
                             if (posProb != null && posTier != null) {
                                 val posPct = (posProb.coerceIn(0.0, 1.0) * 100.0).roundToInt()
                                 withStyle(SpanStyle(color = shotDifficultyColor(posTier), fontWeight = FontWeight.SemiBold)) {
-                                    append("Pos $posPct% ${posTier.label}")
+                                    append("Position $posPct% ${posTier.label}")
                                 }
                             } else {
                                 withStyle(SpanStyle(color = RunoutColors.PrimaryCyan, fontWeight = FontWeight.SemiBold)) {
@@ -651,9 +664,9 @@ fun StepPlaybackControlBar(
                             overflow = TextOverflow.Ellipsis,
                         )
                     } else if (selectedShot != null) {
-                        val scorePct = (selectedShot.score * 100.0).roundToInt()
+                        val makePct = (selectedShot.makeProbability.coerceIn(0.0, 1.0) * 100.0).roundToInt()
                         Text(
-                            text = "Single shot: #${selectedShot.targetBall.number} -> ${selectedShot.pocket.id.displayName} ($scorePct%)",
+                            text = "Single shot: #${selectedShot.targetBall.number} -> ${selectedShot.pocket.id.displayName} (Make $makePct%)",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface,

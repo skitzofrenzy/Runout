@@ -82,8 +82,34 @@ data class SavedTableProfile(
     val calibratedDateIso: String,
     val applySlopeInPhysics: Boolean = false,
 ) {
-    fun toEffectiveTableSpec(): TableSpec =
-        baseTableSpec.copy(cloth = calibratedParams.cloth, name = profileName)
+    /**
+     * The calibrated table: [baseTableSpec] (its size, [TableSpec.kind], ball radius and pockets) with the fitted
+     * cloth and ball-ball friction. [TableSpec.name] becomes [profileName], for display; the table's identity stays in
+     * its [TableSpec.kind] and [TableSpec.pocketPreset].
+     */
+    fun toEffectiveTableSpec(): TableSpec = baseTableSpec.copy(
+        cloth = calibratedParams.cloth,
+        ballContact = baseTableSpec.ballContact.copy(frictionMu = calibratedParams.ballBallFrictionMuB),
+        name = profileName,
+    )
+
+    /**
+     * The calibrated table ([toEffectiveTableSpec]) applied to [currentTable], the table in use: the pocket cut stays
+     * that of [currentTable] when both are the same [TableSpec.kind] (a pocket choice is not part of a calibration).
+     * A current table with a custom pocket set keeps those pockets when it is also the same size. A table of the
+     * other kind gets the profile's own pockets.
+     */
+    fun toEffectiveTableSpec(currentTable: TableSpec): TableSpec {
+        val effective = toEffectiveTableSpec()
+        if (currentTable.kind != effective.kind) return effective
+        val currentPreset = currentTable.pocketPreset
+        return when {
+            currentPreset != null -> effective.withPocketPreset(currentPreset)
+            currentTable.lengthMeters == effective.lengthMeters && currentTable.widthMeters == effective.widthMeters ->
+                effective.copy(pockets = currentTable.pockets, pocketPreset = null)
+            else -> effective
+        }
+    }
 }
 
 /**

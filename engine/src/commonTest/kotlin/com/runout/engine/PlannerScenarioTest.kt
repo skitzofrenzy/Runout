@@ -94,22 +94,43 @@ class PlannerScenarioTest {
 
     @Test
     fun s03NaturalAngleBeatsDrawWithSide() {
+        // Precondition: draw with side on shot 1 is a real alternative: it, too, leaves a good shot on ball 2.
+        val tempting = listOf(-0.28, 0.28).mapNotNull { side ->
+            MultiShotPlanner.planRunout(
+                PlannerScenarios.naturalAngle, nineBall, profile, horizonShots = 3,
+                customFirstShotTip = TipOffset(sideRatio = side, verticalRatio = -0.34),
+            ).firstOrNull()
+        }.maxByOrNull { it.steps.first().positionSuccessProbability ?: 0.0 }
+        val sideRoute = assertNotNull(tempting, "Precondition: a draw-with-side first shot can be played")
+        println("draw with side: ${describe(sideRoute)}")
+        assertTrue(
+            (sideRoute.steps.first().positionSuccessProbability ?: 0.0) >= 0.85,
+            "Precondition: draw with side also gets position on ball 2: ${describe(sideRoute)}",
+        )
         val plan = best(PlannerScenarios.naturalAngle)
         val why = describe(plan)
         assertTrue(plan.steps.none { usesDrawWithSide(it) }, "No draw with side when a natural stroke gets there: $why")
+        assertTrue(plan.expectedValueScore > sideRoute.expectedValueScore, "The natural route scores higher: $why")
     }
 
     @Test
-    fun s04ShallowSidePocketIsTheCornerOrRatedHard() {
+    fun s04ShallowSidePocketLosesToTheCorner() {
+        // Precondition: ball 1 can be potted in the left side pocket, on a line under 30° off the cushion.
+        val side = assertNotNull(
+            MultiShotPlanner.planRunout(
+                PlannerScenarios.shallowSide, nineBall, profile, horizonShots = 3,
+                customFirstShotTargetBallNumber = 1, customFirstShotPocketId = PocketId.SIDE_LEFT,
+            ).firstOrNull(),
+            "Precondition: the side-pocket pot is playable",
+        )
+        val sideShot = side.steps.first()
+        assertTrue(sidePocketApproachDegrees(sideShot) < 30.0, "Precondition: a shallow side pot: ${describe(side)}")
+        assertTrue(sideShot.makeDifficulty != ShotDifficultyTier.EASY, "A side pocket 28° off the rail is not Easy: ${describe(side)}")
         val plan = best(PlannerScenarios.shallowSide)
         val first = plan.steps.first()
-        val why = describe(plan)
-        val pocketKind = PocketId.entries.first { it == first.pocketId }.let {
-            if (it == PocketId.SIDE_LEFT || it == PocketId.SIDE_RIGHT) PocketKind.SIDE else PocketKind.CORNER
-        }
-        if (pocketKind == PocketKind.SIDE) {
-            assertEquals(ShotDifficultyTier.HARD, first.makeDifficulty, "A side pocket 28° off the rail is Hard: $why")
-        }
+        val why = "corner: ${describe(plan)}; side: ${describe(side)}"
+        assertEquals(PocketKind.CORNER, PlannerScenarios.table.pocketById(first.pocketId).kind, "Ball 1 goes in a corner: $why")
+        assertTrue(plan.expectedValueScore > side.expectedValueScore, why)
     }
 
     @Test
@@ -158,15 +179,29 @@ class PlannerScenarioTest {
 
     private fun assertBreakOutBeforeInsurance(plan: RunoutPlan, insurance: Int, horizon: Int) {
         val why = "horizon $horizon: ${describe(plan)}"
-        // Ball 2 is dealt with once it is potted or no other ball is within 2.8 radii of it (the clustering distance).
+        // Ball 2 is dealt with once it is potted, once no other ball is within 2.8 radii of it (the clustering distance),
+        // or once the shot has moved a ball of the cluster and left ball 2 a pot of at least 80 % from where the cue ball
+        // stops (a stripe still touching it, but out of its pocket lines, does not tie it up).
         val breakoutIndex = plan.steps.indexOfFirst { step ->
             val after = step.resultingLayout ?: return@indexOfFirst false
             val two = after.ballByNumber(2) ?: return@indexOfFirst true
-            after.objectBalls().none { it.number != 2 && it.position.distanceTo(two.position) <= 2.8 * two.radiusMeters }
+            val free = after.objectBalls().none { it.number != 2 && it.position.distanceTo(two.position) <= 2.8 * two.radiusMeters }
+            val clusterMoved = step.disturbedBalls.any { it.ballNumber in setOf(2, 10, 12) }
+            val cue = after.cueBall() ?: return@indexOfFirst free
+            val potOnTwo = PlannerScenarios.table.pockets.maxOf { pocket ->
+                val aim = GhostBallAiming.computeAimGeometry(cue, two, pocket, after.balls, table = after.table)
+                if (aim.isShotPlayable) HeatZoneGenerator.shotQuality(aim, pocket, profile.aimErrorStdRad, after.balls) else 0.0
+            }
+            free || (clusterMoved && potOnTwo >= 0.8)
         }
-        val insuranceIndex = plan.steps.indexOfFirst { it.targetBall.number == insurance }
         assertTrue(breakoutIndex >= 0, "The plan frees or pots ball 2: $why")
-        assertTrue(insuranceIndex < 0 || insuranceIndex > breakoutIndex, "Insurance ball still on the table at the break-out: $why")
+        val atBreakOut = assertNotNull(plan.steps[breakoutIndex].resultingLayout)
+        assertNotNull(atBreakOut.ballByNumber(insurance), "Insurance ball still on the table after the break-out: $why")
+        val insuranceIndex = plan.steps.indexOfFirst { it.targetBall.number == insurance }
+        if (horizon >= 3) {
+            // Three shots are enough to break out, pot ball 2 and come back to the insurance ball.
+            assertTrue(insuranceIndex > breakoutIndex, "The insurance ball is played after the break-out: $why")
+        }
     }
 
     @Test
@@ -211,9 +246,15 @@ class PlannerScenarioTest {
         assertTrue(mid.cumulativeRunoutProbability < adv.cumulativeRunoutProbability, why)
     }
 
-    private fun assertPhotoPlanIsSound(layout: TableLayout) {
+    /**
+     * What every photo plan must do: three shots, each legal as planned, at most one with side spin, and no side-pocket
+     * pot from under 40° off the rail rated Easy.
+     */
+    private fun assertPhotoPlanIsSound(layout: TableLayout): RunoutPlan {
         val plan = best(layout)
         val why = describe(plan)
+        PlannerScenarios.assertPlanInvariants(plan, layout, nineBall, why)
+        assertEquals(3, plan.steps.size, "Three shots are planned: $why")
         for (step in plan.steps) {
             val side = step.pocketId == PocketId.SIDE_LEFT || step.pocketId == PocketId.SIDE_RIGHT
             if (side && sidePocketApproachDegrees(step) < 40.0) {
@@ -224,14 +265,57 @@ class PlannerScenarioTest {
             }
         }
         assertTrue(plan.steps.count { usesSide(it) } <= 1, "At most one side-spin shot: $why")
+        return plan
+    }
+
+    /**
+     * Step [stepIndex] of [plan] has a shallow side-pocket alternative in [pocket] (checked: under 30° off the rail);
+     * the planner rates it Hard and does not play it.
+     */
+    private fun assertShallowSideAlternativeIsRatedHardAndAvoided(plan: RunoutPlan, start: TableLayout, stepIndex: Int, pocket: PocketId) {
+        val from = if (stepIndex == 0) start else assertNotNull(plan.steps[stepIndex - 1].resultingLayout)
+        val ball = plan.steps[stepIndex].targetBall.number
+        val forced = assertNotNull(
+            MultiShotPlanner.planRunout(
+                from, nineBall, profile, horizonShots = 1,
+                customFirstShotTargetBallNumber = ball, customFirstShotPocketId = pocket,
+            ).firstOrNull(),
+            "Precondition: ball $ball can be potted in $pocket",
+        )
+        val shot = forced.steps.first()
+        val why = "plan: ${describe(plan)}; side: ${describe(forced)}"
+        assertTrue(sidePocketApproachDegrees(shot) < 30.0, "Precondition: a shallow side pot: $why")
+        assertEquals(ShotDifficultyTier.HARD, shot.makeDifficulty, "A side pot under 30° off the rail is Hard: $why")
+        assertTrue(plan.steps[stepIndex].pocketId != pocket, "The planner does not play it: $why")
     }
 
     @Test
-    fun s11PhotoLayoutOne() = assertPhotoPlanIsSound(PlannerScenarios.photoOne)
+    fun s11PhotoLayoutOne() {
+        val plan = assertPhotoPlanIsSound(PlannerScenarios.photoOne)
+        // From where shot 1 leaves the cue ball, ball 3 also has a thin side-pocket line.
+        assertShallowSideAlternativeIsRatedHardAndAvoided(plan, PlannerScenarios.photoOne, 1, PocketId.SIDE_RIGHT)
+    }
 
     @Test
-    fun s12PhotoLayoutTwo() = assertPhotoPlanIsSound(PlannerScenarios.photoTwo)
+    fun s12PhotoLayoutTwo() {
+        val layout = PlannerScenarios.photoTwo
+        // Precondition: ball 2 sits near the head-left corner with the cue ball behind it along the rail: a near-certain pot.
+        val cue = assertNotNull(layout.cueBall())
+        val two = assertNotNull(layout.ballByNumber(2))
+        val headLeft = PlannerScenarios.table.pocketById(PocketId.HEAD_LEFT)
+        val aim = GhostBallAiming.computeAimGeometry(cue, two, headLeft, layout.balls, table = layout.table)
+        val easy = HeatZoneGenerator.shotQuality(aim, headLeft, profile.aimErrorStdRad, layout.balls)
+        assertTrue(aim.isShotPlayable && easy >= 0.9, "Precondition: ball 2 is a near-certain pot in the head-left corner ($easy)")
+        val plan = assertPhotoPlanIsSound(layout)
+        val first = plan.steps.first()
+        assertEquals(PocketId.HEAD_LEFT, first.pocketId, "Ball 2 goes in the corner it is next to: ${describe(plan)}")
+        assertTrue(first.uncertainty.makeProbability >= 0.9, describe(plan))
+    }
 
     @Test
-    fun s13PhotoLayoutThree() = assertPhotoPlanIsSound(PlannerScenarios.photoThree)
+    fun s13PhotoLayoutThree() {
+        val plan = assertPhotoPlanIsSound(PlannerScenarios.photoThree)
+        // Ball 3 has a thin line into the left side pocket from the start.
+        assertShallowSideAlternativeIsRatedHardAndAvoided(plan, PlannerScenarios.photoThree, 0, PocketId.SIDE_LEFT)
+    }
 }

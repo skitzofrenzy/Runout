@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import com.runout.app.navigation.PlatformBackHandler
 import com.runout.app.ui.RunoutColors
 import com.runout.app.ui.RunoutIcon
 import com.runout.app.ui.RunoutSpacing
@@ -55,6 +56,8 @@ fun TermsAcknowledgementScreen(onAgree: () -> Unit) {
     var declined by remember { mutableStateOf(false) }
 
     val reading = openDocument
+    // Back from a document returns to the notice; on the notice itself Back is left to the system.
+    PlatformBackHandler(enabled = reading != null) { openDocument = null }
     if (reading != null) {
         Column(
             modifier = Modifier
@@ -69,7 +72,11 @@ fun TermsAcknowledgementScreen(onAgree: () -> Unit) {
                     onClick = { openDocument = null },
                     modifier = Modifier.defaultMinSize(RunoutSpacing.MinTouchTarget, RunoutSpacing.MinTouchTarget),
                 ) {
-                    RunoutVectorIcon(icon = RunoutIcon.BACK, tint = MaterialTheme.colorScheme.onSurface)
+                    RunoutVectorIcon(
+                        icon = RunoutIcon.BACK,
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        contentDescription = "Back",
+                    )
                 }
                 Text(
                     text = reading.title,

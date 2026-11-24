@@ -6,18 +6,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.PlayerProfile
-import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
-import com.runout.engine.physics.TipOffset
 import com.runout.engine.planner.FallbackAdvice
 import com.runout.engine.planner.FallbackShotAdvisor
 import com.runout.engine.planner.OneShotPlanner
-import com.runout.engine.planner.PlannedShotStep
 import com.runout.engine.planner.RollingPlanState
 import com.runout.engine.planner.RollingRunoutPlanner
 import com.runout.engine.planner.RunoutPlan
 import com.runout.engine.planner.ShotRecommendation
 import com.runout.engine.planner.StepOverride
+import kotlin.concurrent.Volatile
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -25,10 +24,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * One request to the rolling planner. Every command maps to exactly one [RollingRunoutPlanner] call.
+ * One request to the rolling planner. Every command maps to one [RollingRunoutPlanner] call.
  */
 internal sealed interface PlanCommand {
-    /** Plan again from [layout] and [rules]: a new table, game, horizon, player or a moved ball. */
+    /** Plan again from [layout] and [rules]: a new table, game, player or a moved ball. */
     data class Restart(
         val layout: TableLayout,
         val rules: GameRulesState,
@@ -37,8 +36,14 @@ internal sealed interface PlanCommand {
         val deepAnalysis: Boolean,
     ) : PlanCommand
 
+    /** Show [horizon] shots, or the deep analysis, from the current focus; accepted shots are kept. */
+    data class Horizon(val horizon: Int, val deepAnalysis: Boolean) : PlanCommand
+
     /** Override the focused step (`null` returns it to the planner's own choice). */
     data class Edit(val override: StepOverride?) : PlanCommand
+
+    /** Take the first shot of [plan], one of the other routes on offer, as the focused step. Not an edit. */
+    data class ChooseAlternative(val plan: RunoutPlan) : PlanCommand
 
     /** Accept the focused step and move on. */
     data object Advance : PlanCommand
@@ -47,56 +52,87 @@ internal sealed interface PlanCommand {
     data object Back : PlanCommand
 }
 
+/** Runs one [PlanCommand]; see [applyPlanCommand]. */
+internal typealias PlanCommandRunner = (RollingPlanState?, PlanCommand, () -> Boolean) -> RollingPlanState?
+
 /**
- * Runs [command] against [state]. A [PlanCommand.Restart] rebases the running session when only the table or the
- * rules changed (keeping its memo of planner results), and starts a fresh session when the player, horizon or
- * analysis depth changed or no session exists. Blocking: call from a background dispatcher.
+ * Runs [command] against [state]. A [PlanCommand.Restart] rebases the running session onto the new table and rules
+ * (keeping its memo of planner results) when the player is the same, and starts a fresh session otherwise or when
+ * none exists; the horizon of the command is used either way. [shouldStop] is polled by the planner: when it returns
+ * true the search is abandoned and the state comes back unchanged (see [RollingRunoutPlanner]). Blocking: call from a
+ * background dispatcher.
  */
-internal fun applyPlanCommand(state: RollingPlanState?, command: PlanCommand): RollingPlanState? = when (command) {
+internal fun applyPlanCommand(
+    state: RollingPlanState?,
+    command: PlanCommand,
+    shouldStop: () -> Boolean = { false },
+): RollingPlanState? = when (command) {
     is PlanCommand.Restart -> {
         val horizon = command.horizon.coerceIn(1, RollingRunoutPlanner.MAX_HORIZON)
-        if (state != null &&
-            state.profile == command.profile &&
-            state.horizon == horizon &&
-            state.deepAnalysis == command.deepAnalysis
-        ) {
-            RollingRunoutPlanner.rebase(state, command.layout, command.rules)
+        if (state != null && state.profile == command.profile) {
+            val resized = if (state.horizon != horizon || state.deepAnalysis != command.deepAnalysis) {
+                state.copy(horizon = horizon, deepAnalysis = command.deepAnalysis)
+            } else {
+                state
+            }
+            val rebased = RollingRunoutPlanner.rebase(resized, command.layout, command.rules, shouldStop)
+            // A stopped search gives back what it was given: hand on the state the caller passed in.
+            if (rebased === resized) state else rebased
         } else {
             RollingRunoutPlanner.start(
                 layout = command.layout,
                 rules = command.rules,
                 profile = command.profile,
-                horizon = command.horizon,
+                horizon = horizon,
                 deepAnalysis = command.deepAnalysis,
+                shouldStop = shouldStop,
             )
         }
     }
-    is PlanCommand.Edit -> state?.let { RollingRunoutPlanner.setOverride(it, command.override) }
-    PlanCommand.Advance -> state?.let(RollingRunoutPlanner::acceptAndAdvance)
-    PlanCommand.Back -> state?.let(RollingRunoutPlanner::back)
+    is PlanCommand.Horizon -> state?.let {
+        RollingRunoutPlanner.withHorizon(it, command.horizon, command.deepAnalysis, shouldStop)
+    }
+    is PlanCommand.Edit -> state?.let { RollingRunoutPlanner.setOverride(it, command.override, shouldStop) }
+    is PlanCommand.ChooseAlternative -> state?.let { RollingRunoutPlanner.chooseAlternative(it, command.plan) }
+    PlanCommand.Advance -> state?.let { RollingRunoutPlanner.acceptAndAdvance(it, shouldStop) }
+    PlanCommand.Back -> state?.let { RollingRunoutPlanner.back(it, shouldStop) }
 }
+
+/**
+ * The fallback advice for [state]: a combination, kick or safety from [FallbackShotAdvisor] when the planner has no
+ * shot at the focus, or only one whose make chance is below [FallbackShotAdvisor.DIRECT_POT_FLOOR]; `null` when the
+ * focused shot is a reasonable pot, the rack is complete or the user has edited the focused step. The advisor makes the
+ * final call. A separate read, not a planner command. Blocking: call from a background dispatcher.
+ */
+internal fun fallbackAdviceFor(state: RollingPlanState?): FallbackAdvice? {
+    if (state == null || state.isRackComplete || state.isFocusEdited) return null
+    val makeChance = state.focusStep?.uncertainty?.makeProbability
+    if (makeChance != null && makeChance >= FallbackShotAdvisor.DIRECT_POT_FLOOR) return null
+    return FallbackShotAdvisor.advise(state.focusLayout, state.focusRules, state.profile)
+}
+
+/**
+ * True when the focused step is the user's edit and the controls that undo it ("Reset step", "Reset Defaults") should
+ * be on offer; the planner's own answer, so every screen agrees.
+ */
+internal val RollingPlanState.showsFocusEdit: Boolean
+    get() = isFocusEdited && !isRackComplete
 
 /**
  * Drops commands that a later one makes pointless, keeping the order of the rest: everything before the last
  * [PlanCommand.Restart] (a restart replaces the whole session) and all but the last of consecutive
- * [PlanCommand.Edit]s (each edit carries the complete override). Advance and Back are never dropped.
+ * [PlanCommand.Edit]s or consecutive [PlanCommand.Horizon]s (each carries the complete setting). Advance, Back and
+ * ChooseAlternative are never dropped.
  */
-/**
- * The fallback advice for [state]: a combination, kick or safety from [FallbackShotAdvisor] when the planner has no shot
- * at the focus, the rack is not complete and the user has not edited the focused step; `null` otherwise. A separate
- * read, not a planner command. Blocking: call from a background dispatcher.
- */
-internal fun fallbackAdviceFor(state: RollingPlanState?): FallbackAdvice? {
-    if (state == null || state.window != null || state.isRackComplete || state.isFocusEdited) return null
-    return FallbackShotAdvisor.advise(state.focusLayout, state.focusRules, state.profile)
-}
-
 internal fun coalescePlanCommands(commands: List<PlanCommand>): List<PlanCommand> {
     val lastRestart = commands.indexOfLast { it is PlanCommand.Restart }
     val live = if (lastRestart > 0) commands.subList(lastRestart, commands.size) else commands
     val out = ArrayList<PlanCommand>(live.size)
     for (command in live) {
-        if (command is PlanCommand.Edit && out.lastOrNull() is PlanCommand.Edit) {
+        val previous = out.lastOrNull()
+        val replacesPrevious = (command is PlanCommand.Edit && previous is PlanCommand.Edit) ||
+            (command is PlanCommand.Horizon && previous is PlanCommand.Horizon)
+        if (replacesPrevious) {
             out[out.lastIndex] = command
         } else {
             out += command
@@ -108,25 +144,6 @@ internal fun coalescePlanCommands(commands: List<PlanCommand>): List<PlanCommand
 /** An edit that has been requested but is not yet reflected in [RollingPlanSession.state]. */
 internal data class PendingEdit(val override: StepOverride?)
 
-/** What the planner itself picked at one focus, before any edit; used to show the default and to detect no-op edits. */
-internal data class PlannerChoice(
-    val focusIndex: Int,
-    val targetBallNumber: Int,
-    val pocketId: PocketId,
-    val tip: TipOffset,
-    val speedUnits: Double,
-) {
-    companion object {
-        fun of(focusIndex: Int, step: PlannedShotStep): PlannerChoice = PlannerChoice(
-            focusIndex = focusIndex,
-            targetBallNumber = step.targetBall.number,
-            pocketId = step.pocketId,
-            tip = step.recommendedTip,
-            speedUnits = step.recommendedSpeedUnits,
-        )
-    }
-}
-
 /**
  * Holds the rolling plan for the Plan and fullscreen screens.
  *
@@ -135,15 +152,34 @@ internal data class PlannerChoice(
  * are merged (see [coalescePlanCommands]) so dragging a slider or a ball plans once, not on every frame. While any
  * command is outstanding [isBusy] is true and the screens keep Next and Prev disabled.
  *
+ * A search never outlives the request that started it: [clear], a newer restart and, for a batch of edits (or of
+ * horizon changes) alone, a newer edit (or horizon change) trip the stop hook of the search in progress, which gives up
+ * at its next check; its result is thrown away. A failure in the planner is caught: the previous plan stays on screen,
+ * [hasFailed] is set until the next plan succeeds, and the session keeps working.
+ *
  * All members must be used from the main thread.
  */
 internal class RollingPlanSession(
     private val computeDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val runCommand: PlanCommandRunner = ::applyPlanCommand,
 ) {
     private class Queued(val generation: Int, val command: PlanCommand)
 
     private val queue = Channel<Queued>(Channel.UNLIMITED)
+
+    // Read by the stop hook on the compute thread, written on the main thread only.
+    @Volatile
     private var generation = 0
+
+    @Volatile
+    private var restartEpoch = 0
+
+    @Volatile
+    private var editEpoch = 0
+
+    @Volatile
+    private var horizonEpoch = 0
+
     private var outstanding by mutableIntStateOf(0)
 
     /** The last planned state, or `null` before the first plan and while planning is not possible. */
@@ -154,43 +190,46 @@ internal class RollingPlanSession(
     var rankedShots: List<ShotRecommendation> by mutableStateOf(emptyList())
         private set
 
-    /** Advice when the focused table has no direct pot (see [fallbackAdviceFor]), or `null`. */
+    /** Advice beside or instead of the planned shot (see [fallbackAdviceFor]), or `null`. */
     var fallbackAdvice: FallbackAdvice? by mutableStateOf(null)
         private set
 
-    private var pendingEdit: PendingEdit? by mutableStateOf(null)
+    /** True after the planner failed on the last request and until a request succeeds; the plan on screen is then the one before. */
+    var hasFailed: Boolean by mutableStateOf(false)
+        private set
 
-    private var plannerChoice: PlannerChoice? by mutableStateOf(null)
+    private var pendingEdit: PendingEdit? by mutableStateOf(null)
 
     /** True from [submit] until the planner has caught up with every command. */
     val isBusy: Boolean
         get() = outstanding > 0
 
-    /** The planner's own pick at the current focus, or `null` when it is unknown (for example after Prev). */
-    val defaultChoice: PlannerChoice?
-        get() {
-            val current = state ?: return null
-            return plannerChoice?.takeIf { it.focusIndex == current.focusIndex }
-        }
-
     /**
      * The override the user has asked for on the focused step, including one still being planned, or `null` when the
      * step is as the planner chose it. An override that only holds the choices a reopened step carried is not an
-     * edit.
+     * edit; in a planned state this is non-null exactly when [showsFocusEdit] is.
      */
     val editedOverride: StepOverride?
         get() {
             val pending = pendingEdit
             if (pending != null) return pending.override
             val current = state ?: return null
-            return if (current.isFocusEdited) current.focusOverride else null
+            return if (current.showsFocusEdit) current.focusOverride else null
         }
 
     /** Queues [command]. */
     fun submit(command: PlanCommand) {
         when (command) {
-            is PlanCommand.Restart -> pendingEdit = null
-            is PlanCommand.Edit -> pendingEdit = PendingEdit(command.override)
+            is PlanCommand.Restart -> {
+                restartEpoch += 1
+                pendingEdit = null
+            }
+            is PlanCommand.Horizon -> horizonEpoch += 1
+            is PlanCommand.Edit -> {
+                editEpoch += 1
+                pendingEdit = PendingEdit(command.override)
+            }
+            is PlanCommand.ChooseAlternative -> pendingEdit = null
             PlanCommand.Advance, PlanCommand.Back -> Unit
         }
         outstanding += 1
@@ -199,38 +238,29 @@ internal class RollingPlanSession(
 
     /**
      * Changes the focused step: [transform] receives what the step holds so far (the user's last request, the choices
-     * of a step reopened with Prev, or else the planner's target and pocket, so that a tip or speed test keeps the
-     * shot) and returns the new complete override.
+     * of a step reopened with Prev, or else the planner's own target and pocket, so that a tip or speed test keeps the
+     * shot) and returns the new complete override. A target-and-pocket choice that is the planner's own pick is no
+     * edit and resets the step.
      */
     fun edit(transform: (StepOverride) -> StepOverride) {
         val current = state ?: return
-        val pinned = {
-            val choice = defaultChoice
-            val step = current.focusStep
-            StepOverride(
-                targetBallNumber = choice?.targetBallNumber ?: step?.targetBall?.number,
-                pocketId = choice?.pocketId ?: step?.pocketId,
-            )
-        }
+        val pick = current.defaultFocusStep ?: current.focusStep
+        val pinned = StepOverride(targetBallNumber = pick?.targetBall?.number, pocketId = pick?.pocketId)
         val pending = pendingEdit
-        val base = if (pending != null) pending.override ?: pinned() else current.focusOverride ?: pinned()
-        submit(PlanCommand.Edit(canonical(transform(base))))
+        val base = if (pending != null) pending.override ?: pinned else current.focusOverride ?: pinned
+        submit(PlanCommand.Edit(asEdit(transform(base), current)))
     }
 
     /** Returns the focused step to the planner's own choice. */
     fun resetFocusedStep() = submit(PlanCommand.Edit(null))
 
-    /** Takes [plan]'s first shot (an alternative route) as the choice for the focused step. */
-    fun chooseAlternative(plan: RunoutPlan) {
-        val first = plan.steps.firstOrNull() ?: return
-        submit(
-            PlanCommand.Edit(
-                StepOverride(targetBallNumber = first.targetBall.number, pocketId = first.pocketId),
-            ),
-        )
-    }
+    /** Takes [plan]'s first shot (an alternative route) as the focused step; it is not marked as an edit. */
+    fun chooseAlternative(plan: RunoutPlan) = submit(PlanCommand.ChooseAlternative(plan))
 
-    /** Forgets the plan and everything queued; a result still being computed is discarded. */
+    /** Shows [horizon] shots (or the deep analysis) from the focus, keeping the accepted shots. */
+    fun setHorizon(horizon: Int, deepAnalysis: Boolean) = submit(PlanCommand.Horizon(horizon, deepAnalysis))
+
+    /** Forgets the plan and everything queued; a search in progress is stopped and its result discarded. */
     fun clear() {
         generation += 1
         while (queue.tryReceive().isSuccess) {
@@ -240,23 +270,22 @@ internal class RollingPlanSession(
         state = null
         rankedShots = emptyList()
         fallbackAdvice = null
+        hasFailed = false
         pendingEdit = null
-        plannerChoice = null
     }
 
-    /** A target-only pin, or a pin equal to the planner's pick, is not an edit. */
-    private fun canonical(override: StepOverride): StepOverride? {
+    /** A target-and-pocket pin equal to the planner's own pick is not an edit. */
+    private fun asEdit(override: StepOverride, current: RollingPlanState): StepOverride? {
         if (override.tip != null || override.speedUnits != null) return override
         val pocket = override.pocketId ?: return null
-        val choice = defaultChoice ?: return override
-        val sameTarget = override.targetBallNumber == null || override.targetBallNumber == choice.targetBallNumber
-        return if (pocket == choice.pocketId && sameTarget) null else override
+        val pick = current.defaultFocusStep ?: return override
+        val sameTarget = override.targetBallNumber == null || override.targetBallNumber == pick.targetBall.number
+        return if (pocket == pick.pocketId && sameTarget) null else override
     }
 
     private class Landed(
         val state: RollingPlanState?,
         val rankedShots: List<ShotRecommendation>,
-        val choice: PlannerChoice?,
         val advice: FallbackAdvice?,
     )
 
@@ -266,7 +295,7 @@ internal class RollingPlanSession(
             val debounce = when (first.command) {
                 is PlanCommand.Restart -> RESTART_DEBOUNCE_MILLIS
                 is PlanCommand.Edit -> EDIT_DEBOUNCE_MILLIS
-                PlanCommand.Advance, PlanCommand.Back -> 0L
+                is PlanCommand.Horizon, is PlanCommand.ChooseAlternative, PlanCommand.Advance, PlanCommand.Back -> 0L
             }
             if (debounce > 0L) delay(debounce)
             val batch = arrayListOf(first)
@@ -279,36 +308,60 @@ internal class RollingPlanSession(
 
             val commands = coalescePlanCommands(live)
             val startState = state
-            val startChoice = plannerChoice
-            val landed = withContext(computeDispatcher) {
-                var current = startState
-                var choice = startChoice
-                for (command in commands) {
-                    current = applyPlanCommand(current, command)
-                    choice = nextChoice(choice, current, command)
-                }
-                Landed(current, current?.let { rank(it) }.orEmpty(), choice, fallbackAdviceFor(current))
+            // What a newer request makes this batch pointless: a restart always; an edit (or a horizon change) only
+            // when the batch holds nothing but edits (or horizon changes), since each carries its complete setting.
+            val restartAtStart = restartEpoch
+            val editAtStart = editEpoch
+            val horizonAtStart = horizonEpoch
+            val onlyEdits = commands.all { it is PlanCommand.Edit }
+            val onlyHorizons = commands.all { it is PlanCommand.Horizon }
+            var interrupted = false
+            val shouldStop: () -> Boolean = {
+                val stop = generation != batchGeneration ||
+                    restartEpoch != restartAtStart ||
+                    (onlyEdits && editEpoch != editAtStart) ||
+                    (onlyHorizons && horizonEpoch != horizonAtStart)
+                if (stop) interrupted = true
+                stop
             }
-            if (batchGeneration != generation) continue
-
-            state = landed.state
-            rankedShots = landed.rankedShots
-            fallbackAdvice = landed.advice
-            plannerChoice = landed.choice
-            outstanding = (outstanding - live.size).coerceAtLeast(0)
-            if (outstanding == 0) pendingEdit = null
+            try {
+                val landed = withContext(computeDispatcher) {
+                    var current = startState
+                    for (command in commands) {
+                        current = runCommand(current, command, shouldStop)
+                        if (interrupted) break
+                    }
+                    if (!interrupted && current != null) {
+                        current = RollingRunoutPlanner.withDefaultFocusStep(current, shouldStop)
+                    }
+                    if (interrupted) {
+                        Landed(null, emptyList(), null)
+                    } else {
+                        Landed(current, current?.let { rank(it) }.orEmpty(), fallbackAdviceFor(current))
+                    }
+                }
+                val obsolete = interrupted || batchGeneration != generation || restartEpoch != restartAtStart
+                if (!obsolete) {
+                    state = landed.state
+                    rankedShots = landed.rankedShots
+                    fallbackAdvice = landed.advice
+                    hasFailed = false
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                // Keep the plan that is on screen; the request that failed is dropped, with any edit waiting on it.
+                if (batchGeneration == generation) {
+                    hasFailed = true
+                    pendingEdit = null
+                }
+            } finally {
+                if (batchGeneration == generation) {
+                    outstanding = (outstanding - live.size).coerceAtLeast(0)
+                    if (outstanding == 0) pendingEdit = null
+                }
+            }
         }
-    }
-
-    private fun nextChoice(
-        previous: PlannerChoice?,
-        current: RollingPlanState?,
-        command: PlanCommand,
-    ): PlannerChoice? = when {
-        current == null -> null
-        current.focusOverride == null -> current.focusStep?.let { PlannerChoice.of(current.focusIndex, it) }
-        command is PlanCommand.Edit && previous?.focusIndex == current.focusIndex -> previous
-        else -> null
     }
 
     private fun rank(current: RollingPlanState): List<ShotRecommendation> = OneShotPlanner.rankShots(
@@ -318,8 +371,11 @@ internal class RollingPlanSession(
         cueSpeedUnitsOverride = if (current.isFocusEdited) current.focusOverride?.speedUnits else null,
     )
 
-    private companion object {
-        const val RESTART_DEBOUNCE_MILLIS = 150L
-        const val EDIT_DEBOUNCE_MILLIS = 60L
+    companion object {
+        /** What the Plan screen says when the planner failed. */
+        const val PLAN_FAILED_MESSAGE: String = "Couldn't plan this table. Move a ball or reset the table."
+
+        private const val RESTART_DEBOUNCE_MILLIS = 150L
+        private const val EDIT_DEBOUNCE_MILLIS = 60L
     }
 }

@@ -3,11 +3,11 @@ package com.runout.app.camera
 import com.runout.engine.vision.CameraIntrinsicsSpec
 
 /**
- * Android Camera2 / CameraX controller that processes captured frames strictly in memory
- * without persisting photos or EXIF/GPS tags to disk.
+ * Source of the built-in sample table photos. This controller does not open the camera; it returns the bundled
+ * synthetic photos, which carry no EXIF or location metadata, so there is nothing to strip.
  */
 actual class PlatformCameraController actual constructor() {
-    actual val platformName: String = "Android Camera2 / CameraX (In-Memory)"
+    actual val platformName: String = "Built-in sample photos"
     actual val stripsExifAndGpsInMemory: Boolean = true
 
     actual fun defaultIntrinsics(): CameraIntrinsicsSpec = SampleCapturedPhotos.defaultIntrinsics()

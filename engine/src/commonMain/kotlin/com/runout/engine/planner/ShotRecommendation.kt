@@ -9,6 +9,10 @@ import com.runout.engine.physics.TrajectoryPath
 
 /**
  * A single evaluated and ranked pot attempt produced by [OneShotPlanner].
+ *
+ * [score], in `(0, 1]`, ranks the pot: its make probability times factors for the leave (see [OneShotPlanner]); it is
+ * not a probability. [makeProbability] is the make probability of the recommended stroke
+ * ([ExecutionErrorModel.makeProbability]); it defaults to [score] for callers that build a recommendation themselves.
  */
 data class ShotRecommendation(
     val targetBall: Ball,
@@ -22,4 +26,5 @@ data class ShotRecommendation(
     val recommendedSpeedUnits: Double = recommendedSpeedScale.toDouble(),
     val nextTargetBallNumber: Int? = null,
     val nextTargetPositionLine: Pair<Vec2, Vec2>? = null,
+    val makeProbability: Double = score,
 )

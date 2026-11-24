@@ -306,9 +306,18 @@ class BallMotion(
         private const val MAX_CHORD_PIECES: Int = 64
 
         /**
+         * Distance within which a ball's centre counts as being on a bound it can strike (a cushion line, a pocket's
+         * mouth line), metres. Balls come to rest exactly on a cushion line (frozen balls, contacts that push a ball
+         * against a cushion), and rounding can leave one a fraction of a micron off it either way; within this
+         * distance the ball is treated as touching.
+         */
+        const val BOUND_CONTACT_TOLERANCE_METERS: Double = 1e-7
+
+        /**
          * Smallest time in `(tMin, tMax]` at which a coordinate `p(t) = p0 + v0 t + a t^2 / 2` reaches [bound]
          * while moving towards it from the inside (`direction` `+1`: increasing through the bound, `-1`:
-         * decreasing), or `null`.
+         * decreasing), or `null`. A coordinate that starts on the bound is not found here; see
+         * [timeToContactBound].
          */
         fun timeToReachCoordinate(
             p0: Double,
@@ -329,6 +338,29 @@ class BallMotion(
                 if (best == null || t < best) best = t
             }
             return best
+        }
+
+        /**
+         * Time in `[0, tMax]` at which a coordinate `p(t) = p0 + v0 t + a t^2 / 2` that must stay on the inside of
+         * [bound] (`direction` as in [timeToReachCoordinate]) first meets it moving outward, or `null`.
+         *
+         * A coordinate already within [tolerance] of the bound, or past it, meets it at once (`0.0`) when it is moving
+         * outward (`v0 * direction > 0`); one on the bound that is not moving outward has no contact now, and its
+         * next one, if any, is the first later root. Otherwise this is the first root in `(0, tMax]`. A contact found
+         * here must remove the outward velocity, or it is found again at once.
+         */
+        fun timeToContactBound(
+            p0: Double,
+            v0: Double,
+            a: Double,
+            bound: Double,
+            direction: Int,
+            tMax: Double,
+            tolerance: Double = BOUND_CONTACT_TOLERANCE_METERS,
+        ): Double? {
+            val gap = (bound - p0) * direction
+            if (gap <= tolerance && v0 * direction > 0.0) return 0.0
+            return timeToReachCoordinate(p0, v0, a, bound, direction, tMax, tMin = 0.0)
         }
 
         /** Real roots of `a t^2 + b t + c = 0`, in no particular order. */
@@ -506,24 +538,51 @@ object BallBallContact {
 
     /**
      * Line of centres at which a ball arriving with [striking]'s motion throws a ball at rest exactly along
-     * [thrownDirection]: the solution of `n.rotate(-throw(n)) = thrownDirection`, found by fixed-point iteration (the
-     * throw changes by about a tenth of the change in `n`, so a few steps converge). This is the contact a player
-     * makes who aims at the throw-compensated ghost ball.
+     * [thrownDirection]: `n = thrownDirection.rotate(theta)` where `theta` solves `theta = throw(n(theta))`. This is
+     * the contact a player makes who aims at the throw-compensated ghost ball.
+     *
+     * The equation is solved for the angle `theta`: one fixed-point step, then secant steps on
+     * `h(theta) = throw(n(theta)) - theta`, each held to at most a few fixed-point steps' length, until
+     * `|h| <= 1e-12` rad or [iterations] evaluations of the throw. The plain fixed-point map can contract slowly
+     * (thin cuts with side spin at low speed), which the secant steps do not mind.
      */
     fun lineOfCentresForThrownDirection(
         striking: BallState,
         thrownDirection: Vec2,
         ballBallFrictionMu: Double = SpinPhysics.DEFAULT_BALL_BALL_FRICTION_MU,
-        iterations: Int = 4,
+        iterations: Int = MAX_THROW_SOLVE_ITERATIONS,
     ): Vec2 {
         val target = thrownDirection.normalized()
         if (ballBallFrictionMu <= 0.0) return target
         val atRest = BallState(position = striking.position + target)
-        var n = target
-        repeat(max(1, iterations)) {
-            val theta = throwAngle(striking, atRest, n, ballBallFrictionMu)
-            n = target.rotate(theta)
+        fun residual(theta: Double): Double = throwAngle(striking, atRest, target.rotate(theta), ballBallFrictionMu) - theta
+
+        var previous = 0.0
+        var previousResidual = residual(previous)
+        if (abs(previousResidual) <= THROW_SOLVE_TOLERANCE_RAD) return target
+        var current = previousResidual
+        var currentResidual = residual(current)
+        var evaluations = 2
+        while (abs(currentResidual) > THROW_SOLVE_TOLERANCE_RAD && evaluations < max(2, iterations)) {
+            val fixedPointStep = currentResidual
+            val slope = currentResidual - previousResidual
+            var step = if (slope != 0.0) -currentResidual * (current - previous) / slope else fixedPointStep
+            if (!step.isFinite() || abs(step) > MAX_SECANT_TO_FIXED_POINT_STEP * abs(fixedPointStep)) step = fixedPointStep
+            previous = current
+            previousResidual = currentResidual
+            current += step
+            currentResidual = residual(current)
+            evaluations++
         }
-        return n
+        return target.rotate(current)
     }
+
+    /** Most evaluations of the throw that [lineOfCentresForThrownDirection] makes. */
+    const val MAX_THROW_SOLVE_ITERATIONS: Int = 12
+
+    /** Residual, in radians, at which [lineOfCentresForThrownDirection] stops. */
+    private const val THROW_SOLVE_TOLERANCE_RAD: Double = 1e-12
+
+    /** Longest secant step, in units of the fixed-point step at the same point. */
+    private const val MAX_SECANT_TO_FIXED_POINT_STEP: Double = 4.0
 }

@@ -1,7 +1,10 @@
 package com.runout.engine
 
+import com.runout.engine.PlannerScenarios.assertPlanInvariants
+import com.runout.engine.PlannerScenarios.describe
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.Ball
+import com.runout.engine.model.EightBallGroup
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
@@ -9,18 +12,23 @@ import com.runout.engine.model.TableLayout
 import com.runout.engine.planner.MultiShotPlanner
 import com.runout.engine.planner.RollingRunoutPlanner
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.time.TimeSource
 
 /**
- * Measurements of the run-out planner that are reported rather than asserted tightly: wall time of a 3-shot plan,
- * how often a rolling plan changes a step it has already shown, and the self-play comparison with the greedy
- * baseline. The numbers are printed to the test output.
+ * Measurements of the run-out planner, printed to the test output: wall time of a 3-shot plan on a nine-ball rack, a
+ * photo layout, an 8-ball table with five solids left and a 15-ball table, and of deep analysis; how quickly a stop
+ * request is honoured; how often a rolling plan changes a step it has already shown; and the self-play comparison
+ * with the greedy baseline. Timings are not asserted (they depend on the machine); what is asserted holds on any
+ * machine: the plans keep their invariants, and a stop request ends the search with consistent plans.
  */
 class PlannerBenchmarkTest {
 
     private val table = PlannerScenarios.table
     private val nineBall = GameRulesState(GameType.NINE_BALL)
+    private val openEight = GameRulesState(GameType.EIGHT_BALL, EightBallGroup.OPEN)
+    private val solids = PlannerScenarios.solids
 
     private fun layoutFrom(numbers: List<Int>, xy: DoubleArray): TableLayout = TableLayout(
         table,
@@ -38,8 +46,8 @@ class PlannerBenchmarkTest {
         doubleArrayOf(1.43, 0.30, 2.05, 0.96, 1.47, 1.03, 0.97, 0.70, 0.27, 0.77, 0.79, 0.35, 1.17, 0.49, 0.75, 1.02, 2.12, 0.64, 1.53, 0.74),
     ).map { layoutFrom((0..9).toList(), it) } + listOf(PlannerScenarios.photoOne, PlannerScenarios.photoTwo, PlannerScenarios.photoThree)
 
-    private fun medianMillis(runs: Int, block: () -> Unit): Long {
-        repeat(5) { block() }
+    private fun medianMillis(runs: Int, warmUp: Int = 3, block: () -> Unit): Long {
+        repeat(warmUp) { block() }
         val times = (1..runs).map {
             val mark = TimeSource.Monotonic.markNow()
             block()
@@ -50,17 +58,75 @@ class PlannerBenchmarkTest {
 
     @Test
     fun reportsThreeShotPlanWallTime() {
-        val nine = nineBallRacks.first()
-        val nineMs = medianMillis(9) { MultiShotPlanner.planRunout(nine, nineBall, PlayerProfile(), horizonShots = 3) }
-        val photoMs = medianMillis(9) {
-            MultiShotPlanner.planRunout(PlannerScenarios.photoOne, nineBall, PlayerProfile(), horizonShots = 3)
+        val cases = listOf(
+            Triple("nine-ball rack", nineBallRacks.first(), nineBall),
+            Triple("nine-ball photo layout", PlannerScenarios.photoOne, nineBall),
+            Triple("eight-ball (5 solids left)", PlannerScenarios.keyBall, solids),
+            Triple("open 15-ball table", PlannerScenarios.openFifteen, openEight),
+            Triple("15-ball table, solids", PlannerScenarios.openFifteen, solids),
+        )
+        val report = StringBuilder("benchmark: 3-shot planRunout median ms:")
+        for ((name, layout, rules) in cases) {
+            val ms = medianMillis(5) { MultiShotPlanner.planRunout(layout, rules, PlayerProfile(), horizonShots = 3) }
+            report.append(" $name = $ms;")
+            val plans = MultiShotPlanner.planRunout(layout, rules, PlayerProfile(), horizonShots = 3)
+            assertTrue(plans.isNotEmpty(), "$name has a plan")
+            for (plan in plans) assertPlanInvariants(plan, layout, rules, "$name: ${describe(plan)}")
         }
-        val eight = PlannerScenarios.keyBall
-        val eightMs = medianMillis(5) {
-            MultiShotPlanner.planRunout(eight, PlannerScenarios.solids, PlayerProfile(), horizonShots = 3)
+        println(report)
+    }
+
+    @Test
+    fun reportsDeepAnalysisWallTime() {
+        val cases = listOf(
+            Triple("nine-ball rack", nineBallRacks.first(), nineBall),
+            Triple("15-ball table, solids", PlannerScenarios.openFifteen, solids),
+            Triple("open 15-ball table", PlannerScenarios.openFifteen, openEight),
+        )
+        val report = StringBuilder("benchmark: deep analysis median ms:")
+        for ((name, layout, rules) in cases) {
+            val ms = medianMillis(3, warmUp = 1) { MultiShotPlanner.planRunout(layout, rules, PlayerProfile(), deepAnalysis = true) }
+            val plans = MultiShotPlanner.planRunout(layout, rules, PlayerProfile(), deepAnalysis = true)
+            report.append(" $name = $ms (${plans.firstOrNull()?.steps?.size ?: 0} shots);")
+            assertTrue(plans.isNotEmpty(), "$name has a plan")
+            for (plan in plans) assertPlanInvariants(plan, layout, rules, "$name: ${describe(plan)}")
         }
-        println("benchmark: 3-shot planRunout median ms: nine-ball rack = $nineMs, nine-ball photo layout = $photoMs, eight-ball (5 solids left) = $eightMs")
-        assertTrue(nineMs >= 0 && eightMs >= 0)
+        println(report)
+    }
+
+    /**
+     * A stop request raised part-way through the worst case measured here (deep analysis of the open 15-ball table) ends
+     * the search quickly, with plans that are consistent from the table onward. The bound asserted (one second) is far
+     * above what is measured, so that a slow machine cannot fail it; the measured latency is printed.
+     */
+    @Test
+    fun aStopRequestIsHonouredQuickly() {
+        val layout = PlannerScenarios.openFifteen
+        MultiShotPlanner.planRunout(layout, openEight, PlayerProfile(), horizonShots = 1)
+        val latencies = ArrayList<Long>()
+        for (stopAfterMs in listOf(20L, 150L, 400L)) {
+            val start = TimeSource.Monotonic.markNow()
+            var requestedAt: TimeSource.Monotonic.ValueTimeMark? = null
+            val result = MultiShotPlanner.planRunoutWithStatus(
+                layout, openEight, PlayerProfile(), deepAnalysis = true,
+                shouldStop = {
+                    val due = start.elapsedNow().inWholeMilliseconds >= stopAfterMs
+                    if (due && requestedAt == null) requestedAt = TimeSource.Monotonic.markNow()
+                    due
+                },
+            )
+            val requested = requestedAt ?: continue
+            val latency = requested.elapsedNow().inWholeMilliseconds
+            latencies += latency
+            assertTrue(result.stopped, "The result says it was stopped")
+            assertTrue(latency < 1000, "Stop honoured within a second (took $latency ms after $stopAfterMs ms)")
+            for (plan in result.plans) {
+                assertTrue(plan.searchStopped)
+                assertPlanInvariants(plan, layout, openEight, "stopped after $stopAfterMs ms: ${describe(plan)}")
+            }
+        }
+        println("benchmark: stop latency (ms from the request to the return), deep analysis of the open 15-ball table: $latencies")
+        assertTrue(latencies.isNotEmpty(), "At least one stop request fell inside the search")
     }
 
     @Test
@@ -89,7 +155,8 @@ class PlannerBenchmarkTest {
                 "$refined with a refined step, $updated with an updated step, " +
                 "shot now to be played: $focusRefined with a different stroke, $focusUpdated with a different ball or pocket",
         )
-        assertTrue(advances > 0)
+        assertTrue(advances >= nineBallRacks.size, "Every rack advances at least once ($advances advances)")
+        assertTrue(focusRefined <= advances && focusUpdated <= advances)
     }
 
     @Test
@@ -106,6 +173,7 @@ class PlannerBenchmarkTest {
             "benchmark: self-play over ${result.rackCount} racks: beam ${result.beamPlannerRunoutRate}, " +
                 "greedy ${result.greedyBaselineRunoutRate}, relative ${result.relativeImprovementFraction}",
         )
-        assertTrue(result.rackCount == racks.size)
+        assertEquals(racks.size, result.rackCount)
+        assertTrue(result.beamPlannerRunoutRate in 0.0..1.0 && result.greedyBaselineRunoutRate in 0.0..1.0)
     }
 }

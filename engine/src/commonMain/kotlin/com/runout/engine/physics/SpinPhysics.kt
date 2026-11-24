@@ -480,8 +480,8 @@ object SpinPhysics {
      * (the throw changes by about a tenth of the change in `n`), and a handful of steps converge to rounding.
      *
      * The throw uses the cue ball's speed and follow/draw spin at impact, not at the strike, and the side spin of
-     * [sideSpinSurfaceSpeedAtImpactMps]. [table] supplies the cloth for the pre-impact state; a default 9 ft
-     * table's cloth is used when it is `null`.
+     * [sideSpinSurfaceSpeedAtImpactMps]. [table] supplies the cloth for the pre-impact state and the ball-ball friction
+     * ([TableSpec.ballContact]); a default 9 ft table's are used when it is `null`.
      *
      * **Why the planners keep the geometric direction.** The planners and the uncertainty model
      * ([com.runout.engine.planner.ExecutionErrorModel]) launch the object ball along [geometricAim]'s
@@ -522,6 +522,7 @@ object SpinPhysics {
                 impactSpeedMps = pre.impactSpeedMps,
                 impactSpinFactorK = pre.impactSpinFactorK,
                 sideSpinSurfaceSpeedMps = sideSpin,
+                ballBallFrictionMu = clothTable.ballContact.frictionMu,
             )
             val change = abs(next.totalRadians - throwAngles.totalRadians)
             throwAngles = next
@@ -916,6 +917,7 @@ object SpinPhysics {
         val vOb0 = MotionPhysics.transferredObjectBallInitialSpeedMps(
             cueImpactSpeedMps = pre.impactSpeedMps,
             cutAngleRad = aim.cutAngleRadians,
+            restitution = table.ballContact.restitution,
         )
         val obMaxDist = MotionPhysics.objectBallStoppingDistanceMeters(
             initialObjectSpeedMps = vOb0,
@@ -999,7 +1001,8 @@ object SpinPhysics {
      * Contact of a cue ball arriving along [aim]'s aim line at [impactSpeedMps] with vertical spin factor
      * [impactSpinFactorK] and side spin [sideSpinSurfaceSpeedMps]. The line of centres is the one whose throw sends the
      * object ball along [AimGeometry.objectBallDirection] (the contact of a player who aims at the compensated ghost
-     * ball, see [solveCompensatedAim]); the cue ball takes the equal and opposite impulse.
+     * ball, see [solveCompensatedAim]); the cue ball takes the equal and opposite impulse. The contact uses [table]'s
+     * ball-ball friction and restitution ([TableSpec.ballContact]).
      */
     internal fun postImpactStateFor(
         aim: GhostBallAim,
@@ -1030,8 +1033,19 @@ object SpinPhysics {
             spinVelocity = direction * (impactSpinFactorK * impactSpeedMps),
             sideSpinSurfaceSpeedMps = sideSpinSurfaceSpeedMps,
         )
-        val lineOfCentres = BallBallContact.lineOfCentresForThrownDirection(arriving, aim.objectBallDirection)
-        val outcome = BallBallContact.resolve(arriving, BallState(aim.objectBallPos), lineOfCentres)
+        val contact = table.ballContact
+        val lineOfCentres = BallBallContact.lineOfCentresForThrownDirection(
+            striking = arriving,
+            thrownDirection = aim.objectBallDirection,
+            ballBallFrictionMu = contact.frictionMu,
+        )
+        val outcome = BallBallContact.resolve(
+            striking = arriving,
+            struck = BallState(aim.objectBallPos),
+            lineOfCentres = lineOfCentres,
+            restitution = contact.restitution,
+            ballBallFrictionMu = contact.frictionMu,
+        )
         val cue = outcome.striking
         val motion = BallMotion(table.cloth)
         val slideTime = motion.timeToRoll(cue)

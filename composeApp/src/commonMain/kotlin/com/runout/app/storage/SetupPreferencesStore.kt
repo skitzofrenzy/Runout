@@ -31,9 +31,13 @@ enum class TableSizePreset(val storageKey: String) {
     }
 
     companion object {
+        /**
+         * The preset closest to [spec]: of the same [TableSpec.kind], and of the nearest length. A calibrated or
+         * renamed table is matched by what it is, not by what it is called.
+         */
         fun fromTableSpec(spec: TableSpec): TableSizePreset =
-            entries.firstOrNull { it.toTableSpec().name == spec.name }
-                ?: entries.minByOrNull { abs(it.toTableSpec().lengthMeters - spec.lengthMeters) }
+            entries.filter { it.toTableSpec().kind == spec.kind }
+                .minByOrNull { abs(it.toTableSpec().lengthMeters - spec.lengthMeters) }
                 ?: NINE_FOOT
 
         fun fromStorageKey(key: String?): TableSizePreset =

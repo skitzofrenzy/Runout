@@ -2,7 +2,6 @@ package com.runout.engine.physics
 
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.ClothParams
-import kotlin.math.PI
 import kotlin.math.hypot
 import kotlin.math.sqrt
 
@@ -28,22 +27,28 @@ import kotlin.math.sqrt
  * impact (part of the fuller model of Mathavan et al., 2010) is not included. The ball leaves in whatever state the
  * impulse gives, usually sliding, so the cloth then bends its path ([BallMotion]): that is where a following ball
  * comes off long and a drawing ball short, and where running english widens the angle and reverse english narrows it.
+ *
+ * A ball never leaves a contact still moving into the cushion: the velocity into it is exactly zero or reversed, so
+ * a ball that touches a cushion line is not found striking it again at once. A ball resting against a cushion whose
+ * spin drives it into the cushion is handled by [pressedAgainst].
  */
 object CushionContact {
     /**
      * State of a ball leaving a cushion whose inward unit normal (pointing from the cushion into the table) is
-     * [inwardNormal], having arrived in [state]. A ball not moving into the cushion is returned unchanged. When the
-     * ball would leave with less than 2 mm/s away from the cushion, that last bit is dropped and it runs along the
-     * cushion instead of bouncing on it again and again.
+     * [inwardNormal], having arrived in [state]. A ball not moving into the cushion is returned unchanged. A ball
+     * arriving at no more than [MIN_APPROACH_SPEED_MPS] keeps everything but its velocity into the cushion, which
+     * the cushion stops. When the ball would leave with less than 2 mm/s away from the cushion, that last bit is
+     * dropped and it runs along the cushion instead of bouncing on it again and again.
      */
     fun rebound(state: BallState, inwardNormal: Vec2, cloth: ClothParams): BallState {
         val n = (-inwardNormal).normalized()
-        val t = n.rotate(PI / 2.0)
+        val t = perpendicular(n)
         val vn = state.velocity.dot(n)
-        if (vn <= MIN_APPROACH_SPEED_MPS) return state
+        if (vn <= 0.0) return state
         val vt = state.velocity.dot(t)
+        if (vn <= MIN_APPROACH_SPEED_MPS) return state.copy(velocity = t * vt)
         // R * (omega_x, omega_y) from the surface-velocity form w = R * (omega_y, -omega_x).
-        val horizontalSpin = state.spinVelocity.rotate(PI / 2.0)
+        val horizontalSpin = perpendicular(state.spinVelocity)
         val wn = horizontalSpin.dot(n)
         val wt = horizontalSpin.dot(t)
         val wz = state.sideSpinSurfaceSpeedMps
@@ -79,8 +84,34 @@ object CushionContact {
         val wzOut = wz + SPIN_PER_IMPULSE * j2 * cosT
 
         val velocity = n * vnOut + t * vtOut
-        val spin = (n * wnOut + t * wtOut).rotate(-PI / 2.0)
+        val spin = -perpendicular(n * wnOut + t * wtOut)
         return BallState(state.position, velocity, spin, wzOut)
+    }
+
+    /**
+     * State of a ball that rests against a cushion (inward unit normal [inwardNormal]) with no velocity into or away
+     * from it while the cloth's friction pushes it into the cushion: its spin rolls it toward the cushion, so the slip
+     * of its contact with the bed has a part pointing away from the cushion.
+     *
+     * The cushion's reaction passes through the ball's centre, so it cancels the push without turning the ball, and
+     * friction at the bed and the cushion wears down the spin that drives the ball into the cushion. That spin is
+     * taken off here at once, as an impulse at the contact: the ball keeps its velocity and the rest of its spin, and
+     * its slip then lies along the cushion, so the cloth no longer pushes it into the cushion and it slides along it in
+     * closed form. The time the cushion would take to wear that spin down (about `2 |u_n| / (5 * muS * g)` for a
+     * normal slip `u_n`, a few hundredths of a second for ordinary shots) is not modelled; during it the ball would
+     * lose a little less speed along the cushion than it does here. No energy is created.
+     *
+     * A ball that is not pressed into the cushion is returned unchanged. For a cushion along a table axis the
+     * components are set exactly, so the ball is not found pressed again.
+     */
+    fun pressedAgainst(state: BallState, inwardNormal: Vec2): BallState {
+        val nIn = inwardNormal.normalized()
+        if (state.velocity.dot(nIn) < 0.0) return state
+        val slipIn = state.slipVelocity.dot(nIn)
+        if (slipIn <= 0.0) return state
+        val velocity = state.velocity - nIn * state.velocity.dot(nIn)
+        val spin = state.spinVelocity - nIn * state.spinVelocity.dot(nIn)
+        return state.copy(velocity = velocity, spinVelocity = spin)
     }
 
     /** Sin of the contact normal's tilt below the horizontal for [cloth]'s nose height: `2 * ratio - 1`. */
@@ -89,13 +120,20 @@ object CushionContact {
         ClothParams.MAX_CUSHION_NOSE_HEIGHT_RATIO,
     ) - 1.0
 
+    /** [v] turned a quarter turn in the positive sense, exactly (no rounding from a rotation). */
+    private fun perpendicular(v: Vec2): Vec2 = Vec2(-v.y, v.x)
+
     /** Tangential impulse per unit of slip that stops a solid sphere's contact point slipping: `1 / (7/2)`. */
     private const val STICK_IMPULSE_RATIO: Double = 2.0 / 7.0
 
     /** Change of spin surface speed per unit of tangential impulse at the surface: `R^2 m / I = 5/2`. */
     private const val SPIN_PER_IMPULSE: Double = 2.5
 
-    private const val MIN_APPROACH_SPEED_MPS: Double = 1e-4
+    /**
+     * Approach speed at or below which a contact only stops the ball's motion into the cushion, m/s. Such a contact
+     * carries no measurable impulse.
+     */
+    const val MIN_APPROACH_SPEED_MPS: Double = 1e-4
 
     /** Below this speed away from the cushion the ball is left rolling along it rather than bouncing again. */
     private const val MIN_LEAVING_SPEED_MPS: Double = 2e-3

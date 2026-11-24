@@ -89,6 +89,7 @@ import com.runout.engine.model.ClothParams
 import com.runout.engine.model.EightBallGroup
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
+import com.runout.engine.model.TableKind
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.planner.PlanningReadinessResult
@@ -107,6 +108,7 @@ import com.runout.engine.vision.LocalTapRescanResult
 import com.runout.engine.vision.PerspectiveHomography
 import com.runout.engine.vision.RawFrameDetectionSummary
 import com.runout.engine.vision.RawImageTableDetector
+import com.runout.engine.vision.TableQuadDetection
 import com.runout.engine.vision.VisionRectificationResult
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -175,7 +177,7 @@ private data class RawPixelDecodeState(
 fun PhotoCaptureAndConfirmScreen(
     ballSet: BallSetProfile,
     lastPlayedGameType: GameType,
-    onConfirmScannedLayout: (TableLayout, GameRulesState, BallSetProfile) -> Unit,
+    onConfirmScannedLayout: (TableLayout, GameRulesState, BallSetProfile, ClothParams?) -> Unit,
     modifier: Modifier = Modifier,
     displayMode: AppDisplayMode = AppDisplayMode.SIMPLE,
     defaultTableSpec: TableSpec = TableSpec.nineFootPool(),
@@ -191,10 +193,11 @@ fun PhotoCaptureAndConfirmScreen(
     var wizardStep by remember { mutableStateOf(PhotoWizardStep.SOURCE_PICKER) }
     var importedImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var importedRawFrame by remember { mutableStateOf<ArgbImageFrame?>(null) }
+    var importedQuads by remember { mutableStateOf<TableQuadDetection?>(null) }
     var pendingImportedFrame by remember { mutableStateOf<ImportedPhotoFrame?>(null) }
     var importError by remember { mutableStateOf<String?>(null) }
     var activeBallSet by remember(ballSet) { mutableStateOf(ballSet) }
-    var selectedRawClothCategory by remember { mutableStateOf(ClothHueCategory.TOURNAMENT_BLUE) }
+    var selectedRawClothCategory by remember { mutableStateOf(ClothHueCategory.BLUE) }
     var rawPixelDecodeState by remember { mutableStateOf<RawPixelDecodeState?>(null) }
 
     val photoPicker = rememberPlatformPhotoPicker(
@@ -226,6 +229,7 @@ fun PhotoCaptureAndConfirmScreen(
         outcome.fold(
             onSuccess = { (bundle, previewBitmap) ->
                 importedImageBitmap = previewBitmap
+                importedQuads = bundle.summary.toQuadDetection()
                 importedRawFrame = imported.frame
                 selectedPhoto = bundle.photo
                 activeBallSet = bundle.inferredBallSet
@@ -250,11 +254,14 @@ fun PhotoCaptureAndConfirmScreen(
         if (overriddenQuadCornersPx == selectedPhoto.detectedQuadCornersPx) return@LaunchedEffect
         delay(220)
         val canonicalQuad = canonicalizeQuadTopLeftClockwise(overriddenQuadCornersPx)
+        val previousQuads = importedQuads
         val summary = withContext(Dispatchers.Default) {
             runCatching {
                 RawImageTableDetector.analyzeArgbFrame(
                     frame = frame,
                     quadOverridePx = canonicalQuad,
+                    table = selectedPhoto.tableSpec,
+                    previousQuads = previousQuads,
                 )
             }.getOrNull()
         } ?: return@LaunchedEffect
@@ -289,17 +296,19 @@ fun PhotoCaptureAndConfirmScreen(
     var confirmedEightBallGroup by remember(selectedPhoto.id) {
         mutableStateOf<EightBallGroup?>(null)
     }
+    // Starts from the cloth of the table in use when the photo shows the same kind of table, so a calibrated cloth
+    // is what the screen shows; the choice is passed on only when the person changed it here.
     var selectedClothParams by remember(selectedPhoto.id) {
         mutableStateOf(
             when {
-                selectedPhoto.tableSpec.name.contains("Snooker", ignoreCase = true) ->
+                selectedPhoto.tableSpec.kind == defaultTableSpec.kind -> defaultTableSpec.cloth
+                selectedPhoto.tableSpec.kind == TableKind.SNOOKER ->
                     ClothParams.fromPreset(AssumedSurfacePreset.SNOOKER_DIRECTIONAL)
-                selectedPhoto.tableSpec.name.contains("7 ft", ignoreCase = true) ->
-                    ClothParams.fromPreset(AssumedSurfacePreset.SLOW_BAR_BOX_HEAVY)
                 else -> ClothParams.fromPreset(AssumedSurfacePreset.STANDARD_POOL_HALL)
             },
         )
     }
+    var isClothEdited by remember(selectedPhoto.id) { mutableStateOf(false) }
 
     val qualityReport = remember(selectedPhoto, overriddenQuadCornersPx) {
         PhotoCaptureEvaluator.evaluateQuality(
@@ -394,6 +403,7 @@ fun PhotoCaptureAndConfirmScreen(
                             frame = frame,
                             tapCenterPx = tapImagePx,
                             quadCornersPx = canonicalQuad,
+                            endOnView = importedQuads?.endOnView,
                             existingCandidates = existing,
                         )
                     } else {
@@ -710,6 +720,7 @@ fun PhotoCaptureAndConfirmScreen(
                             selectedPhoto = cameraController.capturePresetPhoto(chosen.id)
                             activeBallSet = ballSet
                             importedImageBitmap = null
+                            importedQuads = null
                             importedRawFrame = null
                             wizardStep = PhotoWizardStep.REVIEW_TABLE
                         },
@@ -772,6 +783,7 @@ fun PhotoCaptureAndConfirmScreen(
                                     glareFraction = decoded.summary.glareFraction,
                                 )
                                 importedImageBitmap = decoded.frame.toComposeImageBitmap()
+                                importedQuads = decoded.summary.toQuadDetection()
                                 importedRawFrame = decoded.frame
                                 wizardStep = PhotoWizardStep.REVIEW_TABLE
                             },
@@ -849,7 +861,10 @@ fun PhotoCaptureAndConfirmScreen(
                         presetLabels = PHOTO_SURFACE_PRESET_LABELS,
                         rollStepperTitle = "Cloth Roll (μr)",
                         railStepperTitle = "Rail Bounce (ec)",
-                        onUpdateClothParams = { updated -> selectedClothParams = updated },
+                        onUpdateClothParams = { updated ->
+                            selectedClothParams = updated
+                            isClothEdited = true
+                        },
                     )
                 }
 
@@ -914,6 +929,7 @@ fun PhotoCaptureAndConfirmScreen(
                             finalLayout.copy(table = finalLayout.table.withClothParams(selectedClothParams)),
                             candidateRulesState,
                             activeBallSet,
+                            selectedClothParams.takeIf { isClothEdited },
                         )
                     },
                 )
@@ -1344,10 +1360,10 @@ private fun RawArgbFramePreviewCanvas(
 }
 
 private fun ClothHueCategory.displayLabel(): String = when (this) {
-    ClothHueCategory.TOURNAMENT_BLUE -> "Tournament Blue"
-    ClothHueCategory.CLASSIC_GREEN -> "Classic Green"
-    ClothHueCategory.CHAMPIONSHIP_RED -> "Championship Red"
-    ClothHueCategory.SLATE_GREY -> "Slate Grey"
+    ClothHueCategory.BLUE -> "Blue"
+    ClothHueCategory.GREEN -> "Green"
+    ClothHueCategory.RED -> "Red"
+    ClothHueCategory.GREY -> "Grey"
 }
 
 private fun BallPaletteColor.displayLabel(): String = when (this) {

@@ -162,10 +162,11 @@ object PhotoCaptureEvaluator {
         cameraPoseMeters: Vec3? = null,
         overriddenQuadCornersPx: List<Vec2>? = null,
     ): Pair<RawFrameDetectionSummary, VisionRectificationResult> {
-        val summary = RawImageTableDetector.analyzeArgbFrame(frame)
+        val summary = RawImageTableDetector.analyzeArgbFrame(frame, table = tableSpec)
         val (autoCorners, autoPose) = RawImageTableDetector.orientQuadForHomography(
             summary.detectedQuadCornersPx,
             tableSpec,
+            summary.endOnView,
         )
         val corners = overriddenQuadCornersPx ?: autoCorners
         val resolvedPose = cameraPoseMeters ?: autoPose
@@ -196,10 +197,11 @@ object PhotoCaptureEvaluator {
         tableSpec: TableSpec = TableSpec.nineFootPool(),
         baseBallSet: BallSetProfile = BallSetProfile.standardPool(),
     ): RawPhotoAnalysisBundle {
-        val summary = RawImageTableDetector.analyzeArgbFrame(frame)
+        val summary = RawImageTableDetector.analyzeArgbFrame(frame, table = tableSpec)
         val (orientedCorners, autoPose) = RawImageTableDetector.orientQuadForHomography(
             summary.detectedQuadCornersPx,
             tableSpec,
+            summary.endOnView,
         )
         val inferredBallSet = BallSetProfile.inferFromDetectedColors(
             summary.detectedCandidates.map { it.dominantColor },
@@ -646,7 +648,7 @@ object SampleCapturedPhotos {
      */
     fun renderPresetAsRawArgbFrame(
         preset: CapturedTablePhoto = angledNineFootNineBall(),
-        clothCategory: ClothHueCategory = ClothHueCategory.TOURNAMENT_BLUE,
+        clothCategory: ClothHueCategory = ClothHueCategory.BLUE,
         ballSet: BallSetProfile = BallSetProfile.standardPool(),
     ): ArgbImageFrame {
         val groundTruthBalls = preset.groundTruthBallPositionsMeters.entries
@@ -782,7 +784,9 @@ object SampleCapturedPhotos {
 }
 
 /**
- * Platform camera abstraction keeping frame capture and EXIF/GPS stripping strictly in memory.
+ * Platform camera abstraction. The Android and iOS actuals do not capture live frames yet: they return
+ * the built-in sample photos, which carry no EXIF or location data. Photos taken or imported through the
+ * photo screen are decoded in memory by the platform picker, not by this class.
  */
 expect class PlatformCameraController() {
     val platformName: String

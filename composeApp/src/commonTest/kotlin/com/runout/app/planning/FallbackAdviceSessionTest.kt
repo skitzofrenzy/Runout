@@ -15,6 +15,7 @@ import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.planner.FallbackAdvice
 import com.runout.engine.planner.FallbackKind
+import com.runout.engine.planner.FallbackShotAdvisor
 import com.runout.engine.planner.RollingRunoutPlanner
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -71,5 +72,26 @@ class FallbackAdviceSessionTest {
         assertEquals("No pot left", fallbackChanceLabel(FallbackKind.SAFETY))
         val pro = fallbackProDetails(advice(FallbackKind.KICK, listOf(1), cushion = Vec2(1.115, 1.2414)))
         assertTrue("Legal hit 98.7%" in pro && "cushion point x 1.12 m, y 1.24 m" in pro, pro)
+    }
+
+    @Test
+    fun aWeakDirectPotGetsAdviceBesideItAndAnEditedStepOrAStrongPotGetsNone() {
+        fun table(vararg balls: Pair<Int, Vec2>) =
+            TableLayout(table, balls.map { (n, p) -> Ball(n, p, table.ballRadiusMeters) })
+        // A long thin shot at the 1, well under the floor.
+        val weak = table(0 to Vec2(0.60, 1.05), 1 to Vec2(1.88, 0.47), 9 to Vec2(1.61, 0.64))
+        val state = RollingRunoutPlanner.start(weak, nineBall, PlayerProfile(), horizon = 1)
+        val make = assertNotNull(state.focusStep).uncertainty.makeProbability
+        assertTrue(make < FallbackShotAdvisor.DIRECT_POT_FLOOR, "Precondition: a weak pot, make $make")
+        val advice = assertNotNull(fallbackAdviceFor(state), "advice beside the weak pot")
+        assertTrue("low-percentage" in advice.reason, advice.reason)
+
+        val edited = RollingRunoutPlanner.setOverride(state, com.runout.engine.planner.StepOverride(speedUnits = 6.0))
+        if (edited.isFocusEdited) assertNull(fallbackAdviceFor(edited), "no advice on a step the user edited")
+
+        val scenario = SampleLayouts.all.first()
+        val strong = RollingRunoutPlanner.start(scenario.layout, scenario.rulesState, PlayerProfile(), horizon = 1)
+        assertTrue(assertNotNull(strong.focusStep).uncertainty.makeProbability >= FallbackShotAdvisor.DIRECT_POT_FLOOR)
+        assertNull(fallbackAdviceFor(strong))
     }
 }

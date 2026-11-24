@@ -1,6 +1,8 @@
 package com.runout.engine.model
 
 import com.runout.engine.math.Vec2
+import com.runout.engine.physics.MotionPhysics
+import com.runout.engine.physics.SpinPhysics
 import kotlin.math.PI
 import kotlin.math.sqrt
 
@@ -132,7 +134,7 @@ enum class AssumedSurfacePreset(
     val cushionFrictionFc: Double = ClothParams.DEFAULT_CUSHION_FRICTION_FC,
     val cushionNoseHeightRatio: Double = ClothParams.DEFAULT_CUSHION_NOSE_HEIGHT_RATIO,
 ) {
-    /** Fast tournament worsted cloth & lively K55 rails (ideal assumed preset for online broadcast photos/videos). */
+    /** Fast tournament worsted cloth and lively tournament-grade cushion rubber (ideal assumed preset for online broadcast photos/videos). */
     PRO_BROADCAST_FAST(0.0068, 0.165, 0.82),
 
     /** Balanced commercial cloth & standard rails. */
@@ -238,12 +240,67 @@ data class ClothParams(
 }
 
 /**
+ * The game a table is built for. It decides the ball size and the default pocket cut, so code that needs to know
+ * whether a table is a snooker table asks its [TableSpec.kind] rather than its name or its pockets.
+ */
+enum class TableKind(
+    val defaultBallRadiusMeters: Double,
+    val defaultPocketPreset: PocketPreset,
+) {
+    POOL(TableSpec.POOL_BALL_RADIUS_METERS, PocketPreset.TOURNAMENT),
+    SNOOKER(TableSpec.SNOOKER_BALL_RADIUS_METERS, PocketPreset.SNOOKER),
+    ;
+
+    companion object {
+        /** Kind of a table played with balls of [ballRadiusMeters]: snooker for snooker balls, else pool. */
+        fun forBallRadius(ballRadiusMeters: Double): TableKind =
+            if (PocketPreset.forBallRadius(ballRadiusMeters) == PocketPreset.SNOOKER) SNOOKER else POOL
+    }
+}
+
+/**
+ * Contact parameters of the balls played on a table (dimensionless).
+ *
+ * - [frictionMu]: ball-ball friction at 1 m/s of relative sliding speed
+ *   ([SpinPhysics.BALL_BALL_FRICTION_REFERENCE_SPEED_MPS]). The throw law scales its whole speed-dependent friction
+ *   curve by `frictionMu / SpinPhysics.DEFAULT_BALL_BALL_FRICTION_MU`
+ *   ([SpinPhysics.ballBallFrictionAtSlidingSpeed]), so this one number describes the balls. In
+ *   [MIN_FRICTION_MU]`..`[MAX_FRICTION_MU], the range the calibration drill fits over.
+ * - [restitution]: ball-ball restitution along the line of centres, in [MIN_RESTITUTION]`..`[MAX_RESTITUTION]
+ *   (published measurements of phenolic pool balls lie in about `0.92..0.98`).
+ *
+ * The defaults are those of typical phenolic balls: friction about `0.046` at 1 m/s, restitution `0.93`. Calibration
+ * replaces [frictionMu] ([com.runout.engine.calibration.SavedTableProfile.toEffectiveTableSpec]).
+ */
+data class BallContactParams(
+    val frictionMu: Double = SpinPhysics.DEFAULT_BALL_BALL_FRICTION_MU,
+    val restitution: Double = MotionPhysics.BALL_BALL_RESTITUTION,
+) {
+    companion object {
+        const val MIN_FRICTION_MU: Double = 0.02
+        const val MAX_FRICTION_MU: Double = 0.12
+        const val MIN_RESTITUTION: Double = 0.85
+        const val MAX_RESTITUTION: Double = 0.98
+    }
+}
+
+/**
  * Table specification in SI metres.
  *
  * Coordinate convention:
  * - Origin `(0, 0)` is at the head-end left cushion nose.
  * - `x` runs along the long side towards the foot end (`0..lengthMeters`).
  * - `y` runs across the table (`0..widthMeters`).
+ *
+ * Identity:
+ * - [kind] says whether this is a pool or a snooker table; it defaults from the ball size.
+ * - [pocketPreset] is the cut the [pockets] were built from, or `null` for a custom set. When [pockets] is left to its
+ *   default it is the default cut for the ball size, and [pocketPreset] then defaults to that cut. To change the cut
+ *   or the size use [withPocketPreset] and [withSize], which rebuild the pockets with it; a `copy` that changes
+ *   [pockets], [lengthMeters] or [widthMeters] alone leaves [pocketPreset] describing the old pockets.
+ * - [name] is for display only; nothing should decide behaviour from it.
+ *
+ * [ballContact] holds the ball-ball friction and restitution used by every contact on this table.
  */
 data class TableSpec(
     val lengthMeters: Double,
@@ -252,6 +309,11 @@ data class TableSpec(
     val pockets: List<PocketSpec> = defaultPockets(lengthMeters, widthMeters, ballRadiusMeters),
     val cloth: ClothParams = ClothParams(),
     val name: String = "9 ft Pool",
+    val kind: TableKind = TableKind.forBallRadius(ballRadiusMeters),
+    val pocketPreset: PocketPreset? = PocketPreset.entries.firstOrNull { preset ->
+        pockets == defaultPockets(lengthMeters, widthMeters, ballRadiusMeters, preset)
+    },
+    val ballContact: BallContactParams = BallContactParams(),
 ) {
     /**
      * Returns true if a ball of [radius] centred at [pos] lies strictly on the playing surface
@@ -280,6 +342,27 @@ data class TableSpec(
      * Returns a copy of this table specification with updated [ClothParams].
      */
     fun withClothParams(newCloth: ClothParams): TableSpec = copy(cloth = newCloth)
+
+    /** This table with its six pockets rebuilt as [preset]. */
+    fun withPocketPreset(preset: PocketPreset): TableSpec =
+        copy(pockets = defaultPockets(lengthMeters, widthMeters, ballRadiusMeters, preset), pocketPreset = preset)
+
+    /**
+     * This table resized to [lengthMeters] x [widthMeters] with its pockets rebuilt for the new size in the same cut
+     * ([pocketPreset], or the default cut of its [kind] when the pockets were custom).
+     */
+    fun withSize(lengthMeters: Double, widthMeters: Double): TableSpec {
+        val preset = pocketPreset ?: kind.defaultPocketPreset
+        return copy(
+            lengthMeters = lengthMeters,
+            widthMeters = widthMeters,
+            pockets = defaultPockets(lengthMeters, widthMeters, ballRadiusMeters, preset),
+            pocketPreset = preset,
+        )
+    }
+
+    /** This table with ball-ball contact parameters [newContact]. */
+    fun withBallContact(newContact: BallContactParams): TableSpec = copy(ballContact = newContact)
 
     companion object {
         const val POOL_BALL_RADIUS_METERS: Double = 0.028575
@@ -331,40 +414,46 @@ data class TableSpec(
             )
         }
 
-        /** 9 ft regulation pool table: `2.54 x 1.27 m`, 57.15 mm balls (`R = 0.028575 m`). */
-        fun nineFootPool(cloth: ClothParams = ClothParams()): TableSpec = TableSpec(
-            lengthMeters = 2.54,
-            widthMeters = 1.27,
-            ballRadiusMeters = POOL_BALL_RADIUS_METERS,
-            cloth = cloth,
-            name = "9 ft Pool",
-        )
+        /** 9 ft regulation pool table: `2.54 x 1.27 m`, 57.15 mm balls (`R = 0.028575 m`), cut as [pocketPreset]. */
+        fun nineFootPool(
+            cloth: ClothParams = ClothParams(),
+            pocketPreset: PocketPreset = PocketPreset.TOURNAMENT,
+        ): TableSpec = standard(2.54, 1.27, TableKind.POOL, pocketPreset, cloth, "9 ft Pool")
 
-        /** 8 ft pool table: `2.24 x 1.12 m`, 57.15 mm balls (`R = 0.028575 m`). */
-        fun eightFootPool(cloth: ClothParams = ClothParams()): TableSpec = TableSpec(
-            lengthMeters = 2.24,
-            widthMeters = 1.12,
-            ballRadiusMeters = POOL_BALL_RADIUS_METERS,
-            cloth = cloth,
-            name = "8 ft Pool",
-        )
+        /** 8 ft pool table: `2.24 x 1.12 m`, 57.15 mm balls (`R = 0.028575 m`), cut as [pocketPreset]. */
+        fun eightFootPool(
+            cloth: ClothParams = ClothParams(),
+            pocketPreset: PocketPreset = PocketPreset.TOURNAMENT,
+        ): TableSpec = standard(2.24, 1.12, TableKind.POOL, pocketPreset, cloth, "8 ft Pool")
 
-        /** 7 ft bar-box pool table: `1.98 x 0.99 m`, 57.15 mm balls (`R = 0.028575 m`). */
-        fun sevenFootPool(cloth: ClothParams = ClothParams()): TableSpec = TableSpec(
-            lengthMeters = 1.98,
-            widthMeters = 0.99,
-            ballRadiusMeters = POOL_BALL_RADIUS_METERS,
-            cloth = cloth,
-            name = "7 ft Pool",
-        )
+        /** 7 ft bar-box pool table: `1.98 x 0.99 m`, 57.15 mm balls (`R = 0.028575 m`), cut as [pocketPreset]. */
+        fun sevenFootPool(
+            cloth: ClothParams = ClothParams(),
+            pocketPreset: PocketPreset = PocketPreset.TOURNAMENT,
+        ): TableSpec = standard(1.98, 0.99, TableKind.POOL, pocketPreset, cloth, "7 ft Pool")
 
-        /** Full-size 12 ft snooker table: `3.569 x 1.778 m`, 52.5 mm balls (`R = 0.02625 m`). */
-        fun fullSizeSnooker(cloth: ClothParams = ClothParams()): TableSpec = TableSpec(
-            lengthMeters = 3.569,
-            widthMeters = 1.778,
-            ballRadiusMeters = SNOOKER_BALL_RADIUS_METERS,
+        /** Full-size 12 ft snooker table: `3.569 x 1.778 m`, 52.5 mm balls (`R = 0.02625 m`), cut as [pocketPreset]. */
+        fun fullSizeSnooker(
+            cloth: ClothParams = ClothParams(),
+            pocketPreset: PocketPreset = PocketPreset.SNOOKER,
+        ): TableSpec = standard(3.569, 1.778, TableKind.SNOOKER, pocketPreset, cloth, "12 ft Snooker")
+
+        private fun standard(
+            lengthMeters: Double,
+            widthMeters: Double,
+            kind: TableKind,
+            pocketPreset: PocketPreset,
+            cloth: ClothParams,
+            name: String,
+        ): TableSpec = TableSpec(
+            lengthMeters = lengthMeters,
+            widthMeters = widthMeters,
+            ballRadiusMeters = kind.defaultBallRadiusMeters,
+            pockets = defaultPockets(lengthMeters, widthMeters, kind.defaultBallRadiusMeters, pocketPreset),
             cloth = cloth,
-            name = "12 ft Snooker",
+            name = name,
+            kind = kind,
+            pocketPreset = pocketPreset,
         )
     }
 }

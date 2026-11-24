@@ -3,11 +3,11 @@ package com.runout.app.calibration
 import com.runout.engine.calibration.PairedTiltReading
 
 /**
- * Android MEMS tilt-sensor bridge (SensorManager TYPE_GRAVITY / ACCELEROMETER) providing
- * paired 0/180-degree readings across a 3x3 table grid.
+ * Tilt-reading source for the level check. This version does not read the device's tilt sensor: it returns the
+ * bundled sample sessions, so the readings never come from the phone.
  */
 actual class PlatformTiltSensorController actual constructor() {
-    actual val sensorBackendName: String = "Android SensorManager (TYPE_GRAVITY)"
+    actual val sensorBackendName: String = "Sample data only: live tilt sensor is not available in this version"
     actual val resolutionDegrees: Double = 0.08
 
     actual fun readPairedGridPreset(sessionId: String): List<PairedTiltReading> {

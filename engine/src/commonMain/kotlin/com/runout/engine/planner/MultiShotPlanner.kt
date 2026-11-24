@@ -45,6 +45,16 @@ enum class ShotDifficultyTier(val label: String) {
  *
  * [positionSuccessProbability] is the probability that the cue ball does not scratch and that the next shot, played
  * from where this shot leaves the cue ball (averaged over the landing cloud), is made.
+ *
+ * [positionHoldProbability] is the share of the next shot's chance that survives this shot's execution error: the best
+ * next-shot make probability ([HeatZoneGenerator.shotQuality] over the legal next balls and pockets) averaged over the
+ * non-scratching points of the landing cloud, divided by its value at the nominal landing, at most 1. It is 1 on a shot
+ * that ends the rack or has no next shot. [RunoutPlan.cumulativeRunoutProbability] multiplies it in for every step but
+ * the last.
+ *
+ * [legalAsPlanned] is true when the nominal simulation pots the target in the intended pocket, drops no other ball and
+ * does not scratch. The planner only returns such steps unless the caller asked for a first shot that need not be
+ * ([MultiShotPlanner.planRunout]'s `allowHighScratchFirstShot`).
  */
 data class PlannedShotStep(
     val stepNumber: Int,
@@ -62,6 +72,8 @@ data class PlannedShotStep(
     val disturbedBalls: List<DisplacedBallPath> = emptyList(),
     val positionSuccessProbability: Double? = null,
     val recommendedSpeedUnits: Double = recommendedSpeedScale.toDouble(),
+    val positionHoldProbability: Double = 1.0,
+    val legalAsPlanned: Boolean = true,
 ) {
     val makeDifficulty: ShotDifficultyTier
         get() = ShotDifficultyTier.fromProbability(uncertainty.makeProbability)
@@ -74,6 +86,20 @@ data class PlannedShotStep(
  * A multi-shot position-play plan: the ordered shots, the probability of executing all of them, the ranking
  * score, the heat zone for the balls after the first shot, the problem balls on the initial layout and
  * plain-English explanations of the advice.
+ *
+ * [cumulativeRunoutProbability] is the probability of playing every step as planned, for steps `1..n` with make
+ * probability `m_i`, scratch probability `s_i` and position hold `h_i` ([PlannedShotStep.positionHoldProbability]):
+ *
+ * > P = m_1 (1 - s_1) x h_1 x m_2 (1 - s_2) x h_2 x ... x m_n (1 - s_n)
+ *
+ * that is P(make 1 without a scratch) x P(position held for shot 2 | made) x P(make 2 | nominal position) x ... The
+ * hold of the last step is left out: it is about a shot after the plan. Each `m_i` is evaluated from the nominal
+ * landing of the shot before; `h_i` is the share of the next shot's chance kept over the landing cloud, so it is not a
+ * second make probability. Without the hold terms this is the product of makes, which it never exceeds.
+ *
+ * [searchStopped] is true when the search was asked to stop ([MultiShotPlanner.planRunout]'s `shouldStop`) before it
+ * finished: the plan is complete as far as it goes and its steps chain from the table, but it is the best of what had
+ * been searched, and [nextBallHeatZone] is not built.
  */
 data class RunoutPlan(
     val steps: List<PlannedShotStep>,
@@ -82,6 +108,16 @@ data class RunoutPlan(
     val nextBallHeatZone: HeatZoneMap?,
     val problemBalls: List<ProblemBallReport>,
     val explanationReasons: List<String>,
+    val searchStopped: Boolean = false,
+)
+
+/**
+ * What [MultiShotPlanner.planRunoutWithStatus] found: the ranked [plans] and whether the search was [stopped] before it
+ * finished (then the plans are the best complete ones found so far, possibly none).
+ */
+data class RunoutSearchResult(
+    val plans: List<RunoutPlan>,
+    val stopped: Boolean,
 )
 
 /**
@@ -102,7 +138,10 @@ data class SelfPlayBenchmarkResult(
  * plan improves. Each candidate is simulated with the spin-compensated aim and the execution-error model and moves
  * the cue ball to its simulated resting place. A plan is scored as
  *
- * > value = product of P(make and no scratch) x product of (control x hold) x leave
+ * > value = product of P(make and no scratch) x product of hold x product of control x leave
+ *
+ * The first two products, without the last step's hold, are the plan's reported probability
+ * ([RunoutPlan.cumulativeRunoutProbability]); the ranking value adds the last step's hold, control and the leave.
  *
  * - **P(make)** comes from [ExecutionErrorModel.makeProbability]: a real probability for this player.
  * - **control** ([controlFactor]) is how hard the stroke is to play as asked, each cause counted once: cue-ball
@@ -115,8 +154,20 @@ data class SelfPlayBenchmarkResult(
  *   ball after (rotation games: the next ball in order; 8-ball: the best remaining ball). In 8-ball the leave also
  *   carries a rack term for problem balls still tied up on the table the shot leaves ([rackFactor]).
  *
- * Only the best [beamWidth] states survive each ply. Shots that do not pot, or whose nominal cue ball scratches, are
+ * Only the best `beamWidth` states survive each ply. Shots that do not pot, or whose nominal cue ball scratches, are
  * only searched when the caller allows them for the first shot, and then always rank below plans that pot.
+ *
+ * **Pruning that cannot change the result.** A child's value is at most its parent's value without the leave times the
+ * make probability of its shot (every other factor is at most 1). Target-pocket pairs are expanded in order of an upper
+ * bound on their make probability ([ExecutionErrorModel.makeProbabilityUpperBound]); once `beamWidth` legal children
+ * of the ply are known, a pair whose bound cannot reach the weakest of them is skipped, and so is a stroke whose own
+ * make probability (computed before its nine simulations) cannot. Such a child could never survive the ply. A stroke
+ * whose nominal simulation is not legal, or whose landing cloud reaches the scratch limit, stops before the rest of its
+ * simulations.
+ *
+ * Next-shot, look-ahead and position-hold values use [HeatZoneGenerator.shotQuality], the stroke-free make
+ * probability, because no stroke has been chosen for those shots yet; the shots of the plan use
+ * [ExecutionErrorModel.makeProbability].
  */
 object MultiShotPlanner {
     private const val MAX_CUT_ANGLE_RAD: Double = HeatZoneGenerator.MAX_HEAT_CUT_ANGLE_RAD
@@ -184,6 +235,10 @@ object MultiShotPlanner {
     // Eight-ball rack term.
     private const val UNRESOLVED_PROBLEM_FACTOR: Double = 0.85
 
+    /**
+     * Up to five ranked plans from [layout], each opening with a different target and pocket; see
+     * [planRunoutWithStatus] for the parameters.
+     */
     fun planRunout(
         layout: TableLayout,
         rulesState: GameRulesState = GameRulesState(),
@@ -197,10 +252,56 @@ object MultiShotPlanner {
         allowHighScratchFirstShot: Boolean = false,
         customFirstShotSpeedUnits: Double? = null,
         firstStepNumber: Int = 1,
-    ): List<RunoutPlan> {
-        if (layout.cueBall() == null) return emptyList()
+        shouldStop: () -> Boolean = { false },
+    ): List<RunoutPlan> = planRunoutWithStatus(
+        layout = layout,
+        rulesState = rulesState,
+        playerProfile = playerProfile,
+        horizonShots = horizonShots,
+        deepAnalysis = deepAnalysis,
+        customFirstShotTip = customFirstShotTip,
+        customFirstShotSpeedScale = customFirstShotSpeedScale,
+        customFirstShotTargetBallNumber = customFirstShotTargetBallNumber,
+        customFirstShotPocketId = customFirstShotPocketId,
+        allowHighScratchFirstShot = allowHighScratchFirstShot,
+        customFirstShotSpeedUnits = customFirstShotSpeedUnits,
+        firstStepNumber = firstStepNumber,
+        shouldStop = shouldStop,
+    ).plans
+
+    /**
+     * Searches [horizonShots] shots ahead (`1..5`), or with [deepAnalysis] as many shots as there are object balls,
+     * at most six, with a wider beam. The `customFirstShot*` arguments pin the first shot's tip, speed (player units;
+     * [customFirstShotSpeedScale] is the older whole-number form, kept for source compatibility, and
+     * [customFirstShotSpeedUnits] wins when both are given), target or pocket. [allowHighScratchFirstShot] also searches
+     * a first shot that does not pot as planned or scratches (it then ranks below every plan that does).
+     * [firstStepNumber] numbers the steps from a later shot.
+     *
+     * [shouldStop] is polled while the search runs: once per ply, per node, per target-pocket pair and per stroke (a
+     * stroke costs up to nine table simulations). When it returns true the search returns at once with the best complete
+     * plans found so far (possibly none), marked [RunoutPlan.searchStopped], and [RunoutSearchResult.stopped] set. The
+     * plans of the ply that was interrupted are included, although not every state of that ply was expanded. When it
+     * never returns true the result is the same as without it. The planner keeps no clock: a time budget is the
+     * caller's to implement in [shouldStop].
+     */
+    fun planRunoutWithStatus(
+        layout: TableLayout,
+        rulesState: GameRulesState = GameRulesState(),
+        playerProfile: PlayerProfile = PlayerProfile(),
+        horizonShots: Int = 3,
+        deepAnalysis: Boolean = false,
+        customFirstShotTip: TipOffset? = null,
+        customFirstShotSpeedScale: Int? = null,
+        customFirstShotTargetBallNumber: Int? = null,
+        customFirstShotPocketId: PocketId? = null,
+        allowHighScratchFirstShot: Boolean = false,
+        customFirstShotSpeedUnits: Double? = null,
+        firstStepNumber: Int = 1,
+        shouldStop: () -> Boolean = { false },
+    ): RunoutSearchResult {
+        if (layout.cueBall() == null) return RunoutSearchResult(emptyList(), stopped = false)
         val objectBallCount = layout.balls.count { it.number != 0 }
-        if (objectBallCount == 0) return emptyList()
+        if (objectBallCount == 0) return RunoutSearchResult(emptyList(), stopped = false)
 
         val maxDepth = if (deepAnalysis) objectBallCount.coerceIn(1, 6) else horizonShots.coerceIn(1, 5)
         val beamWidth = if (deepAnalysis) 9 else 6
@@ -223,6 +324,7 @@ object MultiShotPlanner {
             customPocketId = customFirstShotPocketId,
             allowHighScratchFirstShot = allowHighScratchFirstShot,
             firstStepNumber = firstStepNumber,
+            shouldStop = shouldStop,
         )
 
         val root = SearchNode(
@@ -239,14 +341,28 @@ object MultiShotPlanner {
         var beam = listOf(root)
 
         for (ply in 1..maxDepth) {
+            if (context.stopRequested()) break
             val children = mutableListOf<SearchNode>()
+            val bound = PlyBound(beamWidth)
             for (node in beam) {
-                val expanded = expand(node, ply, ply == maxDepth, context)
-                if (expanded.isEmpty()) {
-                    if (node.steps.isNotEmpty()) finished += node.copy(leaveFactor = LEAVE_FLOOR, notes = emptyList())
-                } else {
-                    children += expanded
+                if (context.stopRequested()) break
+                var expansion = expand(node, ply, ply == maxDepth, context, bound)
+                if (expansion.children.isEmpty() && expansion.pruned && !context.stopped) {
+                    // Whether this state is a dead end depends on the shots that were skipped: look at them after all.
+                    expansion = expand(node, ply, ply == maxDepth, context, PlyBound(0))
                 }
+                if (expansion.children.isEmpty()) {
+                    if (node.steps.isNotEmpty() && !context.stopped) {
+                        finished += node.copy(leaveFactor = LEAVE_FLOOR, notes = emptyList())
+                    }
+                } else {
+                    children += expansion.children
+                }
+            }
+            if (context.stopped) {
+                // Keep the complete plans this ply had found, one shot longer than the beam they grew from.
+                finished += children.sortedWith(NODE_ORDER).take(beamWidth)
+                break
             }
             if (children.isEmpty()) {
                 beam = emptyList()
@@ -256,7 +372,8 @@ object MultiShotPlanner {
             finished += survivors.filter { it.terminal }
             beam = survivors.filter { !it.terminal }
         }
-        finished += beam
+        finished += beam.filter { it.steps.isNotEmpty() }
+        val stopped = context.stopped
 
         val ranked = finished
             .filter { it.steps.isNotEmpty() }
@@ -271,15 +388,17 @@ object MultiShotPlanner {
             }
         }
 
-        return selected.map { node ->
+        val plans = selected.map { node ->
             buildPlan(
                 node = node,
                 initialLayout = layout,
                 initialRules = rulesState,
                 playerProfile = playerProfile,
                 problemBalls = initialProblemBalls,
+                stopped = stopped,
             )
         }
+        return RunoutSearchResult(plans, stopped)
     }
 
     /**
@@ -325,8 +444,11 @@ object MultiShotPlanner {
     // ---------------------------------------------------------------------------------------------
 
     /**
-     * A partial plan. [legal] is false once a step does not pot or scratches (only possible when the caller allows
-     * such a first shot); [notes] are explanations that belong to the plan ending at this node.
+     * A partial plan. [cumulativeProbability] is [RunoutPlan.cumulativeRunoutProbability] of its steps (makes, scratches
+     * and the holds of all steps but the last); [pendingHold] is the last step's hold, which becomes part of the
+     * probability once another step follows; [bonusFactor] is the product of the steps' control. [legal] is false once a
+     * step does not pot or scratches (only possible when the caller allows such a first shot); [notes] are explanations
+     * that belong to the plan ending at this node.
      */
     private data class SearchNode(
         val layout: TableLayout,
@@ -338,10 +460,45 @@ object MultiShotPlanner {
         val terminal: Boolean,
         val legal: Boolean = true,
         val notes: List<String> = emptyList(),
+        val pendingHold: Double = 1.0,
     ) {
+        /** The value without the leave: an upper bound on the value of any plan that extends this one. */
+        val prefixValue: Double
+            get() = cumulativeProbability * pendingHold * bonusFactor
+
         val value: Double
-            get() = cumulativeProbability * bonusFactor * leaveFactor
+            get() = prefixValue * leaveFactor
     }
+
+    /** The children of one state, and whether a pair or stroke was skipped because it could not survive the ply. */
+    private class Expansion(val children: List<SearchNode>, val pruned: Boolean)
+
+    /**
+     * The `size` best values among the legal children of a ply so far; a child whose value cannot reach [threshold]
+     * cannot survive the ply. A size of `0` never prunes.
+     */
+    private class PlyBound(private val size: Int) {
+        private val best = ArrayList<Double>(size + 1)
+
+        fun offer(node: SearchNode) {
+            if (size <= 0 || !node.legal) return
+            val v = node.value
+            if (best.size == size && v <= best.last()) return
+            val at = best.indexOfFirst { it < v }.let { if (it < 0) best.size else it }
+            best.add(at, v)
+            if (best.size > size) best.removeAt(best.size - 1)
+        }
+
+        /** The value a child needs to have a chance of surviving; `0` until the ply has [size] legal children. */
+        val threshold: Double
+            get() = if (size > 0 && best.size == size) best.last() else 0.0
+
+        /** Whether a child whose value is at most [upperBound] can be skipped. */
+        fun excludes(upperBound: Double): Boolean = upperBound * (1.0 + PRUNE_MARGIN) < threshold
+    }
+
+    /** Relative margin kept when pruning, so that rounding never removes a child that would tie for a place. */
+    private const val PRUNE_MARGIN: Double = 1e-9
 
     private val NODE_ORDER: Comparator<SearchNode> = compareByDescending<SearchNode> { it.legal }
         .thenByDescending { it.value }
@@ -359,7 +516,17 @@ object MultiShotPlanner {
         val customPocketId: PocketId?,
         val allowHighScratchFirstShot: Boolean,
         val firstStepNumber: Int,
+        private val shouldStop: () -> Boolean,
     ) {
+        /** True once [shouldStop] has returned true; it stays true. */
+        var stopped: Boolean = false
+            private set
+
+        fun stopRequested(): Boolean {
+            if (!stopped && shouldStop()) stopped = true
+            return stopped
+        }
+
         private val problemCache = HashMap<String, List<ProblemBallReport>>()
         private val nextShotCache = HashMap<String, DoubleArray>()
         private val leafCache = HashMap<String, Array<LeafResult?>>()
@@ -420,7 +587,7 @@ object MultiShotPlanner {
             for (target in targets) {
                 for (pocket in layout.table.pockets) {
                     val aim = playableAim(layout, cue, target, pocket) ?: continue
-                    val p = HeatZoneGenerator.shotQuality(aim, pocket, profile.aimErrorStdRad)
+                    val p = HeatZoneGenerator.shotQuality(aim, pocket, profile.aimErrorStdRad, layout.balls)
                     if (p > best) best = p
                 }
             }
@@ -476,7 +643,7 @@ object MultiShotPlanner {
         for (target in rules.legalTargetBalls(layout)) {
             for (pocket in table.pockets) {
                 val aim = playableAim(layout, cue, target, pocket) ?: continue
-                val p = HeatZoneGenerator.shotQuality(aim, pocket, profile.aimErrorStdRad)
+                val p = HeatZoneGenerator.shotQuality(aim, pocket, profile.aimErrorStdRad, layout.balls)
                 if (p > 0.0) pots += NextPot(target, pocket, aim, p)
             }
         }
@@ -544,19 +711,33 @@ object MultiShotPlanner {
         return best
     }
 
+    /**
+     * One simulated stroke. [pruned] marks a stroke that was skipped because its make probability cannot reach the
+     * ply's bound; it then carries no [uncertainty] (and nothing else may be read from it).
+     */
     private class ShotEvaluation(
         val compensatedAim: SpinCompensatedAim,
-        val uncertainty: ShotUncertaintyResult,
+        private val result: ShotUncertaintyResult?,
         val cueSpeedMps: Double,
-        val preImpact: SpinPhysics.PreImpactCueState,
         val legal: Boolean,
+        val pruned: Boolean = false,
     ) {
+        val uncertainty: ShotUncertaintyResult
+            get() = checkNotNull(result) { "A pruned stroke has no evaluation" }
+
         val stepProbability: Double
             get() = (uncertainty.makeProbability * (1.0 - uncertainty.scratchProbability)).coerceIn(0.0, 1.0)
     }
 
-    private fun expand(node: SearchNode, ply: Int, isLastPly: Boolean, context: SearchContext): List<SearchNode> {
-        val cue = node.layout.cueBall() ?: return emptyList()
+    private fun expand(
+        node: SearchNode,
+        ply: Int,
+        isLastPly: Boolean,
+        context: SearchContext,
+        bound: PlyBound,
+    ): Expansion {
+        val none = Expansion(emptyList(), pruned = false)
+        val cue = node.layout.cueBall() ?: return none
         val table = node.layout.table
         val targets = node.rules.legalTargetBalls(node.layout).let { legal ->
             if (ply == 1 && context.customTargetBallNumber != null) {
@@ -565,7 +746,7 @@ object MultiShotPlanner {
                 legal
             }
         }
-        if (targets.isEmpty()) return emptyList()
+        if (targets.isEmpty()) return none
 
         val signature = layoutSignature(node.layout)
         val problemBalls = context.problemBalls(node.layout, node.rules, signature)
@@ -587,23 +768,69 @@ object MultiShotPlanner {
             table.pockets
         }
 
-        val children = mutableListOf<SearchNode>()
+        // Target-pocket pairs with an upper bound on their make probability, most promising first, so that the ply's
+        // bound on surviving values rises early.
+        class PairCandidate(val target: Ball, val pocket: PocketSpec, val aim: AimGeometry, val makeBound: Double)
+        val pairs = ArrayList<PairCandidate>()
         for (target in targets) {
             for (pocket in pockets) {
                 val aim = playableAim(node.layout, cue, target, pocket) ?: continue
-                val tried = HashMap<Pair<Double, TipOffset>, SearchNode?>()
-                fun stroke(speedUnits: Double, tip: TipOffset): SearchNode? {
-                    val key = speedUnits to tip
-                    if (key in tried) return tried[key]
-                    val child = buildChild(node, ply, isLastPly, cue, target, pocket, aim, speedUnits, tip, problemBalls, context)
-                    tried[key] = child
-                    return child
+                val makeBound = ExecutionErrorModel.makeProbabilityUpperBound(
+                    aim, pocket, target.radiusMeters, cue.radiusMeters, context.profile.aimErrorStdRad,
+                )
+                pairs += PairCandidate(target, pocket, aim, makeBound)
+            }
+        }
+        pairs.sortWith(
+            compareByDescending<PairCandidate> { it.makeBound }
+                .thenBy { it.target.number }
+                .thenBy { it.pocket.id.ordinal },
+        )
+
+        val prefix = node.prefixValue
+        var pruned = false
+        val children = mutableListOf<SearchNode>()
+        for (pair in pairs) {
+            if (context.stopRequested()) break
+            val target = pair.target
+            val pocket = pair.pocket
+            val aim = pair.aim
+            if (bound.excludes(prefix * pair.makeBound)) {
+                pruned = true
+                continue
+            }
+            val tried = HashMap<Pair<Double, TipOffset>, SearchNode?>()
+            fun stroke(speedUnits: Double, tip: TipOffset): SearchNode? {
+                val key = speedUnits to tip
+                if (key in tried) return tried[key]
+                if (context.stopRequested()) return null
+                val child = when (
+                    val outcome = buildChild(
+                        node, ply, isLastPly, cue, target, pocket, aim, speedUnits, tip, problemBalls, context, bound,
+                    )
+                ) {
+                    is StrokeOutcome.Child -> outcome.node
+                    StrokeOutcome.Pruned -> {
+                        pruned = true
+                        null
+                    }
+                    StrokeOutcome.Rejected -> null
                 }
-                for (speedUnits in speeds) for (tip in tips) stroke(speedUnits, tip)
+                tried[key] = child
+                return child
+            }
+            for (speedUnits in speeds) for (tip in tips) stroke(speedUnits, tip)
+            if (context.stopped) {
+                // Keep what this pair has found so far, unrefined.
+                tried.values.filterNotNull().sortedWith(NODE_ORDER).firstOrNull()?.let { children += it }
+                break
+            }
+            run {
                 val coarse = tried.values.filterNotNull().sortedWith(NODE_ORDER)
-                if (coarse.isEmpty()) continue
+                if (coarse.isEmpty()) return@run
                 val primary = refine(simplestNearBest(coarse), speedPinned, tipPinned, ::stroke)
                 children += primary
+                bound.offer(primary)
                 // Before the last ply, also keep other cue-ball routes (for example holding short versus rolling off a rail):
                 // when the next pot is easy from all of them, only the plies after can tell them apart.
                 val alternatives = when {
@@ -618,11 +845,20 @@ object MultiShotPlanner {
                     val refined = refine(candidate, speedPinned = false, tipPinned = false, stroke = ::stroke)
                     val route = if (landings.none { landingOf(refined).distanceTo(it) < DISTINCT_LANDING_METERS }) refined else candidate
                     children += route
+                    bound.offer(route)
                     landings += landingOf(route)
                 }
             }
         }
-        return children
+        // Children in the order of the legal targets and the table's pockets, as if the pairs had been expanded in that
+        // order: the beam's sort is stable, so this decides between children of exactly equal value.
+        val targetOrder = targets.withIndex().associate { (i, b) -> b.number to i }
+        val pocketOrder = pockets.withIndex().associate { (i, p) -> p.id to i }
+        val ordered = children.sortedWith(
+            compareBy<SearchNode> { targetOrder[it.steps.last().targetBall.number] ?: Int.MAX_VALUE }
+                .thenBy { pocketOrder[it.steps.last().pocketId] ?: Int.MAX_VALUE },
+        )
+        return Expansion(ordered, pruned)
     }
 
     private fun landingOf(node: SearchNode): Vec2 =
@@ -710,7 +946,9 @@ object MultiShotPlanner {
         tip: TipOffset,
         problemBalls: List<ProblemBallReport>,
         context: SearchContext,
-    ): SearchNode? {
+        bound: PlyBound,
+    ): StrokeOutcome {
+        val prefix = node.prefixValue
         val evaluation = evaluateShot(
             layout = node.layout,
             cue = cue,
@@ -721,7 +959,10 @@ object MultiShotPlanner {
             tip = tip,
             profile = context.profile,
             allowHighScratch = ply == 1 && context.allowHighScratchFirstShot,
-        ) ?: return null
+            excludesMake = { make -> bound.excludes(prefix * make) },
+        )
+        if (evaluation == null) return StrokeOutcome.Rejected
+        if (evaluation.pruned) return StrokeOutcome.Pruned
         val uncertainty = evaluation.uncertainty
         val stepProbability = evaluation.stepProbability
         val legal = evaluation.legal
@@ -796,19 +1037,32 @@ object MultiShotPlanner {
             disturbedBalls = uncertainty.postShotSimulation?.disturbedBalls.orEmpty(),
             positionSuccessProbability = positionProbability,
             recommendedSpeedUnits = speedUnits,
+            positionHoldProbability = hold,
+            legalAsPlanned = legal,
         )
 
-        return SearchNode(
-            layout = advanced.layout,
-            rules = advanced.rules,
-            steps = stepsSoFar + step,
-            cumulativeProbability = node.cumulativeProbability * stepProbability,
-            bonusFactor = node.bonusFactor * control * hold,
-            leaveFactor = leaveFactor,
-            terminal = terminal,
-            legal = node.legal && legal,
-            notes = notes,
+        return StrokeOutcome.Child(
+            SearchNode(
+                layout = advanced.layout,
+                rules = advanced.rules,
+                steps = stepsSoFar + step,
+                // The previous step's hold joins the probability now that a step follows it.
+                cumulativeProbability = node.cumulativeProbability * node.pendingHold * stepProbability,
+                bonusFactor = node.bonusFactor * control,
+                leaveFactor = leaveFactor,
+                terminal = terminal,
+                legal = node.legal && legal,
+                notes = notes,
+                pendingHold = hold,
+            ),
         )
+    }
+
+    /** What evaluating one stroke gave: a child state, a shot that is not searched, or one skipped by the bound. */
+    private sealed interface StrokeOutcome {
+        class Child(val node: SearchNode) : StrokeOutcome
+        data object Rejected : StrokeOutcome
+        data object Pruned : StrokeOutcome
     }
 
     /**
@@ -930,8 +1184,10 @@ object MultiShotPlanner {
     /**
      * Simulates one candidate stroke. Unless [allowHighScratch] is set, a shot is only kept when the nominal
      * simulation pots the target in the intended pocket, drops no other ball (no plan counts on a carom, and in 8-ball
-     * an early 8 loses), the nominal cue ball does not scratch, and the scratch probability stays below
-     * [MAX_SCRATCH_PROBABILITY].
+     * an early 8 loses), the nominal cue ball does not scratch ([legalAsPlanned]), and the scratch probability stays
+     * below [MAX_SCRATCH_PROBABILITY]; the simulations stop as soon as one of these fails. When [excludesMake] says the
+     * stroke's make probability (computed before any simulation) cannot reach the search's bound, the stroke is
+     * returned [ShotEvaluation.pruned] without being simulated.
      */
     private fun evaluateShot(
         layout: TableLayout,
@@ -943,6 +1199,7 @@ object MultiShotPlanner {
         tip: TipOffset,
         profile: PlayerProfile,
         allowHighScratch: Boolean = false,
+        excludesMake: (Double) -> Boolean = { false },
     ): ShotEvaluation? {
         val cueSpeed = profile.speedForUnits(speedUnits)
         val preImpact = SpinPhysics.computePreImpactCueState(
@@ -961,7 +1218,19 @@ object MultiShotPlanner {
             profile.shaftType,
             layout.table,
         ) ?: return null
-        val uncertainty = ExecutionErrorModel.evaluateShotUncertainty(
+        val make = ExecutionErrorModel.makeProbability(
+            table = layout.table,
+            targetBall = target,
+            cueBallRadiusMeters = cue.radiusMeters,
+            pocket = pocket,
+            aim = compensated.geometricAim,
+            cueSpeedMps = cueSpeed,
+            tip = tip,
+            playerProfile = profile,
+            otherBalls = layout.balls,
+        )
+        if (excludesMake(make)) return ShotEvaluation(compensated, null, cueSpeed, legal = false, pruned = true)
+        val uncertainty = ExecutionErrorModel.evaluateShotUncertaintyIf(
             layout = layout,
             targetBall = target,
             pocket = pocket,
@@ -969,17 +1238,22 @@ object MultiShotPlanner {
             cueSpeedMps = cueSpeed,
             tip = tip,
             playerProfile = profile,
-        )
-        val simulation = uncertainty.postShotSimulation
-        val pottedAsCalled = uncertainty.targetBallPotted &&
-            (simulation?.targetBallTrajectory?.pocketedIn ?: pocket.id) == pocket.id
-        val otherBallDropped = simulation?.disturbedBalls?.any { it.pocketedIn != null } == true
-        val nominalScratch = uncertainty.nominalTrajectory.hitsScratchPocket != null
-        val legal = pottedAsCalled && !nominalScratch && !otherBallDropped
+            keepNominal = { simulation -> allowHighScratch || legalAsPlanned(simulation, pocket) },
+            maxScratchProbability = if (allowHighScratch) Double.POSITIVE_INFINITY else MAX_SCRATCH_PROBABILITY,
+        ) ?: return null
+        val legal = uncertainty.postShotSimulation?.let { legalAsPlanned(it, pocket) } ?: false
         if (!allowHighScratch && !legal) return null
-        if (!allowHighScratch && uncertainty.scratchProbability >= MAX_SCRATCH_PROBABILITY) return null
-        return ShotEvaluation(compensated, uncertainty, cueSpeed, preImpact, legal)
+        return ShotEvaluation(compensated, uncertainty, cueSpeed, legal)
     }
+
+    /**
+     * Whether the nominal [simulation] plays the shot as planned: the target drops in [pocket], no other ball drops and
+     * the cue ball does not scratch.
+     */
+    private fun legalAsPlanned(simulation: PostShotTableSimulation, pocket: PocketSpec): Boolean =
+        ExecutionErrorModel.pottedAsIntended(simulation, pocket) &&
+            simulation.cueBallTrajectory.hitsScratchPocket == null &&
+            simulation.disturbedBalls.none { it.pocketedIn != null }
 
     // ---------------------------------------------------------------------------------------------
     // Rules and layout advance
@@ -1056,9 +1330,11 @@ object MultiShotPlanner {
         initialRules: GameRulesState,
         playerProfile: PlayerProfile,
         problemBalls: List<ProblemBallReport>,
+        stopped: Boolean,
     ): RunoutPlan {
         val steps = node.steps
-        val heatZone = buildHeatZone(steps, initialLayout, initialRules, playerProfile)
+        // A stopped search returns at once: the heat zone (a grid of make probabilities) is left out.
+        val heatZone = if (stopped) null else buildHeatZone(steps, initialLayout, initialRules, playerProfile)
         val explanations = buildExplanations(steps, initialRules, problemBalls, heatZone, node)
         return RunoutPlan(
             steps = steps,
@@ -1067,6 +1343,7 @@ object MultiShotPlanner {
             nextBallHeatZone = heatZone,
             problemBalls = problemBalls,
             explanationReasons = explanations,
+            searchStopped = stopped,
         )
     }
 
@@ -1136,6 +1413,9 @@ object MultiShotPlanner {
             reasons += when {
                 postSim?.cueBallStoppedBeforeImpact == true ->
                     "Stroke is too soft (${speedLabel}/10): the cue ball stops short before reaching ball #$ballNumber."
+                postSim != null && !step.uncertainty.targetBallPotted && postSim.targetBallTrajectory?.pocketedIn != null ->
+                    "At speed ${speedLabel}/10 ball #$ballNumber drops in the " +
+                        "${postSim.targetBallTrajectory.pocketedIn.displayName} pocket, not the ${step.pocketId.displayName}."
                 !step.uncertainty.targetBallPotted ->
                     "Collision transfer at speed ${speedLabel}/10 leaves ball #$ballNumber short of the ${step.pocketId.displayName} pocket."
                 nextStep != null && isGameOver(rules, nextStep.targetBall) ->

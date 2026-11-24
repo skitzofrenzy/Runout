@@ -228,8 +228,8 @@ data class BreakAudioPreset(
 }
 
 /**
- * Platform microphone transient-envelope controller.
- * Processes PCM buffers strictly in memory with zero audio recording saved to disk.
+ * Source of break-sound envelopes for the break-speed meter. In this version both platforms return the bundled
+ * sample envelopes; the microphone is not used and nothing is recorded.
  */
 expect class PlatformBreakAudioController() {
     val audioBackendName: String

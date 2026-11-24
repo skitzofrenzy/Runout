@@ -155,7 +155,6 @@ fun CalibrationScreen(
 
             TableLevelCard(
                 sensorBackendName = tiltController.sensorBackendName,
-                resolutionDegrees = tiltController.resolutionDegrees,
                 slopeMap = effectiveSlopeMap,
                 slowRollDistanceMeters = selectedPreset.slowRollDistanceMeters,
                 slowRollLateralDriftMeters = selectedPreset.slowRollLateralDriftMeters,
@@ -903,7 +902,6 @@ private fun ValidationMetricTile(
 @Composable
 private fun TableLevelCard(
     sensorBackendName: String,
-    resolutionDegrees: Double,
     slopeMap: TableSlopeMap,
     slowRollDistanceMeters: Double,
     slowRollLateralDriftMeters: Double,
@@ -959,7 +957,7 @@ private fun TableLevelCard(
             }
 
             Text(
-                text = "Sensor: $sensorBackendName (resolution ~${formatFixed(resolutionDegrees, 2)}°)",
+                text = "Tilt readings: $sensorBackendName",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.Medium,
                 color = CalAccentCyan,
@@ -971,7 +969,7 @@ private fun TableLevelCard(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
             ) {
                 Text(
-                    text = "0° / 180° rotate-in-place bias cancellation: lay the phone on a flat straightedge at each 3 × 3 cell, capture θ₀, rotate 180° in place for θ₁₈₀, and compute θ = (θ₀ − θ₁₈₀) / 2 so camera-bump tilt and accelerometer zero-bias cancel out.",
+                    text = "These are built-in sample sessions. They illustrate the 0° / 180° rotate-in-place method: a reading θ₀ at each 3 × 3 cell, a second reading θ₁₈₀ with the phone turned 180° in place, and θ = (θ₀ − θ₁₈₀) / 2 so camera-bump tilt and accelerometer zero-bias cancel out.",
                     modifier = Modifier.padding(10.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

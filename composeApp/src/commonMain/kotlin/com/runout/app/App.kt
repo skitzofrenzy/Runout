@@ -82,8 +82,16 @@ import com.runout.app.legal.LegalConfig
 import com.runout.app.legal.LegalDocument
 import com.runout.app.legal.LegalDocumentScreen
 import com.runout.app.legal.TermsAcknowledgementScreen
+import com.runout.app.navigation.ActiveRoute
+import com.runout.app.navigation.BackAction
+import com.runout.app.navigation.BackContext
+import com.runout.app.navigation.PlatformBackHandler
+import com.runout.app.navigation.PrimaryTab
+import com.runout.app.navigation.backActionFor
 import com.runout.app.planning.PlanCommand
 import com.runout.app.planning.RollingPlanSession
+import com.runout.app.planning.TableSession
+import com.runout.app.planning.showsFocusEdit
 import com.runout.app.storage.SavedSetupPreferences
 import com.runout.app.storage.TableSizePreset
 import com.runout.app.storage.isTermsAcceptanceCurrent
@@ -102,8 +110,6 @@ import com.runout.app.ui.EditBallsSheet
 import com.runout.app.ui.ExtrasAndToolsScreen
 import com.runout.app.ui.FullscreenTableScreen
 import com.runout.app.ui.GameAndTableSetupSheet
-import com.runout.app.ui.pocketPresetOf
-import com.runout.app.ui.withPocketPreset
 import com.runout.app.ui.GlossaryInfoButton
 import com.runout.app.ui.HomeLandingScreen
 import com.runout.app.ui.LearnHubScreen
@@ -181,6 +187,16 @@ private val PLANNER_SURFACE_PRESET_LABELS: Map<AssumedSurfacePreset, String> = m
     AssumedSurfacePreset.SNOOKER_DIRECTIONAL to "Snooker",
 )
 
+internal const val MAKE_POSITION_RUNOUT_TERM: String = "Make, Position & Run-Out"
+
+/** The glossary text for the three percentages. The last sentence says what Run-Out % and Next N shots % include. */
+internal const val MAKE_POSITION_RUNOUT_EXPLANATION: String =
+    "Make % is your chance to pot this ball. Position % is how easily the cue ball lands cleanly in shape for the " +
+        "next shot. Run-Out % and Next N shots % are the chance of making every shot shown and holding position " +
+        "between them."
+
+private const val SAFER_OPTION_TITLE: String = "A Safer Option"
+
 private data class TipQuickPreset(
     val label: String,
     val tip: TipOffset?,
@@ -202,27 +218,6 @@ private val TIP_QUICK_PRESETS = listOf(
     TipQuickPreset("Draw + Right", TipOffset(sideRatio = 0.18, verticalRatio = -0.24)),
 )
 
-private enum class PrimaryTab(val label: String, val icon: RunoutIcon) {
-    HOME("Home", RunoutIcon.HOME),
-    PLAN("Plan", RunoutIcon.PLAN),
-    LEARN("Learn", RunoutIcon.LEARN),
-    RULES("Rules", RunoutIcon.RULES),
-}
-
-private sealed interface ActiveRoute {
-    data class MainTab(val tab: PrimaryTab) : ActiveRoute
-    data object PhotoScan : ActiveRoute
-    data class LearnWalkthroughPlayer(val walkthrough: EightBallWalkthrough) : ActiveRoute
-    data class LearnTutorialPlayer(val tutorial: InteractiveTutorial) : ActiveRoute
-    data object Calibration : ActiveRoute
-    data object SnookerCoach : ActiveRoute
-    data object BreakSpeedMeter : ActiveRoute
-    data object ScorekeeperAndClock : ActiveRoute
-    data object PlayerProfileAndBallSet : ActiveRoute
-    data object AboutLegal : ActiveRoute
-    data class LegalDocumentView(val document: LegalDocument) : ActiveRoute
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun App() {
@@ -238,14 +233,6 @@ fun App() {
         scenarios.indexOfFirst { it.rulesState.gameType == saved.gameType }.takeIf { it >= 0 }
     } ?: 0
     val initialBaseScenario = scenarios[initialPresetIdx]
-    val initialLayout = if (initialSavedSetup != null) {
-        SampleLayouts.resizeTableLayout(
-            initialBaseScenario.layout,
-            initialSavedSetup.tableSizePreset.toTableSpec(),
-        )
-    } else {
-        initialBaseScenario.layout
-    }
 
     var termsAccepted by remember(setupStore) {
         mutableStateOf(isTermsAcceptanceCurrent(setupStore.loadAcceptedTermsVersion(), LegalConfig.TERMS_VERSION))
@@ -257,9 +244,22 @@ fun App() {
     var displayMode by remember { mutableStateOf(initialSavedSetup?.displayMode ?: AppDisplayMode.SIMPLE) }
     var hasActiveSession by remember { mutableStateOf(false) }
 
-    var selectedPresetIndex by remember { mutableIntStateOf(initialPresetIdx) }
-    var currentLayout by remember { mutableStateOf(initialLayout) }
-    var rulesState by remember { mutableStateOf(initialRulesState) }
+    // The balls, rules, table and active calibration profile live in one place; every change to them is one of the
+    // named operations of TableSession. The values below are for drawing; handlers read and write `tableSession`.
+    var tableSession by remember {
+        mutableStateOf(
+            TableSession.initial(
+                index = initialPresetIdx,
+                scenario = initialBaseScenario,
+                rules = initialRulesState,
+                spec = initialSavedSetup?.tableSizePreset?.toTableSpec(),
+            ),
+        )
+    }
+    val currentLayout = tableSession.layout
+    val rulesState = tableSession.rules
+    val activeTableProfileId = tableSession.activeProfileId
+    val selectedPresetIndex = tableSession.presetIndex
     var playerProfile by remember {
         mutableStateOf(initialSavedSetup?.toPlayerProfile() ?: PlayerProfile())
     }
@@ -267,7 +267,6 @@ fun App() {
         mutableStateOf(initialSavedSetup?.toBallSetProfile() ?: BallSetProfile.standardPool())
     }
     var savedTableProfiles by remember { mutableStateOf(SampleCalibrationSessions.defaultSavedProfiles()) }
-    var activeTableProfileId by remember { mutableStateOf<String?>(null) }
 
     var selectedHorizon by remember {
         mutableStateOf(initialSavedSetup?.toPlanningHorizon() ?: PlanningHorizonOption.THREE_BALL)
@@ -315,11 +314,12 @@ fun App() {
 
     LaunchedEffect(planSession) { planSession.run() }
 
+    // A new table, rules, player or restart token plans again from the table; the horizon is not a key here, so a
+    // change of horizon (below) keeps the accepted shots.
     LaunchedEffect(
         currentLayout,
         rulesState,
         playerProfile,
-        selectedHorizon,
         planRestartToken,
         planningReadiness.isReady,
         isDraggingBall,
@@ -343,26 +343,38 @@ fun App() {
         )
     }
 
+    LaunchedEffect(selectedHorizon) {
+        planSession.setHorizon(selectedHorizon.horizonShots, selectedHorizon.deepAnalysis)
+    }
+
     // The plan on screen. After the table or the rules change it is hidden until the planner has caught up, so
     // lines never sit on a table they were not planned for.
     val rollingState = planSession.state
     val activeRolling: RollingPlanState? = rollingState?.takeIf {
         planningReadiness.isReady && it.baseLayout == currentLayout && it.baseRules == rulesState
     }
-    val isPlanning = planningReadiness.isReady && !isDraggingBall && (planSession.isBusy || activeRolling == null)
+    val isPlanning = planningReadiness.isReady && !isDraggingBall &&
+        (planSession.isBusy || (activeRolling == null && !planSession.hasFailed))
+    val planError = if (planningReadiness.isReady && planSession.hasFailed && !planSession.isBusy) {
+        RollingPlanSession.PLAN_FAILED_MESSAGE
+    } else {
+        null
+    }
     val displayedLayout = activeRolling?.focusLayout ?: currentLayout
     val rankedShots = if (activeRolling != null) planSession.rankedShots else emptyList()
-    // Advice for a table with no direct pot; hidden while the planner is catching up, like the plan.
+    // Advice beside a weak pot, or for a table with no direct pot; hidden while the planner is catching up, like the plan.
     val fallbackAdvice = if (activeRolling != null && !planSession.isBusy) planSession.fallbackAdvice else null
 
-    // What the user has chosen on the focused shot, as the controls show it.
+    // What the user has chosen on the focused shot, as the controls show it. "Reset step" and "Reset Defaults" both
+    // follow the planner's own word on whether the focused step is an edit.
     val editedOverride = if (activeRolling != null) planSession.editedOverride else null
     val editedTip = editedOverride?.tip
     val editedSpeedUnits = editedOverride?.speedUnits
     val editedPocket = editedOverride?.pocketId
     val editedTargetBall = editedOverride?.targetBallNumber
-    val hasSandboxOverrides = editedOverride != null
-    val plannerChoice = if (activeRolling != null) planSession.defaultChoice else null
+    val hasSandboxOverrides = activeRolling?.showsFocusEdit == true
+    // What the planner picks at the focus when nothing is forced, for the default markers.
+    val plannerPick = activeRolling?.defaultFocusStep
 
     val playablePockets = remember(displayedLayout, activeRolling?.focusRules, rulesState, planningReadiness.isReady) {
         if (!planningReadiness.isReady) {
@@ -397,13 +409,20 @@ fun App() {
         activeRoute = route
     }
 
+    /** Back to [route]: a tab through the tab bar's own path, anything else as it is. */
+    fun goToRoute(route: ActiveRoute) {
+        if (route is ActiveRoute.MainTab) navigateToTab(route.tab) else activeRoute = route
+    }
+
     fun handleMoveBall(ballNumber: Int, newPosition: Vec2) {
         // Moving a ball while a later shot is shown makes that table the new start of the plan; the group an
         // accepted 8-ball shot assigned stays with it.
         val focus = activeRolling
-        val from = focus?.focusLayout ?: currentLayout
-        if (focus != null && focus.focusRules != rulesState) rulesState = focus.focusRules
-        currentLayout = SampleLayouts.moveBallSafely(from, ballNumber, newPosition)
+        tableSession = if (focus != null) {
+            tableSession.moveBall(ballNumber, newPosition, from = focus.focusLayout, rulesAtFrom = focus.focusRules)
+        } else {
+            tableSession.moveBall(ballNumber, newPosition)
+        }
         hasActiveSession = true
     }
 
@@ -452,15 +471,10 @@ fun App() {
     }
 
     fun performResetWithUndo() {
-        val previousLayout = currentLayout
-        val previousRules = rulesState
-        val previousPresetIdx = selectedPresetIndex
+        val previousSession = tableSession
         val previousHasSession = hasActiveSession
-        val defaultScenario = scenarios[0]
 
-        currentLayout = SampleLayouts.resizeTableLayout(defaultScenario.layout, previousLayout.table)
-        rulesState = defaultScenario.rulesState
-        selectedPresetIndex = 0
+        tableSession = previousSession.reset(scenarios[0])
         selectedShotIndex = 0
         planRestartToken += 1
         hasActiveSession = false
@@ -472,9 +486,7 @@ fun App() {
                 duration = SnackbarDuration.Short,
             )
             if (result == SnackbarResult.ActionPerformed) {
-                currentLayout = previousLayout
-                rulesState = previousRules
-                selectedPresetIndex = previousPresetIdx
+                tableSession = previousSession
                 hasActiveSession = previousHasSession
                 planRestartToken += 1
             }
@@ -517,7 +529,8 @@ fun App() {
                 initialLevel = playerProfile.experienceLevel,
                 initialGame = rulesState.gameType,
                 initialUseUkBlackball = ballSetProfile.isUkBlackball,
-                initialTableSpec = currentLayout.table,
+                // The screen finds the size to preselect by name, so it is given the standard table of the nearest size.
+                initialTableSpec = TableSizePreset.fromTableSpec(currentLayout.table).toTableSpec(),
                 onComplete = { level, gameType, tableSpec, useUkBlackball, preferredMode ->
                     val nextProfile = PlayerProfile.fromQuestionnaire(
                         experience = level,
@@ -546,9 +559,12 @@ fun App() {
                     } else {
                         PlanningHorizonOption.THREE_BALL
                     }
-                    selectedPresetIndex = matchingPresetIdx
-                    currentLayout = SampleLayouts.resizeTableLayout(scenarios[matchingPresetIdx].layout, tableSpec)
-                    rulesState = nextRules
+                    tableSession = tableSession.startSetup(
+                        index = matchingPresetIdx,
+                        scenario = scenarios[matchingPresetIdx],
+                        spec = tableSpec,
+                        rules = nextRules,
+                    )
                     hasActiveSession = false
                     showOnboarding = false
                     persistSetupPreferences(
@@ -587,10 +603,43 @@ fun App() {
             val showFullscreenLandscape = activeRoute == ActiveRoute.MainTab(PrimaryTab.PLAN) &&
                 (isFullscreenTable || (isWideLandscape && !dismissAutoLandscape))
 
+            // System Back. Registered before the screens below, so anything a screen handles itself (the path
+            // inspector card on the table, a dialog) is dealt with first.
+            val backAction = backActionFor(
+                BackContext(
+                    route = activeRoute,
+                    lastPrimaryTab = lastPrimaryTab,
+                    isFullscreenTableShowing = showFullscreenLandscape,
+                    isDrawerOpen = drawerState.isOpen,
+                    isSheetOpen = showGameSetupSheet || showEditBallsSheet || showShotOptionsSheet || showQuickSpinSheet,
+                ),
+            )
+            PlatformBackHandler(enabled = backAction != BackAction.LeaveApp) {
+                when (backAction) {
+                    BackAction.CloseSheet -> {
+                        showGameSetupSheet = false
+                        showEditBallsSheet = false
+                        showShotOptionsSheet = false
+                        showQuickSpinSheet = false
+                    }
+                    BackAction.CloseDrawer -> scope.launch { drawerState.close() }
+                    BackAction.ExitFullscreen -> {
+                        if (isFullscreenTable) {
+                            isFullscreenTable = false
+                        } else {
+                            dismissAutoLandscape = true
+                        }
+                    }
+                    is BackAction.Navigate -> goToRoute(backAction.route)
+                    BackAction.LeaveApp -> Unit
+                }
+            }
+
             if (showFullscreenLandscape) {
                 FullscreenTableScreen(
                     displayMode = displayMode,
                     fallbackAdvice = fallbackAdvice,
+                    planError = planError,
                     onDisplayModeChange = { nextMode ->
                         displayMode = nextMode
                         persistSetupPreferences(mode = nextMode)
@@ -629,9 +678,9 @@ fun App() {
                     onOpenShotOptionsSheet = { showShotOptionsSheet = true },
                     onOpenPhotoScan = { navigateToSubRoute(ActiveRoute.PhotoScan) },
                     customTipOffset = editedTip,
-                    defaultTipForShot = plannerChoice?.tip,
+                    defaultTipForShot = plannerPick?.recommendedTip,
                     speedUnitsOverride = editedSpeedUnits,
-                    defaultSpeedUnitsForShot = plannerChoice?.speedUnits,
+                    defaultSpeedUnitsForShot = plannerPick?.recommendedSpeedUnits,
                     playerProfile = playerProfile,
                     sandboxTargetBallNumber = editedTargetBall,
                     showCueSandboxPanel = showCueSandboxPanel,
@@ -839,12 +888,9 @@ fun App() {
                                     if (isTopLevel) {
                                         scope.launch { drawerState.open() }
                                     } else {
-                                        val current = activeRoute
-                                        activeRoute = if (current is ActiveRoute.LegalDocumentView) {
-                                            ActiveRoute.AboutLegal
-                                        } else {
-                                            ActiveRoute.MainTab(lastPrimaryTab)
-                                        }
+                                        // The same destination as the system Back button.
+                                        val action = backActionFor(BackContext(activeRoute, lastPrimaryTab))
+                                        if (action is BackAction.Navigate) goToRoute(action.route)
                                     }
                                 },
                                 modifier = Modifier.defaultMinSize(
@@ -855,6 +901,7 @@ fun App() {
                                 RunoutVectorIcon(
                                     icon = if (isTopLevel) RunoutIcon.MENU else RunoutIcon.BACK,
                                     tint = MaterialTheme.colorScheme.onSurface,
+                                    contentDescription = if (isTopLevel) "Open menu" else "Back",
                                 )
                             }
                         },
@@ -925,6 +972,7 @@ fun App() {
                                         RunoutVectorIcon(
                                             icon = RunoutIcon.FULLSCREEN,
                                             tint = MaterialTheme.colorScheme.onSurface,
+                                            contentDescription = "Enter fullscreen table",
                                         )
                                     }
                                     IconButton(
@@ -937,6 +985,7 @@ fun App() {
                                         RunoutVectorIcon(
                                             icon = RunoutIcon.CAMERA,
                                             tint = MaterialTheme.colorScheme.primary,
+                                            contentDescription = "Scan or import a table photo",
                                         )
                                     }
                                     Box {
@@ -950,6 +999,7 @@ fun App() {
                                             RunoutVectorIcon(
                                                 icon = RunoutIcon.MORE,
                                                 tint = MaterialTheme.colorScheme.onSurface,
+                                                contentDescription = "More options",
                                             )
                                         }
                                         DropdownMenu(
@@ -1073,7 +1123,7 @@ fun App() {
                                 totalObjectBallsCount = currentLayout.objectBalls().size,
                                 rulesState = rulesState,
                                 onSelectRules = { nextRules ->
-                                    rulesState = nextRules
+                                    tableSession = tableSession.withRules(nextRules)
                                     hasActiveSession = true
                                     selectedShotIndex = 0
                                     planRestartToken += 1
@@ -1090,7 +1140,7 @@ fun App() {
                                 playerProfile = playerProfile,
                                 ballSetProfile = ballSetProfile,
                                 onAddMissingBall = { ballNumber ->
-                                    currentLayout = SampleLayouts.addMissingBall(currentLayout, ballNumber)
+                                    tableSession = tableSession.editBalls { SampleLayouts.addMissingBall(it, ballNumber) }
                                     hasActiveSession = true
                                 },
                                 onMoveBall = ::handleMoveBall,
@@ -1101,6 +1151,7 @@ fun App() {
                                 rankedShots = rankedShots,
                                 selectedShotIndex = safeShotIndex,
                                 fallbackAdvice = fallbackAdvice,
+                                planError = planError,
                                 onSelectShot = { selectedShotIndex = it },
                                 selectedShot = selectedShot,
                                 visibleSpins = visibleSpins,
@@ -1121,8 +1172,8 @@ fun App() {
                                 playablePockets = playablePockets,
                                 customPocketOverride = editedPocket,
                                 onSelectPocketOverride = ::handleSelectPocket,
-                                defaultTipForShot = plannerChoice?.tip,
-                                defaultSpeedUnitsForShot = plannerChoice?.speedUnits,
+                                defaultTipForShot = plannerPick?.recommendedTip,
+                                defaultSpeedUnitsForShot = plannerPick?.recommendedSpeedUnits,
                                 speedUnitsOverride = editedSpeedUnits,
                                 sandboxTargetBallNumber = editedTargetBall,
                                 showCueSandboxPanel = showCueSandboxPanel,
@@ -1133,10 +1184,7 @@ fun App() {
                                 onSelectSpeedUnits = ::handleUpdateSandboxSpeed,
                                 onResetSandboxDefaults = ::resetSandboxToPlanDefaults,
                                 onUpdateClothParams = { updatedCloth ->
-                                    activeTableProfileId = null
-                                    currentLayout = currentLayout.copy(
-                                        table = currentLayout.table.withClothParams(updatedCloth),
-                                    )
+                                    tableSession = tableSession.withCloth(updatedCloth)
                                     hasActiveSession = true
                                 },
                             )
@@ -1148,10 +1196,7 @@ fun App() {
                                 onOpenWalkthrough = { wt -> navigateToSubRoute(ActiveRoute.LearnWalkthroughPlayer(wt)) },
                                 onOpenTutorial = { tut -> navigateToSubRoute(ActiveRoute.LearnTutorialPlayer(tut)) },
                                 onLoadDrillIntoPlanner = { layout, rules ->
-                                    activeTableProfileId = null
-                                    currentLayout = layout
-                                    rulesState = rules
-                                    selectedPresetIndex = -1
+                                    tableSession = tableSession.loadLayout(layout, rules)
                                     hasActiveSession = true
                                     planRestartToken += 1
                                     selectedShotIndex = 0
@@ -1172,12 +1217,11 @@ fun App() {
                             lastPlayedGameType = rulesState.gameType,
                             displayMode = displayMode,
                             defaultTableSpec = currentLayout.table,
-                            onConfirmScannedLayout = { scannedLayout, scannedRules, scannedBallSet ->
-                                activeTableProfileId = null
-                                currentLayout = scannedLayout
-                                rulesState = scannedRules
+                            onConfirmScannedLayout = { scannedLayout, scannedRules, scannedBallSet, chosenCloth ->
+                                // The scan replaces the balls; the table keeps its calibration, cloth and pockets
+                                // unless another cloth was set on the scan screen.
+                                tableSession = tableSession.confirmScan(scannedLayout, scannedRules, chosenCloth)
                                 ballSetProfile = scannedBallSet
-                                selectedPresetIndex = -1
                                 hasActiveSession = true
                                 planRestartToken += 1
                                 selectedShotIndex = 0
@@ -1189,10 +1233,7 @@ fun App() {
                             walkthrough = r.walkthrough,
                             ballSet = ballSetProfile,
                             onTryOnTablePlanner = { layout, rules ->
-                                activeTableProfileId = null
-                                currentLayout = layout
-                                rulesState = rules
-                                selectedPresetIndex = -1
+                                tableSession = tableSession.loadLayout(layout, rules)
                                 hasActiveSession = true
                                 planRestartToken += 1
                                 selectedShotIndex = 0
@@ -1204,10 +1245,7 @@ fun App() {
                             tutorial = r.tutorial,
                             ballSet = ballSetProfile,
                             onTryOnTablePlanner = { layout, rules ->
-                                activeTableProfileId = null
-                                currentLayout = layout
-                                rulesState = rules
-                                selectedPresetIndex = -1
+                                tableSession = tableSession.loadLayout(layout, rules)
                                 hasActiveSession = true
                                 planRestartToken += 1
                                 selectedShotIndex = 0
@@ -1225,15 +1263,22 @@ fun App() {
                                 } else {
                                     savedTableProfiles + profile
                                 }
-                                activeTableProfileId = profile.id
-                                currentLayout = SampleLayouts.resizeTableLayout(
-                                    layout = currentLayout,
-                                    newSpec = profile.toEffectiveTableSpec(),
-                                )
-                                hasActiveSession = true
-                                planRestartToken += 1
-                                selectedShotIndex = 0
-                                navigateToTab(PrimaryTab.PLAN)
+                                if (tableSession.canApply(profile)) {
+                                    tableSession = tableSession.applyProfile(profile)
+                                    hasActiveSession = true
+                                    planRestartToken += 1
+                                    selectedShotIndex = 0
+                                    navigateToTab(PrimaryTab.PLAN)
+                                } else {
+                                    val profileKind = profile.baseTableSpec.kind.name.lowercase()
+                                    val tableKind = currentLayout.table.kind.name.lowercase()
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar(
+                                            "That profile is for a $profileKind table, so it can't be used on the " +
+                                                "$tableKind table in use. Choose a matching table size first.",
+                                        )
+                                    }
+                                }
                             },
                         )
 
@@ -1241,10 +1286,7 @@ fun App() {
                             playerProfile = playerProfile,
                             focusedDestination = ToolFocusDestination.SNOOKER_COACH,
                             onLoadLayoutIntoPlanner = { layout, rules ->
-                                activeTableProfileId = null
-                                currentLayout = layout
-                                rulesState = rules
-                                selectedPresetIndex = -1
+                                tableSession = tableSession.loadLayout(layout, rules)
                                 planRestartToken += 1
                                 hasActiveSession = true
                                 navigateToTab(PrimaryTab.PLAN)
@@ -1306,60 +1348,31 @@ fun App() {
                 rulesState = rulesState,
                 ballSet = ballSetProfile,
                 onSelectPreset = { index ->
-                    val chosen = scenarios[index]
-                    val activeProfile = savedTableProfiles.firstOrNull { it.id == activeTableProfileId }
-                    selectedPresetIndex = index
-                    currentLayout = if (activeProfile != null) {
-                        SampleLayouts.resizeTableLayout(chosen.layout, activeProfile.toEffectiveTableSpec())
-                    } else {
-                        chosen.layout
-                    }
-                    rulesState = chosen.rulesState
+                    tableSession = tableSession.loadPreset(index, scenarios[index])
                     hasActiveSession = true
                     planRestartToken += 1
                     selectedShotIndex = 0
                 },
                 onStartBlankTable = {
-                    val spec = currentLayout.table
-                    val endBallNum = rulesState.gameType.requiredEndBallNumber
-                    currentLayout = TableLayout(
-                        table = spec,
-                        balls = listOf(
-                            Ball(0, Vec2(spec.lengthMeters * 0.25, spec.widthMeters * 0.5)),
-                            Ball(endBallNum, spec.footSpot()),
-                        ),
-                    )
-                    selectedPresetIndex = -1
+                    tableSession = tableSession.blankTable()
                     planRestartToken += 1
                     hasActiveSession = true
                 },
                 onSelectPocketPreset = { preset ->
                     // Session only: the pocket cut is not part of the saved setup.
-                    currentLayout = currentLayout.copy(table = currentLayout.table.withPocketPreset(preset))
+                    tableSession = tableSession.choosePocketPreset(preset)
                     hasActiveSession = true
                     planRestartToken += 1
                     selectedShotIndex = 0
                 },
                 onResizeTable = { newSpec ->
-                    val keptPocketPreset = pocketPresetOf(currentLayout.table)
-                    val clothSpec = newSpec.withClothParams(currentLayout.table.cloth)
-                    val resizedSpec = if (keptPocketPreset != null && keptPocketPreset != PocketPreset.SNOOKER &&
-                        PocketPreset.forBallRadius(clothSpec.ballRadiusMeters) != PocketPreset.SNOOKER
-                    ) {
-                        clothSpec.withPocketPreset(keptPocketPreset)
-                    } else {
-                        clothSpec
-                    }
-                    activeTableProfileId = null
-                    currentLayout = SampleLayouts.resizeTableLayout(
-                        layout = currentLayout,
-                        newSpec = resizedSpec,
-                    )
+                    val next = tableSession.resizeTable(newSpec)
+                    tableSession = next
                     hasActiveSession = true
-                    persistSetupPreferences(tableSpec = resizedSpec)
+                    persistSetupPreferences(tableSpec = next.table)
                 },
                 onSelectRules = { nextRules ->
-                    rulesState = nextRules
+                    tableSession = tableSession.withRules(nextRules)
                     hasActiveSession = true
                     planRestartToken += 1
                     selectedShotIndex = 0
@@ -1374,11 +1387,11 @@ fun App() {
                 currentLayout = currentLayout,
                 ballSet = ballSetProfile,
                 onToggleBall = { num ->
-                    currentLayout = SampleLayouts.toggleObjectBall(currentLayout, num)
+                    tableSession = tableSession.editBalls { SampleLayouts.toggleObjectBall(it, num) }
                     hasActiveSession = true
                 },
                 onAddMissingCueBall = {
-                    currentLayout = SampleLayouts.addMissingBall(currentLayout, 0)
+                    tableSession = tableSession.editBalls { SampleLayouts.addMissingBall(it, 0) }
                     hasActiveSession = true
                 },
                 onRequestReset = { showResetConfirmDialog = true },
@@ -1391,10 +1404,7 @@ fun App() {
                 displayMode = displayMode,
                 playerProfile = playerProfile,
                 selectedHorizon = selectedHorizon,
-                onSelectHorizon = {
-                    selectedHorizon = it
-                    planRestartToken += 1
-                },
+                onSelectHorizon = { selectedHorizon = it },
                 speedUnitsOverride = editedSpeedUnits,
                 onSelectSpeedUnits = ::handleUpdateSandboxSpeed,
                 showHeatZone = showHeatZone,
@@ -1407,8 +1417,7 @@ fun App() {
                 },
                 clothParams = currentLayout.table.cloth,
                 onUpdateClothParams = { updatedCloth ->
-                    activeTableProfileId = null
-                    currentLayout = currentLayout.copy(table = currentLayout.table.withClothParams(updatedCloth))
+                    tableSession = tableSession.withCloth(updatedCloth)
                     hasActiveSession = true
                 },
                 onDismiss = { showShotOptionsSheet = false },
@@ -1486,6 +1495,7 @@ fun RunoutPracticeScreen(
     planningReadiness: PlanningReadinessResult,
     rankedShots: List<ShotRecommendation>,
     fallbackAdvice: FallbackAdvice?,
+    planError: String?,
     selectedShotIndex: Int,
     onSelectShot: (Int) -> Unit,
     selectedShot: ShotRecommendation?,
@@ -1745,12 +1755,22 @@ fun RunoutPracticeScreen(
             return@Column
         }
 
-        // 3. Hero Recommended Shot Section (Simple vs. Pro); a table with no direct pot gets the fallback card instead.
+        if (planError != null) {
+            Text(
+                text = planError,
+                style = MaterialTheme.typography.bodyMedium,
+                color = RunoutColors.DangerCoral,
+            )
+        }
+
+        // 3. Hero Recommended Shot Section (Simple vs. Pro). A table with no direct pot gets the fallback card instead;
+        // a table whose only pot is a long shot gets the card beside the shot, after the hero card.
         if (fallbackAdvice != null && rollingPlan?.window == null) {
             FallbackAdviceCard(
                 advice = fallbackAdvice,
                 displayMode = displayMode,
                 ballSet = ballSetProfile,
+                title = "No Direct Pot",
             )
         } else if (displayMode == AppDisplayMode.SIMPLE) {
             SimpleModeShotSection(
@@ -1762,11 +1782,13 @@ fun RunoutPracticeScreen(
                 tableSpec = currentLayout.table,
                 onOpenQuickSpinSheet = onOpenQuickSpinSheet,
                 onToggleCueSandbox = onToggleCueSandbox,
+                saferOption = fallbackAdvice,
             )
         } else {
             ProModeStrategySection(
                 rollingPlan = rollingPlan,
                 selectedShot = selectedShot,
+                saferOption = fallbackAdvice,
                 runoutPlans = routePlans,
                 onSelectRoute = { index -> if (index > 0) routePlans.getOrNull(index)?.let(onSelectAlternative) },
                 rankedShots = rankedShots,
@@ -1805,17 +1827,52 @@ internal fun fallbackChanceLabel(kind: FallbackKind): String = when (kind) {
 }
 
 /**
- * The card shown in place of the recommended shot when the legal ball has no direct pot: the kind of shot, one
- * sentence of reasoning and three data points (speed, spin, chance); Pro mode adds the numbers behind them.
+ * Shown in place of the shot card for an edited shot that does not play as set (it misses, scratches or drops another
+ * ball). The step bar says why Next is unavailable; this card only says there is no recommendation to follow.
+ */
+@Composable
+private fun NotPlayableAsSetCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = RunoutColors.WarningAmber.copy(alpha = 0.12f)),
+        border = BorderStroke(1.2.dp, RunoutColors.WarningAmber.copy(alpha = 0.70f)),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(RunoutSpacing.Margin),
+            verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element),
+        ) {
+            Text(
+                text = "This shot doesn't work as set",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = RunoutColors.WarningAmber,
+            )
+            Text(
+                text = "Change the spin, speed or pocket, or tap Reset step to go back to the planned shot.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+}
+
+/**
+ * The advice card: in place of the recommended shot when the legal ball has no direct pot ([title] "No Direct Pot"),
+ * or beside a shot that is a long shot ("A Safer Option"). The kind of shot, one sentence of reasoning and three data
+ * points (speed, spin, chance); Pro mode adds the numbers behind them.
  */
 @Composable
 private fun FallbackAdviceCard(
     advice: FallbackAdvice,
     displayMode: AppDisplayMode,
     ballSet: BallSetProfile,
+    title: String,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element)) {
-        RunoutSectionHeader(title = "No Direct Pot")
+        RunoutSectionHeader(title = title)
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(14.dp),
@@ -1909,6 +1966,7 @@ private fun SimpleModeShotSection(
     tableSpec: TableSpec,
     onOpenQuickSpinSheet: () -> Unit,
     onToggleCueSandbox: () -> Unit = onOpenQuickSpinSheet,
+    saferOption: FallbackAdvice? = null,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element)) {
         val activePlan = rollingPlan?.window
@@ -1924,8 +1982,8 @@ private fun SimpleModeShotSection(
                 modifier = Modifier.weight(1f),
             )
             GlossaryInfoButton(
-                term = "Make vs. Position Difficulty",
-                explanation = "Make % is your chance to pot this ball. Position % is how easily the cue ball lands cleanly in shape for the next shot.",
+                term = MAKE_POSITION_RUNOUT_TERM,
+                explanation = MAKE_POSITION_RUNOUT_EXPLANATION,
             )
         }
 
@@ -1935,7 +1993,7 @@ private fun SimpleModeShotSection(
             val tipWord = plainTipLabel(activeStep.recommendedTip)
             val tightness = computeShotTightness(activeStep, nextStep)
 
-            Card(
+            if (!activeStep.legalAsPlanned) NotPlayableAsSetCard() else Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -2049,29 +2107,40 @@ private fun SimpleModeShotSection(
                 }
             }
 
-            CollapsibleSectionCard(
-                title = "Why this shot?",
-                summary = if (activePlan.steps.size >= 2) {
-                    "Sets up ${activePlan.steps.drop(1).joinToString(" -> ") { "#${it.targetBall.number}" }}"
-                } else {
-                    "Highest make chance on the table"
-                },
-                initiallyExpanded = false,
-            ) {
-                if (activePlan.steps.size >= 2) {
-                    Text(
-                        text = "Next balls in order: ${activePlan.steps.joinToString(" -> ") { "#${it.targetBall.number} (${it.pocketId.displayName})" }}",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                activePlan.explanationReasons.forEach { reason ->
-                    Text(
-                        text = "• $reason",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            if (saferOption != null) {
+                FallbackAdviceCard(
+                    advice = saferOption,
+                    displayMode = AppDisplayMode.SIMPLE,
+                    ballSet = ballSet,
+                    title = SAFER_OPTION_TITLE,
+                )
+            }
+
+            if (activeStep.legalAsPlanned) {
+                CollapsibleSectionCard(
+                    title = "Why this shot?",
+                    summary = if (activePlan.steps.size >= 2) {
+                        "Sets up ${activePlan.steps.drop(1).joinToString(" -> ") { "#${it.targetBall.number}" }}"
+                    } else {
+                        "Highest make chance on the table"
+                    },
+                    initiallyExpanded = false,
+                ) {
+                    if (activePlan.steps.size >= 2) {
+                        Text(
+                            text = "Next balls in order: ${activePlan.steps.joinToString(" -> ") { "#${it.targetBall.number} (${it.pocketId.displayName})" }}",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    activePlan.explanationReasons.forEach { reason ->
+                        Text(
+                            text = "• $reason",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
 
@@ -2139,7 +2208,8 @@ private fun SimpleModeShotSection(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
-                            text = "Zone: ${shotTightnessLabel(fallbackTightness)} sweet spot",
+                            text = "Make ${formatPercentInt(fallbackShot.makeProbability)}% • " +
+                                "${shotTightnessLabel(fallbackTightness)} sweet spot",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
@@ -2170,6 +2240,7 @@ private fun SimpleModeShotSection(
 private fun ProModeStrategySection(
     rollingPlan: RollingPlanState?,
     selectedShot: ShotRecommendation?,
+    saferOption: FallbackAdvice?,
     runoutPlans: List<RunoutPlan>,
     onSelectRoute: (Int) -> Unit,
     rankedShots: List<ShotRecommendation>,
@@ -2200,11 +2271,11 @@ private fun ProModeStrategySection(
                     modifier = Modifier.weight(1f),
                 )
                 GlossaryInfoButton(
-                    term = "Make vs. Position Difficulty",
-                    explanation = "Make % is your chance to pot this ball. Position % is how easily the cue ball lands cleanly in shape for the next shot.",
+                    term = MAKE_POSITION_RUNOUT_TERM,
+                    explanation = MAKE_POSITION_RUNOUT_EXPLANATION,
                 )
             }
-            Card(
+            if (activePlan?.steps?.firstOrNull()?.legalAsPlanned == false) NotPlayableAsSetCard() else Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -2244,6 +2315,15 @@ private fun ProModeStrategySection(
                     )
                 }
             }
+        }
+
+        if (saferOption != null) {
+            FallbackAdviceCard(
+                advice = saferOption,
+                displayMode = AppDisplayMode.PRO,
+                ballSet = ballSetProfile,
+                title = SAFER_OPTION_TITLE,
+            )
         }
 
         if (activePlan != null && activePlan.problemBalls.isNotEmpty()) {
@@ -2626,7 +2706,8 @@ private fun ShotRecommendationCard(
     val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
     val containerColor = if (isSelected) RunoutColors.SurfaceMid else MaterialTheme.colorScheme.surface
     val cutAngleDeg = formatOneDecimal(abs(radiansToDegrees(shot.aim.cutAngleRadians)))
-    val ratingText = formatOneDecimal(shot.score * 10.0)
+    // The list is ordered by the shot's score, which also weighs position; the figure shown is the chance to pot.
+    val makeText = "Make ${formatPercentInt(shot.makeProbability)}%"
     val recSpinColor = spinColor(shot.recommendedSpin)
 
     Card(
@@ -2665,7 +2746,7 @@ private fun ShotRecommendationCard(
                     )
                 }
                 Text(
-                    text = "$ratingText / 10",
+                    text = makeText,
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary,
@@ -3070,7 +3151,7 @@ private fun RunoutPlanCard(
             plan.steps.forEach { step ->
                 val makePct = formatPercentInt(step.uncertainty.makeProbability)
                 val posText = step.positionSuccessProbability?.let {
-                    "Pos ${formatPercentInt(it)}% (${step.positionDifficulty?.label})"
+                    "Position ${formatPercentInt(it)}% (${step.positionDifficulty?.label})"
                 } ?: "Final ball"
                 Row(
                     modifier = Modifier.fillMaxWidth(),

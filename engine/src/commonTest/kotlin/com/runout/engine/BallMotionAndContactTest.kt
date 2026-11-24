@@ -22,6 +22,8 @@ import kotlin.math.asin
 import kotlin.math.atan
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.sqrt
+import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -474,5 +476,51 @@ class BallMotionAndContactTest {
         }
         // The contact-vertex polyline keeps only the start, contacts and end.
         assertEquals(path.cushionContacts + path.ballContacts + 2, path.points.size)
+    }
+
+    @Test
+    fun throwCompensatedLineOfCentresSolvesToRounding() {
+        fun residual(striking: BallState, target: Vec2): Double {
+            val n = BallBallContact.lineOfCentresForThrownDirection(striking, target)
+            val thrown = n.rotate(-BallBallContact.throwAngle(striking, BallState(n), n))
+            return abs(thrown.angleTo(target))
+        }
+        // A slow thin cut with draw and running side spin, where plain fixed-point steps converge slowly.
+        val target = Vec2(1.0, 0.0)
+        val dir = target.rotate(-68.7 * PI / 180.0)
+        val v = 1.31
+        val hard = BallState(Vec2.ZERO, dir * v, dir * (-0.12 * v), 1.03)
+        assertTrue(residual(hard, target) < 1e-6, "residual ${residual(hard, target)}")
+        val random = Random(5)
+        repeat(300) {
+            val cut = random.nextDouble(-80.0, 80.0) * PI / 180.0
+            val speed = random.nextDouble(0.2, 6.0)
+            val d = target.rotate(-cut)
+            val state = BallState(Vec2.ZERO, d * speed, d * (random.nextDouble(-1.0, 1.0) * speed), random.nextDouble(-2.0, 2.0))
+            assertTrue(residual(state, target) < 1e-6, "cut ${cut * 180 / PI}, speed $speed")
+        }
+    }
+
+    @Test
+    fun angularVelocityHelpersFollowTheSpinConvention() {
+        // w = R * (omegaY, -omegaX); side spin is R * omegaZ.
+        val s = BallState(Vec2.ZERO, spinVelocity = Vec2(0.3, -0.6), sideSpinSurfaceSpeedMps = 0.9)
+        assertEquals(0.6 / r, s.omegaX(r), 1e-12)
+        assertEquals(0.3 / r, s.omegaY(r), 1e-12)
+        assertEquals(0.9 / r, s.omegaZ(r), 1e-12)
+        // A ball rolling along +x turns about the +y axis.
+        assertTrue(BallState.rolling(Vec2.ZERO, Vec2(1.0, 0.0)).omegaY(r) > 0.0)
+    }
+
+    @Test
+    fun timeToTravelStraightMatchesTheRollingLaw() {
+        val rolling = BallState.rolling(Vec2.ZERO, Vec2(0.8, 0.0))
+        val a = muR * g
+        val d = 0.5
+        val expected = (0.8 - sqrt(0.8 * 0.8 - 2.0 * a * d)) / a
+        assertEquals(expected, assertNotNull(motion.timeToTravelStraight(rolling, d)), 1e-12)
+        assertEquals(0.0, motion.timeToTravelStraight(rolling, 0.0))
+        assertNull(motion.timeToTravelStraight(rolling, 0.8 * 0.8 / (2.0 * a) + 0.01), "it stops first")
+        assertNull(motion.timeToTravelStraight(BallState(Vec2.ZERO), 0.1))
     }
 }

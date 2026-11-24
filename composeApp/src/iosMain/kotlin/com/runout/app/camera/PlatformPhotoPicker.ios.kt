@@ -15,11 +15,11 @@ actual fun rememberPlatformPhotoPicker(
         override val supportsGalleryImport: Boolean = false
 
         override fun launchCamera() {
-            onError("Native iOS camera capture is enabled in the Xcode build; use a built-in sample photo for preview.")
+            onError("Taking a photo is not available on iOS yet. Use a built-in sample photo instead.")
         }
 
         override fun launchGallery() {
-            onError("Native iOS photo library import is enabled in the Xcode build; use a built-in sample photo for preview.")
+            onError("Photo import is not available on iOS yet. Use a built-in sample photo instead.")
         }
     }
 }

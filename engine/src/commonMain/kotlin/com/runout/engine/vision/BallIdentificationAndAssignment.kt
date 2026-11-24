@@ -6,6 +6,7 @@ import com.runout.engine.model.BallPaletteColor
 import com.runout.engine.model.BallSetProfile
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
+import com.runout.engine.physics.PocketGeometry
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
@@ -41,12 +42,20 @@ data class IdentifiedBallResult(
     val needsUserReview: Boolean,
 )
 
-/** Full output of rectifying and identifying the balls of one photo. */
+/**
+ * Full output of rectifying and identifying the balls of one photo.
+ *
+ * [rejectedCandidateIds] lists detections whose table position lies outside the playing surface by
+ * more than a small noise margin, or in a pocket opening: they are not balls on the table (a hand
+ * on the rail, a cushion shadow, a pocket) and are left out of [layout] instead of being pushed onto
+ * the rail.
+ */
 data class VisionRectificationResult(
     val layout: TableLayout,
     val identifiedBalls: List<IdentifiedBallResult>,
     val frozenBalls: List<FrozenBallStatus>,
     val cameraPositionMeters: Vec3,
+    val rejectedCandidateIds: List<Int> = emptyList(),
 )
 
 /**
@@ -56,6 +65,17 @@ data class VisionRectificationResult(
 object BallIdentificationAndAssignment {
     const val LOW_CONFIDENCE_THRESHOLD: Double = 0.72
     const val FROZEN_TOLERANCE_METERS: Double = 0.002
+
+    /** Share of a ball radius a corrected centre may lie outside the nose rectangle and still be a ball. */
+    const val RAIL_NOISE_MARGIN_FRACTION: Double = 0.10
+
+    /**
+     * Share of a ball radius a centre may lie past a pocket's capture line and still be a ball
+     * hanging at the jaws. Real balls resting against the mouth of a pocket on the local test
+     * photos come out 4 to 5 mm past the line (a ball sits at the jaws, partly over the mouth);
+     * a pocket opening seen as a blob is centred well beyond it. A quarter radius is about 7 mm.
+     */
+    const val POCKET_TOLERANCE_FRACTION: Double = 0.25
 
     private const val MISMATCH_COST = 2.5
     private const val SECONDARY_MATCH_COST = 0.35
@@ -150,6 +170,12 @@ object BallIdentificationAndAssignment {
     /**
      * Identifies [candidates] as numbered balls, places them in table metres and resolves contacts.
      *
+     * Each detection is first placed on the table with the ball-height correction. One that lands
+     * more than [RAIL_NOISE_MARGIN_FRACTION] of a ball radius outside the playing surface (the nose
+     * rectangle), or in a pocket opening, is not a ball on the table: it is listed in
+     * [VisionRectificationResult.rejectedCandidateIds] and takes no identity. One inside, or within
+     * that margin outside, is placed on the playable area; against a cushion it is frozen to it.
+     *
      * Candidates that cannot be matched to any allowed identity (more candidates than identities)
      * are omitted from the result.
      */
@@ -164,8 +190,25 @@ object BallIdentificationAndAssignment {
         val radius = ballSet.ballRadiusMeters
         val pool = listOf(0) + allowedObjectBallNumbers.filter { it != 0 }.sorted()
 
-        val costMatrix = Array(candidates.size) { i ->
-            DoubleArray(pool.size) { j -> assignmentCost(candidates[i], pool[j], ballSet) }
+        val onTable = ArrayList<DetectedBallCandidate>(candidates.size)
+        val centres = ArrayList<Vec2>(candidates.size)
+        val rejected = ArrayList<Int>()
+        for (candidate in candidates) {
+            val centre = homography.imageToBallCenterMeters(
+                candidate.imageCenterPx,
+                radius,
+                cameraPositionMeters,
+            )
+            if (isOnPlayingSurface(centre, radius, table)) {
+                onTable.add(candidate)
+                centres.add(centre)
+            } else {
+                rejected.add(candidate.id)
+            }
+        }
+
+        val costMatrix = Array(onTable.size) { i ->
+            DoubleArray(pool.size) { j -> assignmentCost(onTable[i], pool[j], ballSet) }
         }
         val assignment = solveHungarianAssignment(costMatrix)
 
@@ -178,22 +221,17 @@ object BallIdentificationAndAssignment {
         )
 
         val placed = ArrayList<Placed>()
-        for (i in candidates.indices) {
+        for (i in onTable.indices) {
             val col = assignment[i]
             if (col < 0) continue
-            val candidate = candidates[i]
-            val centre = homography.imageToBallCenterMeters(
-                candidate.imageCenterPx,
-                radius,
-                cameraPositionMeters,
-            )
+            val candidate = onTable[i]
             placed.add(
                 Placed(
                     candidate = candidate,
                     number = pool[col],
                     cost = costMatrix[i][col],
                     rawCloth = homography.imageToTableCloth(candidate.imageCenterPx),
-                    position = clampToPlayable(centre, radius, table),
+                    position = clampToPlayable(centres[i], radius, table),
                 ),
             )
         }
@@ -219,6 +257,7 @@ object BallIdentificationAndAssignment {
             identifiedBalls = identified,
             frozenBalls = detectFrozenBalls(layout),
             cameraPositionMeters = cameraPositionMeters,
+            rejectedCandidateIds = rejected,
         )
     }
 
@@ -310,6 +349,31 @@ object BallIdentificationAndAssignment {
             max(0.0, 0.40 - whiteFraction) * WHITE_FRACTION_SLOPE
         }
         else -> 0.0
+    }
+
+    /**
+     * True when the ball-height-corrected centre [p] can be a ball on [table]: inside the nose
+     * rectangle or at most [RAIL_NOISE_MARGIN_FRACTION] of a radius outside it, and not in a pocket.
+     *
+     * A ball frozen to a cushion has its centre one radius inside the nose line once the correction
+     * is applied, so a real ball is never outside the rectangle by more than the error of its image
+     * position; a hand or cue on the rail, a shadow on the cushion or a pocket opening is. The
+     * margin is a tenth of a radius (about 3 mm on a pool ball): on synthetic renders of balls
+     * frozen to all four rails the recovered centres are within 13 mm of the true centre and always
+     * inside the nose line, so the margin only allows for sub-pixel noise. A centre that a ball could
+     * not hold, past a pocket's capture line within the width of its mouth or over its hole
+     * ([PocketGeometry.containsRestingBall]), is a pocket opening; the test moves the point toward
+     * the table by [POCKET_TOLERANCE_FRACTION] of a radius so a ball hanging at the jaws is kept.
+     */
+    private fun isOnPlayingSurface(p: Vec2, r: Double, table: TableSpec): Boolean {
+        if (!p.x.isFinite() || !p.y.isFinite()) return false
+        val margin = RAIL_NOISE_MARGIN_FRACTION * r
+        val pocketTolerance = POCKET_TOLERANCE_FRACTION * r
+        if (p.x < -margin || p.x > table.lengthMeters + margin) return false
+        if (p.y < -margin || p.y > table.widthMeters + margin) return false
+        return table.pockets.none { pocket ->
+            PocketGeometry.containsRestingBall(p - pocket.axisIntoPocket * pocketTolerance, pocket, r)
+        }
     }
 
     private fun clampToPlayable(p: Vec2, r: Double, table: TableSpec): Vec2 = Vec2(

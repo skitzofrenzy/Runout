@@ -29,10 +29,10 @@ class ArgbImageFrame(
 
 /** Coarse hue family of the playing cloth. */
 enum class ClothHueCategory {
-    TOURNAMENT_BLUE,
-    CLASSIC_GREEN,
-    CHAMPIONSHIP_RED,
-    SLATE_GREY,
+    BLUE,
+    GREEN,
+    RED,
+    GREY,
 }
 
 /** Dominant cloth colour measured from the central region of a frame. */
@@ -71,13 +71,19 @@ data class TableQuadEdgeFit(
  *   hand to [PerspectiveHomography.fromTableQuad] after [RawImageTableDetector.orientQuadForHomography].
  * @property outerQuadCornersPx the outline of the connected cloth region. Cloth-covered cushions
  *   usually pass the cloth colour test, so this is often the cushion backs, with the near corners
- *   in the pocket holes. Ball detection masks with this outline.
+ *   in the pocket holes. Ball detection masks with this outline (see
+ *   [RawImageTableDetector.analyzeArgbFrame]).
  * @property edges one [TableQuadEdgeFit] per side of [noseQuadCornersPx].
+ * @property endOnView true when the frame looks along the table from behind a short rail (the top
+ *   side of the quad is a short rail and the bottom side the short rail nearest the camera). It is
+ *   decided once, on [outerQuadCornersPx], and every later step (table frame, near side, corner
+ *   order for the homography, ball mask) follows this flag instead of deciding again.
  */
 data class TableQuadDetection(
     val noseQuadCornersPx: List<Vec2>,
     val outerQuadCornersPx: List<Vec2>,
     val edges: List<TableQuadEdgeFit>,
+    val endOnView: Boolean = false,
 ) {
     /** True when at least one side used the cushion-width fallback. */
     val needsCornerReview: Boolean get() = edges.any { it.usedFallback }
@@ -87,7 +93,10 @@ data class TableQuadDetection(
  * Everything extracted from one raw frame: cloth, table quad, ball candidates and quality metrics.
  *
  * [detectedQuadCornersPx] is the cushion-nose quad (see [TableQuadDetection.noseQuadCornersPx]);
- * [outerQuadCornersPx] is the outline of the cloth region used to mask ball blobs.
+ * [outerQuadCornersPx] is the outline of the cloth region found on the first analysis (carried
+ * through a re-analysis given `previousQuads`; the ball mask itself when nothing was known).
+ * [ballMaskCornersPx] is the quad ball blobs were looked for in: the nose quad pushed out over the
+ * cushion band. [endOnView] is the orientation decision (see [TableQuadDetection.endOnView]).
  */
 data class RawFrameDetectionSummary(
     val width: Int,
@@ -100,9 +109,22 @@ data class RawFrameDetectionSummary(
     val meanLuma: Double,
     val outerQuadCornersPx: List<Vec2> = detectedQuadCornersPx,
     val quadEdges: List<TableQuadEdgeFit> = emptyList(),
+    val endOnView: Boolean = false,
+    val ballMaskCornersPx: List<Vec2> = outerQuadCornersPx,
 ) {
     /** True when a side of [detectedQuadCornersPx] came from the cushion-width fallback. */
     val quadNeedsCornerReview: Boolean get() = quadEdges.any { it.usedFallback }
+
+    /**
+     * The quads of this analysis, to hand back to [RawImageTableDetector.analyzeArgbFrame] when the
+     * same frame is analysed again with a corrected quad.
+     */
+    fun toQuadDetection(): TableQuadDetection = TableQuadDetection(
+        noseQuadCornersPx = detectedQuadCornersPx,
+        outerQuadCornersPx = outerQuadCornersPx,
+        edges = quadEdges,
+        endOnView = endOnView,
+    )
 }
 
 /** Result of a user-triggered local rescan around a tapped point on an imported photo. */
@@ -154,6 +176,59 @@ object RawImageTableDetector {
      */
     const val CUSHION_VISIBLE_BAND_METERS: Double = 0.065
 
+    /**
+     * Smallest cushion width accepted for a measured nose, in metres: the width of the cloth-covered
+     * strip that must lie behind a nose line (see [cushionWidthBeyond]). A cushion top alone is
+     * about 50 mm wide, so a line with less than this behind it is the edge of the cloth region
+     * itself, with the rail right behind, rather than a nose inside the cushion.
+     */
+    const val MIN_CUSHION_WIDTH_METERS: Double = 0.020
+
+    /**
+     * Largest cushion width accepted for a measured nose, in metres. The visible band measured on
+     * broadcast photos (perspective included) tops out at about 91 mm; 110 mm leaves a fifth of
+     * margin. A shadow, a reflection or a lit strip further in than this is not a cushion edge:
+     * the next step out is tried instead and, if none is consistent with a cushion width, the side
+     * falls back to the nominal width and is flagged.
+     */
+    const val MAX_CUSHION_WIDTH_METERS: Double = 0.110
+
+    /** Distance between probes when the cushion width behind a line is measured, in metres. */
+    private const val WIDTH_PROBE_STEP_METERS = 0.005
+
+    /** Steps kept per cross-section: the nose is one of the first few steps in from the cloth edge. */
+    private const val NOSE_MAX_STEP_LEVELS = 4
+
+    /** Width of the sloping nose face drawn by the synthetic renderer, in metres. */
+    private const val CUSHION_FACE_STRIP_METERS = CUSHION_VISIBLE_BAND_METERS - CUSHION_TOP_WIDTH_METERS
+
+    /**
+     * Shape limits for a blob whose centre is on the cushion band, outside the nose quad. A disc
+     * fills `pi / 4 = 0.785` of its bounding box and has aspect 1; the synthetic frozen balls
+     * measure fill 0.69 to 0.78 and aspect 0.9 to 1.1 at the expected radius, but real balls on the
+     * rails of the local test photos measure fill 0.54 to 0.74 and aspect 0.9 to 1.5 (shading,
+     * partial occlusion by the cue or the rail). The limits sit just outside the real ones: fill at
+     * least 0.50, aspect within `0.6..1.67`, radius within `0.5..1.6` times the expected radius at
+     * that image row. They are tighter than the bed limits only in the radius; a hand or cue lying
+     * on the rail fails the aspect and fill limits when seen from the side, and on every view the
+     * position test of the ball-height-corrected centre rules it out.
+     */
+    private const val BAND_MIN_FILL = 0.50
+    private const val BAND_MIN_ASPECT = 0.60
+    private const val BAND_MAX_ASPECT = 1.67
+    private const val BAND_MIN_RADIUS_RATIO = 0.5
+    private const val BAND_MAX_RADIUS_RATIO = 1.6
+
+    /**
+     * Largest area per distance-transform peak, in expected ball areas, for a cluster whose centre
+     * is on the cushion band. Touching balls measure about one ball area per peak (the overlap of
+     * the discs is small); 1.6 leaves room for shading and a cut-out highlight.
+     */
+    private const val BAND_MAX_AREA_PER_PEAK = 1.6
+
+    /** Upper bound on how far a ball mask is pushed out beyond a nose side, in metres. */
+    private const val MAX_MASK_BAND_METERS = 0.20
+
     /** Confidence reported for a side that was placed by the cushion-width fallback. */
     const val FALLBACK_EDGE_CONFIDENCE: Double = 0.25
 
@@ -161,7 +236,22 @@ object RawImageTableDetector {
     private const val NOSE_MIN_CONFIDENCE = 0.5
     private const val NOSE_STEP_MIN_CONTRAST = 8.0
     private const val NOSE_STEP_NOISE_FACTOR = 4.0
+
+    /** How far across the table, as a fraction of its width, each cross-section is scanned. */
     private const val NOSE_BAND_FRACTION = 0.12
+
+    /**
+     * A corner formed by two adjacent sides whose directions have `|sin|` of their angle below
+     * this value (about 11 degrees) is ill-conditioned: a table corner seen from any usable camera
+     * position is far from straight, so such fitted sides cannot both be cushion edges.
+     */
+    private const val MIN_CORNER_SIN = 0.2
+
+    /**
+     * Largest shift of a nose corner from its outer corner along either table axis, in metres: a
+     * cushion width and a pocket mouth (the outline's corner is cut by the pocket) with margin.
+     */
+    private const val MAX_CORNER_SHIFT_METERS = 0.30
 
     private val PALETTE: Array<BallPaletteColor> = BallPaletteColor.values()
 
@@ -210,10 +300,10 @@ object RawImageTableDetector {
     }
 
     private fun categoryForHue(hue: Double): ClothHueCategory = when {
-        hue in 175.0..255.0 -> ClothHueCategory.TOURNAMENT_BLUE
-        hue >= 75.0 && hue < 175.0 -> ClothHueCategory.CLASSIC_GREEN
-        hue <= 35.0 || hue >= 325.0 -> ClothHueCategory.CHAMPIONSHIP_RED
-        else -> ClothHueCategory.SLATE_GREY
+        hue in 175.0..255.0 -> ClothHueCategory.BLUE
+        hue >= 75.0 && hue < 175.0 -> ClothHueCategory.GREEN
+        hue <= 35.0 || hue >= 325.0 -> ClothHueCategory.RED
+        else -> ClothHueCategory.GREY
     }
 
     private fun isBrightNeutralGreyCloth(cloth: DetectedClothSurface): Boolean =
@@ -268,7 +358,7 @@ object RawImageTableDetector {
         if (cloth.meanSaturation > 0.40) {
             // Saturated blue/teal/green cloth drop-shadows keep the cloth hue and high saturation
             // while dropping in value below the cloth bed.
-            if (cloth.category == ClothHueCategory.CHAMPIONSHIP_RED) return false
+            if (cloth.category == ClothHueCategory.RED) return false
             val upperVal = (cloth.meanValue - 0.14).coerceAtLeast(0.45)
             if (value < 0.16 || value > upperVal) return false
             return hueDistance(hue, cloth.dominantHueDegrees) <= 22.0 &&
@@ -293,7 +383,7 @@ object RawImageTableDetector {
     /**
      * Measures the dominant cloth colour from the central `[0.28..0.72] x [0.22..0.78]` region,
      * ignoring near-white and near-black (ball and pocket) pixels, using a 36-bin circular hue
-     * histogram. Cloth whose median saturation is below `0.22` is reported as [ClothHueCategory.SLATE_GREY].
+     * histogram. Cloth whose median saturation is below `0.22` is reported as [ClothHueCategory.GREY].
      */
     fun detectClothSurface(frame: ArgbImageFrame): DetectedClothSurface {
         val w = frame.width
@@ -338,7 +428,7 @@ object RawImageTableDetector {
         }
 
         if (n == 0) {
-            return DetectedClothSurface(ClothHueCategory.SLATE_GREY, 0.0, 0.0, 0.4, 0.0)
+            return DetectedClothSurface(ClothHueCategory.GREY, 0.0, 0.0, 0.4, 0.0)
         }
 
         val medianSat = sats.copyOf(n).also { it.sort() }[n / 2]
@@ -363,7 +453,7 @@ object RawImageTableDetector {
             val medRb = if (count > 0) greyRbs.copyOf(count).also { it.sort() }[count / 2] else 0.0
             val medRg = if (count > 0) greyRgs.copyOf(count).also { it.sort() }[count / 2] else 0.0
             base = DetectedClothSurface(
-                category = ClothHueCategory.SLATE_GREY,
+                category = ClothHueCategory.GREY,
                 dominantHueDegrees = circularMeanHue(hues, n) { sats[it] <= GREY_PIXEL_MAX_SATURATION },
                 meanSaturation = medSat,
                 meanValue = medVal,
@@ -452,8 +542,11 @@ object RawImageTableDetector {
      * This is [TableQuadDetection.noseQuadCornersPx] of [detectTableQuads]. Returns a default inset
      * quad when fewer than 50 cloth pixels are found.
      */
-    fun detectTableQuadCornersPx(frame: ArgbImageFrame, cloth: DetectedClothSurface): List<Vec2> =
-        detectTableQuads(frame, cloth).noseQuadCornersPx
+    fun detectTableQuadCornersPx(
+        frame: ArgbImageFrame,
+        cloth: DetectedClothSurface,
+        table: TableSpec = TableSpec.nineFootPool(),
+    ): List<Vec2> = detectTableQuads(frame, cloth, table).noseQuadCornersPx
 
     /**
      * Outline of the connected cloth region, ordered `[TL, TR, BR, BL]`: the extreme points of the
@@ -470,22 +563,35 @@ object RawImageTableDetector {
      * Finds both table outlines: the outer cloth region ([detectOuterClothQuadCornersPx]) and,
      * inside it, the cushion-nose quad.
      *
+     * The orientation (end-on or landscape) is decided once on the outer quad and carried in
+     * [TableQuadDetection.endOnView]; it fixes which table side each image side is and which side
+     * is nearest the camera.
+     *
      * Each side of the outer quad is refined on its own. Across [NOSE_PROFILE_SAMPLES] sections
-     * along the side, the colour profile is walked from inside the bed outwards and the first
-     * sharp step (bed to cushion face, cushion top or rail) is taken as a nose point; a straight
-     * line is fitted to those points with RANSAC. On sides facing the camera this is where the bed
-     * meets the cushion face; on the side nearest the camera, whose face is hidden, it is the inner
-     * edge of the cushion top.
+     * along the side, the colour profile is walked from inside the bed outwards and the sharp
+     * steps (bed to cushion face, cushion top or rail) are listed, innermost first. A straight line
+     * is fitted with RANSAC to the innermost steps; if the cloth-covered strip behind that line is
+     * not a plausible cushion width ([MIN_CUSHION_WIDTH_METERS] to [MAX_CUSHION_WIDTH_METERS],
+     * measured through the plane of the outer quad), the same is tried with the next step in each
+     * section, and so on for up to four steps. A shadow or lit strip in front of the nose is thus
+     * passed over for the step that is consistent with a cushion. On sides facing the camera the
+     * accepted line is where the bed meets the cushion face; on the side nearest the camera, whose
+     * face is hidden, it is the inner edge of the cushion top.
      *
      * A side falls back to insetting the outer edge by a typical cushion band
      * ([CUSHION_VISIBLE_BAND_METERS], or [CUSHION_TOP_WIDTH_METERS] on the side nearest the camera)
-     * when
-     * - fewer than half of the sections agree on a line, or
-     * - half a cushion band beyond the line there is rail rather than cushion-coloured cloth: the
-     *   line is then the edge of the cloth region, and the cushion, the same colour as the bed, is
-     *   hidden inside it.
+     * when no step level gives a line that both
+     * - at least half of the sections agree on, and
+     * - has a plausible cushion width of cloth-coloured material behind it. A line with the rail
+     *   right behind it is the edge of the cloth region, with the cushion, the same colour as the
+     *   bed, hidden inside it; one with a much wider strip behind it is a mark on the bed.
      *
-     * [table] supplies the aspect ratio and scale used by the fallback and the cushion check.
+     * The whole refinement is abandoned in favour of the all-fallback quad when a corner formed by
+     * fitted lines is ill-conditioned (adjacent sides nearly parallel) or lands further from its
+     * outer corner than [MAX_CORNER_SHIFT_METERS] along either table axis.
+     *
+     * [table] supplies the dimensions behind every conversion to metres: the cushion width window,
+     * the fallback band, the cushion check and the table frame.
      */
     fun detectTableQuads(
         frame: ArgbImageFrame,
@@ -498,9 +604,10 @@ object RawImageTableDetector {
                     noseQuadCornersPx = quad,
                     outerQuadCornersPx = quad,
                     edges = List(4) { TableQuadEdgeFit(0.0, usedFallback = true, insetFromOuterPx = 0.0) },
+                    endOnView = false,
                 )
             }
-        return refineToCushionNoses(frame, cloth, outer, table)
+        return refineToCushionNoses(frame, cloth, outer, table, isEndOnPerspectiveQuad(outer))
     }
 
     private fun defaultInsetQuad(w: Int, h: Int): List<Vec2> = listOf(
@@ -883,24 +990,30 @@ object RawImageTableDetector {
     }
 
     /**
-     * Samples cross-sections of one outer side and fits the cushion-nose line.
+     * Samples cross-sections of one outer side and lists the candidate cushion-nose points of each.
      *
      * Each section runs along the inward normal from just outside the outer edge to
      * [NOSE_BAND_FRACTION] of the way across the table. The step response at a position is the
      * mean RGB difference between the few pixels just outside and just inside it. Walking from the
-     * inner end outwards, the first response above `max(8, 4 x bed noise)` (refined to its local
-     * maximum) is the nose point of that section: the bed's own slow shading never produces a sharp
-     * step, while the cushion face, a cushion top of another shade or the rail does.
+     * inner end outwards, every response above `max(8, 4 x bed noise)` (refined to its local
+     * maximum) is a step, and up to [NOSE_MAX_STEP_LEVELS] of them are kept, innermost first. The
+     * innermost is normally the nose: the bed's own slow shading never produces a sharp step,
+     * while the cushion face, a cushion top of another shade or the rail does. Further steps are
+     * kept so that a shadow or lit strip lying in front of the nose can be told apart from it by
+     * its distance to the end of the cushion (see [cushionWidthBeyond]).
+     *
+     * Element `k` of the result holds the steps of the `k`-th section (empty when none was found
+     * or the section was skipped).
      */
-    private fun scanSideForNoseLine(
+    private fun scanSideForNoseSteps(
         frame: ArgbImageFrame,
         side: OuterSide,
         scale: Double,
-    ): SideScan {
-        if (side.length < 8.0) return SideScan(null, 0.0)
+    ): List<List<Vec2>> {
+        if (side.length < 8.0) return emptyList()
         val step = 0.5 * scale
         val window = 6
-        val points = ArrayList<Vec2>(NOSE_PROFILE_SAMPLES)
+        val sections = ArrayList<List<Vec2>>(NOSE_PROFILE_SAMPLES)
         val rgb = DoubleArray(3)
         val n = side.inward
         for (k in 0 until NOSE_PROFILE_SAMPLES) {
@@ -938,19 +1051,24 @@ object RawImageTableDetector {
             bedResponses.sort()
             val noise = if (bedResponses.isEmpty()) 2.0 else bedResponses[bedResponses.size * 3 / 4]
             val threshold = max(NOSE_STEP_MIN_CONTRAST, NOSE_STEP_NOISE_FACTOR * noise)
+            val steps = ArrayList<Vec2>(NOSE_MAX_STEP_LEVELS)
             var j = jMax
-            while (j >= window) {
+            while (j >= window && steps.size < NOSE_MAX_STEP_LEVELS) {
                 if (meanDiff(j) > threshold) {
                     var best = j
                     while (best - 1 >= window && meanDiff(best - 1) >= meanDiff(best)) best--
                     val d = d0 + (best - 0.5) * step
-                    points.add(Vec2(p.x + n.x * d, p.y + n.y * d))
-                    break
+                    steps.add(Vec2(p.x + n.x * d, p.y + n.y * d))
+                    // Walk past the rest of this step before looking for the next one.
+                    j = best - 1
+                    while (j >= window && meanDiff(j) > threshold) j--
+                } else {
+                    j--
                 }
-                j--
             }
+            sections.add(steps)
         }
-        return fitLineRansac(points, side.length, 1.6 * scale)
+        return sections
     }
 
     /**
@@ -991,70 +1109,103 @@ object RawImageTableDetector {
     }
 
     /**
-     * Share of pixels in a thin band just outside [line] whose colour belongs to the cloth family:
-     * the cloth hue (or, on grey cloth, the cloth's tint) at a different brightness, as a cushion top
-     * or face is, as opposed to a rail.
+     * True when the pixel belongs to the cloth family: the cloth hue (or, on grey cloth, the cloth's
+     * tint) at a different brightness, as a cushion top or face is, as opposed to a rail.
      */
-    private fun cushionClothFractionOutside(
+    private fun isClothFamilyPixel(argb: Int, cloth: DetectedClothSurface, hsv: DoubleArray): Boolean {
+        hsvInto(argb, hsv)
+        return if (cloth.meanSaturation >= GREY_MEDIAN_SATURATION) {
+            hueDistance(hsv[0], cloth.dominantHueDegrees) <= 30.0 &&
+                hsv[1] >= 0.5 * cloth.meanSaturation &&
+                hsv[2] >= 0.25
+        } else if (hsv[1] > 0.25 || hsv[2] < 0.25) {
+            false
+        } else {
+            val clothValue = max(cloth.meanValue, 1e-6)
+            val r = ((argb ushr 16) and 0xFF) / 255.0
+            val g = ((argb ushr 8) and 0xFF) / 255.0
+            val b = (argb and 0xFF) / 255.0
+            abs((r - b) / hsv[2] - cloth.meanRedMinusBlue / clothValue) <= 0.08 &&
+                abs((r - g) / hsv[2] - cloth.meanRedMinusGreen / clothValue) <= 0.08
+        }
+    }
+
+    /**
+     * Width in metres of the cloth-family strip that lies beyond [line], that is the cushion width
+     * if [line] is the nose: the median, over 40 positions along the side, of the distance (through
+     * [outerPlane]) from the line to the first place where the cloth family ends for two probes in
+     * a row. Probing starts [MIN_CUSHION_WIDTH_METERS] beyond the line, so the shadow zone at the
+     * nose is ignored and a line at the very edge of the cloth region, with the rail right behind
+     * it, reports exactly the minimum. Probing stops after [MAX_CUSHION_WIDTH_METERS] with the
+     * width reported as infinite. Positions whose probes leave the frame are skipped; returns null
+     * when fewer than eight positions remain.
+     *
+     * The width is measured from the line to where the cloth ends rather than from the outer
+     * outline: the outline can sit well inside the cushion back where the corner pockets cut the
+     * cloth region, while this distance does not depend on it.
+     */
+    private fun cushionWidthBeyond(
         frame: ArgbImageFrame,
         cloth: DetectedClothSurface,
         side: OuterSide,
         line: ImageLine,
         outerPlane: PerspectiveHomography,
         frameOnTable: TableFrame,
-        bandMeters: Double,
-    ): Double {
+    ): Double? {
         val hsv = DoubleArray(3)
-        val chromatic = cloth.meanSaturation >= GREY_MEDIAN_SATURATION
-        val clothValue = max(cloth.meanValue, 1e-6)
-        val tintRedBlue = cloth.meanRedMinusBlue / clothValue
-        val tintRedGreen = cloth.meanRedMinusGreen / clothValue
         val outward = frameOnTable.outward[side.index]
-        var family = 0
-        var total = 0
+        val widths = ArrayList<Double>(40)
         for (k in 0 until 40) {
             val t = 0.1 + 0.8 * k / 39.0
             val p = side.pointAt(t)
             val onLine = lineIntersection(p, p + side.inward, line.point, line.second) ?: continue
             val onTable = outerPlane.imageToTableCloth(onLine)
-            for (fraction in doubleArrayOf(0.3, 0.5, 0.7)) {
-                val probe = outerPlane.tableClothToImage(onTable + outward * (fraction * bandMeters))
-                if (!probe.x.isFinite() || !probe.y.isFinite()) continue
+            var width = Double.POSITIVE_INFINITY
+            var previousWasFamily = true
+            var valid = true
+            var s = MIN_CUSHION_WIDTH_METERS
+            while (s <= MAX_CUSHION_WIDTH_METERS + 1e-9) {
+                val probe = outerPlane.tableClothToImage(onTable + outward * s)
                 val x = probe.x.roundToInt()
                 val y = probe.y.roundToInt()
-                if (x in 0 until frame.width && y in 0 until frame.height) {
-                    val argb = frame.argbPixels[y * frame.width + x]
-                    hsvInto(argb, hsv)
-                    val isFamily = if (chromatic) {
-                        hueDistance(hsv[0], cloth.dominantHueDegrees) <= 30.0 &&
-                            hsv[1] >= 0.5 * cloth.meanSaturation &&
-                            hsv[2] >= 0.25
-                    } else if (hsv[1] > 0.25 || hsv[2] < 0.25) {
-                        false
-                    } else {
-                        val r = ((argb ushr 16) and 0xFF) / 255.0
-                        val g = ((argb ushr 8) and 0xFF) / 255.0
-                        val b = (argb and 0xFF) / 255.0
-                        abs((r - b) / hsv[2] - tintRedBlue) <= 0.08 && abs((r - g) / hsv[2] - tintRedGreen) <= 0.08
-                    }
-                    if (isFamily) family++
-                    total++
+                if (!probe.x.isFinite() || !probe.y.isFinite() || x !in 0 until frame.width || y !in 0 until frame.height) {
+                    valid = false
+                    break
                 }
+                val isFamily = isClothFamilyPixel(frame.argbPixels[y * frame.width + x], cloth, hsv)
+                if (!isFamily && !previousWasFamily) {
+                    width = s - WIDTH_PROBE_STEP_METERS
+                    break
+                }
+                if (!isFamily && s <= MIN_CUSHION_WIDTH_METERS + 1e-9) {
+                    // Already off the cloth at the minimum width: nothing to measure beyond it.
+                    width = MIN_CUSHION_WIDTH_METERS
+                    break
+                }
+                previousWasFamily = isFamily
+                s += WIDTH_PROBE_STEP_METERS
             }
+            if (valid) widths.add(width)
         }
-        return if (total == 0) 0.0 else family.toDouble() / total
+        if (widths.size < 8) return null
+        widths.sort()
+        return widths[widths.size / 2]
     }
-
     /**
-     * The table rectangle in the corner order of a raw image quad, with each side's outward unit
-     * normal in table coordinates.
+     * The table rectangle in the corner order of a raw image quad (`[TL, TR, BR, BL]`), with each
+     * side's outward unit normal in table coordinates and the index of the side nearest the camera.
+     *
+     * End-on views look along the table from behind the foot rail: the top side of the image is the
+     * head rail, the bottom side the foot rail, and the foot rail is the near one. Landscape views
+     * have the long rails on top and bottom and are taken from beyond the lower one, the `y = W`
+     * rail. In both the near side is the bottom side of the image.
      */
-    private class TableFrame(val rect: List<Vec2>, val outward: List<Vec2>)
+    private class TableFrame(val rect: List<Vec2>, val outward: List<Vec2>, val nearSide: Int)
 
-    private fun tableFrameFor(outer: List<Vec2>, table: TableSpec): TableFrame {
+    private fun tableFrameFor(endOn: Boolean, table: TableSpec): TableFrame {
         val l = table.lengthMeters
         val w = table.widthMeters
-        val rect = if (isEndOnPerspectiveQuad(outer)) {
+        val rect = if (endOn) {
             listOf(Vec2(0.0, 0.0), Vec2(0.0, w), Vec2(l, w), Vec2(l, 0.0))
         } else {
             listOf(Vec2(0.0, 0.0), Vec2(l, 0.0), Vec2(l, w), Vec2(0.0, w))
@@ -1064,68 +1215,73 @@ object RawImageTableDetector {
             val mid = (rect[i] + rect[(i + 1) % 4]) * 0.5 - centre
             if (abs(mid.x) > abs(mid.y)) Vec2(sign(mid.x), 0.0) else Vec2(0.0, sign(mid.y))
         }
-        return TableFrame(rect, outward)
+        val nearOutward = if (endOn) Vec2(1.0, 0.0) else Vec2(0.0, 1.0)
+        val nearSide = outward.indexOfFirst { it.dot(nearOutward) > 0.5 }
+        return TableFrame(rect, outward, nearSide)
     }
 
     /** Cushion band seen beyond the nose: the top only on the side nearest the camera. */
     private fun cushionBandMeters(side: Int, nearSide: Int): Double =
         if (side == nearSide) CUSHION_TOP_WIDTH_METERS else CUSHION_VISIBLE_BAND_METERS
 
+    /** The table rectangle of [frame] pushed out on each side by `bands[side]` metres. */
+    private fun expandedRect(frame: TableFrame, bands: DoubleArray): List<Vec2> = (0 until 4).map { i ->
+        val prev = (i + 3) % 4
+        frame.rect[i] + frame.outward[prev] * bands[prev] + frame.outward[i] * bands[i]
+    }
+
     private fun refineToCushionNoses(
         frame: ArgbImageFrame,
         cloth: DetectedClothSurface,
         outer: List<Vec2>,
         table: TableSpec,
+        endOn: Boolean,
     ): TableQuadDetection {
         // Edge blur grows with resolution only on large captures; screenshots up to ~1000 px keep
         // one-pixel edges, so the profile step and window only widen above that.
         val scale = max(1.0, min(frame.width, frame.height) / 1000.0)
         val centroid = Vec2(outer.sumOf { it.x } / 4.0, outer.sumOf { it.y } / 4.0)
         val sides = (0 until 4).map { OuterSide(outer, it, centroid) }
-        val scans = sides.map { scanSideForNoseLine(frame, it, scale) }
-        val nearSide = (0 until 4).maxByOrNull { sides[it].length } ?: 2
-        val frameOnTable = tableFrameFor(outer, table)
-        // Approximate plane of the outer quad: only used to step a cushion width beyond a line.
+        val frameOnTable = tableFrameFor(endOn, table)
+        val nearSide = frameOnTable.nearSide
+        val nominalBands = DoubleArray(4) { cushionBandMeters(it, nearSide) }
         val outerPlane = try {
-            PerspectiveHomography.fromPointCorrespondences(outer, frameOnTable.rect)
+            PerspectiveHomography.fromPointCorrespondences(outer, expandedRect(frameOnTable, nominalBands))
         } catch (e: IllegalArgumentException) {
             null
         }
-        val accepted = BooleanArray(4) { i ->
+        val scans = ArrayList<SideScan>(4)
+        val accepted = BooleanArray(4)
+        for (i in 0 until 4) {
             val side = sides[i]
-            val scan = scans[i]
-            val line = scan.line
-            val across = side.acrossFrom(side.pointAt(0.5))
-            if (line == null || across == null || outerPlane == null || scan.confidence < NOSE_MIN_CONFIDENCE) {
-                false
-            } else {
-                val insetStart = side.insetTo(line, 0.1)
-                val insetEnd = side.insetTo(line, 0.9)
-                val band = -0.03 * across..0.18 * across
-                when {
-                    insetStart == null || insetEnd == null -> false
-                    insetStart !in band || insetEnd !in band -> false
-                    // Half a cushion width beyond a nose there is cushion-coloured cloth. A rail there
-                    // means the line is the edge of the cloth region and the cushion is hidden in it.
-                    else -> cushionClothFractionOutside(
-                        frame,
-                        cloth,
-                        side,
-                        line,
-                        outerPlane,
-                        frameOnTable,
-                        cushionBandMeters(i, nearSide),
-                    ) >= 0.5
+            val steps = if (outerPlane == null) emptyList() else scanSideForNoseSteps(frame, side, scale)
+            // The innermost step is normally the nose. When its line is not a cushion edge (a
+            // shadow or lit strip in front of it, or the edge of the cloth region), try the next
+            // step: the line that is followed by a plausible cushion width is the nose.
+            var chosen = SideScan(null, 0.0)
+            for (level in 0 until NOSE_MAX_STEP_LEVELS) {
+                val points = steps.mapNotNull { it.getOrNull(level) }
+                val scan = fitLineRansac(points, side.length, 1.6 * scale)
+                if (level == 0) chosen = scan
+                val line = scan.line
+                if (line == null || outerPlane == null || scan.confidence < NOSE_MIN_CONFIDENCE) continue
+                val width = cushionWidthBeyond(frame, cloth, side, line, outerPlane, frameOnTable)
+                if (width != null && width > MIN_CUSHION_WIDTH_METERS && width <= MAX_CUSHION_WIDTH_METERS) {
+                    chosen = scan
+                    accepted[i] = true
+                    break
                 }
             }
+            scans.add(chosen)
         }
-        val nose = composeNoseQuad(sides, scans, accepted, nearSide, frameOnTable)
-            ?: composeNoseQuad(sides, scans, BooleanArray(4), nearSide, frameOnTable)
+        val nose = composeNoseQuad(sides, scans, accepted, frameOnTable, nominalBands, outer, outerPlane)
+            ?: composeNoseQuad(sides, scans, BooleanArray(4), frameOnTable, nominalBands, outer, outerPlane)
         if (nose == null) {
             return TableQuadDetection(
                 noseQuadCornersPx = outer,
                 outerQuadCornersPx = outer,
                 edges = List(4) { TableQuadEdgeFit(FALLBACK_EDGE_CONFIDENCE, usedFallback = true, insetFromOuterPx = 0.0) },
+                endOnView = endOn,
             )
         }
         val usedAll = nose.second
@@ -1139,25 +1295,40 @@ object RawImageTableDetector {
                 TableQuadEdgeFit(FALLBACK_EDGE_CONFIDENCE, usedFallback = true, insetFromOuterPx = inset)
             }
         }
-        return TableQuadDetection(noseQuadCornersPx = nose.first, outerQuadCornersPx = outer, edges = edges)
+        return TableQuadDetection(
+            noseQuadCornersPx = nose.first,
+            outerQuadCornersPx = outer,
+            edges = edges,
+            endOnView = endOn,
+        )
     }
 
     /**
      * Intersects the accepted nose lines with the outer edges of the remaining sides, then maps the
-     * remaining sides inwards by the cushion band width through the homography of that mixed quad.
-     * Returns the nose corners and which sides kept their measured line, or null if the geometry
-     * is degenerate.
+     * remaining sides inwards by their nominal cushion band ([nominalBands], metres) through the
+     * homography of that mixed quad. Returns the nose corners and which sides kept their measured
+     * line, or null when the result cannot be trusted: a corner formed by two sides whose
+     * directions are nearly parallel ([MIN_CORNER_SIN]), a non-convex or non-finite quad, or a
+     * corner that moved more than [MAX_CORNER_SHIFT_METERS] along a table axis from its outer
+     * corner (checked through [outerPlane] when there is one).
      */
     private fun composeNoseQuad(
         sides: List<OuterSide>,
         scans: List<SideScan>,
         accepted: BooleanArray,
-        nearSide: Int,
         frameOnTable: TableFrame,
+        nominalBands: DoubleArray,
+        outer: List<Vec2>,
+        outerPlane: PerspectiveHomography?,
     ): Pair<List<Vec2>, BooleanArray>? {
         val lines = (0 until 4).map { i ->
             val line = scans[i].line
             if (accepted[i] && line != null) line else ImageLine.through(sides[i].a, sides[i].b)
+        }
+        for (i in 0 until 4) {
+            val prev = lines[(i + 3) % 4].direction
+            val cur = lines[i].direction
+            if (!isCornerWellConditioned(prev, cur)) return null
         }
         val mixed = (0 until 4).map { i ->
             val prev = lines[(i + 3) % 4]
@@ -1165,24 +1336,40 @@ object RawImageTableDetector {
             lineIntersection(prev.point, prev.second, cur.point, cur.second) ?: return null
         }
         if (!isConvexQuad(mixed)) return null
-        if (accepted.all { it }) return mixed to accepted.copyOf()
-
-        val rect = frameOnTable.rect
-        val outward = frameOnTable.outward
-        val band = (0 until 4).map { i -> if (accepted[i]) 0.0 else cushionBandMeters(i, nearSide) }
-        val expanded = (0 until 4).map { i ->
-            val prev = (i + 3) % 4
-            rect[i] + outward[prev] * band[prev] + outward[i] * band[i]
+        val nose = if (accepted.all { it }) {
+            mixed
+        } else {
+            val bands = DoubleArray(4) { if (accepted[it]) 0.0 else nominalBands[it] }
+            val homography = try {
+                PerspectiveHomography.fromPointCorrespondences(mixed, expandedRect(frameOnTable, bands))
+            } catch (e: IllegalArgumentException) {
+                return null
+            }
+            frameOnTable.rect.map { homography.tableClothToImage(it) }
         }
-        val homography = try {
-            PerspectiveHomography.fromPointCorrespondences(mixed, expanded)
-        } catch (e: IllegalArgumentException) {
-            return null
-        }
-        val nose = rect.map { homography.tableClothToImage(it) }
         if (nose.any { !it.x.isFinite() || !it.y.isFinite() } || !isConvexQuad(nose)) return null
+        if (outerPlane != null) {
+            for (i in 0 until 4) {
+                val shift = outerPlane.imageToTableCloth(nose[i]) -
+                    outerPlane.imageToTableCloth(outer[i])
+                if (!isCornerShiftPlausible(shift)) return null
+            }
+        }
         return nose to accepted.copyOf()
     }
+
+    /**
+     * True when two adjacent sides with directions [a] and [b] meet at a corner that can be
+     * located: the sine of the angle between them is at least [MIN_CORNER_SIN].
+     */
+    internal fun isCornerWellConditioned(a: Vec2, b: Vec2): Boolean {
+        val scale = a.length() * b.length()
+        return scale > 1e-12 && abs(a.cross(b)) / scale >= MIN_CORNER_SIN
+    }
+
+    /** True when a nose corner moved by [shift] metres from its outer corner is plausible. */
+    internal fun isCornerShiftPlausible(shift: Vec2): Boolean =
+        abs(shift.x) <= MAX_CORNER_SHIFT_METERS && abs(shift.y) <= MAX_CORNER_SHIFT_METERS
 
     private fun isConvexQuad(quad: List<Vec2>): Boolean {
         if (quad.size != 4) return false
@@ -1226,12 +1413,18 @@ object RawImageTableDetector {
      * `[headLeftPx, footLeftPx, footRightPx, headRightPx]`. For end-on broadcast views (far short
      * head rail at top `TL..TR`, near short foot rail at bottom `BL..BR`), reorders the corners to
      * `[TL, BL, BR, TR]` and places the camera pose behind the foot end.
+     *
+     * Pass [TableQuadDetection.endOnView] (or [RawFrameDetectionSummary.endOnView]) as [endOnView]
+     * for a quad that came from the detector, so the orientation is the one already decided on the
+     * outer outline; the default decides from [quadCornersPx] itself, which can differ for a
+     * borderline trapezoid because the nose quad is narrower than the outline.
      */
     fun orientQuadForHomography(
         quadCornersPx: List<Vec2>,
         table: TableSpec = TableSpec.nineFootPool(),
+        endOnView: Boolean = isEndOnPerspectiveQuad(quadCornersPx),
     ): Pair<List<Vec2>, Vec3> {
-        if (!isEndOnPerspectiveQuad(quadCornersPx)) {
+        if (!endOnView) {
             return quadCornersPx to Vec3(-0.55, table.widthMeters * 0.5, 1.55)
         }
         val tl = quadCornersPx[0]
@@ -1274,16 +1467,39 @@ object RawImageTableDetector {
     /**
      * Full analysis of one frame: quality metrics, cloth, table quad and ball candidates.
      *
-     * The table quad is the cushion-nose quad of [detectTableQuads]. Balls are the connected
-     * non-cloth blobs inside the outer cloth outline (inset by [quadInsetPx] so rails and pockets
-     * are excluded) whose equivalent radius lies in [expectedBallRadiusPxRange]. When
-     * [quadOverridePx] is given it is used instead of both detected quads.
+     * The table quad is the cushion-nose quad of [detectTableQuads] for [table]. Balls are the
+     * connected non-cloth blobs inside the ball mask whose equivalent radius lies in
+     * [expectedBallRadiusPxRange]; the mask is inset by [quadInsetPx] (landscape views) so rails and
+     * pockets are excluded.
+     *
+     * The ball mask is the region where a ball can be seen: the nose quad pushed out on each side
+     * over the cushion band. A ball frozen to a cushion has its edge on the nose line, but in
+     * perspective its image overlaps the cushion, so a mask that stopped at the nose would cut it.
+     * The same rule applies on a first analysis and on a re-analysis after the player moved a
+     * corner. Each side is pushed out
+     * - to the cushion back, as far as the outer cloth outline of the first analysis reaches
+     *   beyond that side (from [detectTableQuads], or [previousQuads] on a re-analysis, measured
+     *   on the table plane of the nose quad in use), and
+     * - by at least a ball diameter and the nominal cushion band ([CUSHION_VISIBLE_BAND_METERS]),
+     *   so that where the outline lies inside the nose (a corner pocket can pull a side of the
+     *   outline in) or nothing is known about the outline, the whole ball is still inside.
+     * Rail and pocket artefacts that the mask lets through are rejected by the blob checks, and a
+     * blob whose table position is more than a ball radius outside the playing surface by
+     * [BallIdentificationAndAssignment.rectifyAndIdentifyBalls] (it is not a ball on the table).
+     *
+     * [quadOverridePx] is a nose quad in image order `[TL, TR, BR, BL]`; with it the table quads are
+     * not detected again. [previousQuads] are the quads of an earlier analysis of the same frame
+     * ([RawFrameDetectionSummary.toQuadDetection]). [endOnView] fixes the orientation; when null it
+     * is taken from [previousQuads], or decided on the override.
      */
     fun analyzeArgbFrame(
         frame: ArgbImageFrame,
         expectedBallRadiusPxRange: ClosedFloatingPointRange<Double> = 3.8..45.0,
         quadOverridePx: List<Vec2>? = null,
         quadInsetPx: Double = BLOB_INSET_PX,
+        table: TableSpec = TableSpec.nineFootPool(),
+        previousQuads: TableQuadDetection? = null,
+        endOnView: Boolean? = null,
     ): RawFrameDetectionSummary {
         val w = frame.width
         val h = frame.height
@@ -1328,11 +1544,15 @@ object RawImageTableDetector {
         val glareFraction = if (central > 0) glare.toDouble() / central else 0.0
 
         val cloth = detectClothSurface(frame)
-        val quads = if (quadOverridePx == null) detectTableQuads(frame, cloth) else null
+        val quads = if (quadOverridePx == null) detectTableQuads(frame, cloth, table) else null
         val noseQuad = quadOverridePx ?: quads?.noseQuadCornersPx.orEmpty()
-        val maskQuad = quadOverridePx ?: quads?.outerQuadCornersPx.orEmpty()
+        val endOn = when {
+            quads != null -> quads.endOnView
+            else -> endOnView ?: previousQuads?.endOnView ?: isEndOnPerspectiveQuad(noseQuad)
+        }
+        val maskQuad = ballMaskQuad(noseQuad, endOn, table, quads ?: previousQuads)
 
-        val candidates = findBallCandidates(frame, cloth, maskQuad, expectedBallRadiusPxRange, quadInsetPx)
+        val candidates = findBallCandidates(frame, cloth, maskQuad, noseQuad, endOn, expectedBallRadiusPxRange, quadInsetPx)
         return RawFrameDetectionSummary(
             width = w,
             height = h,
@@ -1342,10 +1562,67 @@ object RawImageTableDetector {
             sharpnessScore = sharpness,
             glareFraction = glareFraction,
             meanLuma = meanLuma,
-            outerQuadCornersPx = maskQuad,
+            outerQuadCornersPx = quads?.outerQuadCornersPx ?: previousQuads?.outerQuadCornersPx ?: maskQuad,
             quadEdges = quads?.edges.orEmpty(),
+            endOnView = endOn,
+            ballMaskCornersPx = maskQuad,
         )
     }
+
+    /**
+     * The region in which ball blobs are looked for: the nose quad pushed out on each side over the
+     * cushion band (see [analyzeArgbFrame] for the rule), as a quad in the same corner order.
+     *
+     * Each side is pushed out to the cushion back where [known] gives it (the reach of the outer
+     * outline beyond the nose, measured on the table plane of the nose quad), and by at least
+     * [ballMaskMinBandMeters] so a ball frozen to a cushion is whole inside the mask even where the
+     * outline lies inside the nose. Returns the nose quad itself when the table plane cannot be
+     * built from it.
+     */
+    private fun ballMaskQuad(
+        nose: List<Vec2>,
+        endOn: Boolean,
+        table: TableSpec,
+        known: TableQuadDetection?,
+    ): List<Vec2> {
+        if (nose.size != 4) return nose
+        val frame = tableFrameFor(endOn, table)
+        val homography = try {
+            PerspectiveHomography.fromPointCorrespondences(nose, frame.rect)
+        } catch (e: IllegalArgumentException) {
+            return nose
+        }
+        val minBand = ballMaskMinBandMeters(table)
+        val bands = DoubleArray(4) { minBand }
+        val outline = known?.outerQuadCornersPx?.takeIf { it.size == 4 && known.noseQuadCornersPx.size == 4 }
+        if (outline != null) {
+            val knownPlane = try {
+                PerspectiveHomography.fromPointCorrespondences(known.noseQuadCornersPx, frame.rect)
+            } catch (e: IllegalArgumentException) {
+                null
+            }
+            if (knownPlane != null) {
+                for (i in 0 until 4) {
+                    val outward = frame.outward[i]
+                    val noseEdge = outward.dot(frame.rect[i])
+                    val reach = listOf(i, (i + 1) % 4).maxOf { corner ->
+                        outward.dot(knownPlane.imageToTableCloth(outline[corner])) - noseEdge
+                    }
+                    if (reach.isFinite()) bands[i] = reach.coerceIn(minBand, MAX_MASK_BAND_METERS)
+                }
+            }
+        }
+        val mask = expandedRect(frame, bands).map { homography.tableClothToImage(it) }
+        return if (mask.all { it.x.isFinite() && it.y.isFinite() } && isConvexQuad(mask)) mask else nose
+    }
+
+    /**
+     * Least distance the ball mask reaches beyond a nose side, in metres: a ball diameter, and not
+     * less than the visible cushion band. A ball frozen to a cushion has its edge on the nose line,
+     * but in perspective its image reaches over the cushion by up to about that much.
+     */
+    private fun ballMaskMinBandMeters(table: TableSpec): Double =
+        max(2.0 * table.ballRadiusMeters, CUSHION_VISIBLE_BAND_METERS)
 
     private fun canConnectForeground(typeA: Byte, typeB: Byte): Boolean {
         if (typeA == typeB) return true
@@ -1396,6 +1673,8 @@ object RawImageTableDetector {
         frame: ArgbImageFrame,
         cloth: DetectedClothSurface,
         quad: List<Vec2>,
+        noseQuad: List<Vec2>,
+        isEndOn: Boolean,
         radiusRange: ClosedFloatingPointRange<Double>,
         insetPx: Double,
     ): List<DetectedBallCandidate> {
@@ -1403,7 +1682,6 @@ object RawImageTableDetector {
         val h = frame.height
         val total = w * h
         val hsv = DoubleArray(3)
-        val isEndOn = isEndOnPerspectiveQuad(quad)
         val effectiveInsetPx = if (isEndOn) END_ON_BLOB_INSET_PX else insetPx
 
         val bx0 = floor(quad.minOf { it.x }).toInt().coerceIn(0, w - 1)
@@ -1564,7 +1842,7 @@ object RawImageTableDetector {
             val nearPocket = isNearPocketMouth(center, quad, isEndOn, localR)
             val nearCornerHole = quad.any { center.distanceTo(it) <= max(20.0, 2.2 * localR) }
             val nearEdge = isEndOn && !pointInQuad(center.x, center.y, quad, 0.90 * localR)
-            val isClothColoredShadow = cloth.category == ClothHueCategory.TOURNAMENT_BLUE &&
+            val isClothColoredShadow = cloth.category == ClothHueCategory.BLUE &&
                 estimate.dominant == BallPaletteColor.BLUE &&
                 estimate.meanValue < 0.68
             if (nearCornerHole && (estimate.darkFraction >= 0.08 || estimate.meanValue < 0.65)) {
@@ -1611,6 +1889,10 @@ object RawImageTableDetector {
                     expectedRadiusPx = localExpectedR,
                 )
                 if (splitCenters.size >= 2) {
+                    // Touching discs fill about one disc each, so a cluster on the cushion band has
+                    // little more area than its peaks; a hand or cue split into peaks has far more.
+                    val inBand = !pointInQuad(comp.sumX / area, comp.sumY / area, noseQuad, 0.0)
+                    if (inBand && area > BAND_MAX_AREA_PER_PEAK * splitCenters.size * localExpectedArea) continue
                     for ((center, estR) in splitCenters) {
                         val estimate = estimateBallColors(frame, center.x, center.y, estR) ?: continue
                         if (isRailOrPocketArtifact(center, estimate)) continue
@@ -1629,6 +1911,18 @@ object RawImageTableDetector {
             val centerX = comp.sumX / area
             val centerY = comp.sumY / area
             val center = Vec2(centerX, centerY)
+            // On the cushion band, outside the nose quad, hands, cues and cushion shadows are far
+            // more likely than on the bed, so a blob there must look like a ball: a disc of about
+            // the expected radius at that image position.
+            if (!pointInQuad(centerX, centerY, noseQuad, 0.0) &&
+                (
+                    radiusPx !in BAND_MIN_RADIUS_RATIO * localExpectedR..BAND_MAX_RADIUS_RATIO * localExpectedR ||
+                        aspect !in BAND_MIN_ASPECT..BAND_MAX_ASPECT ||
+                        fill < BAND_MIN_FILL
+                    )
+            ) {
+                continue
+            }
             if (radiusPx < radiusRange.start &&
                 (cloth.meanSaturation >= 0.45 || !pointInQuad(centerX, centerY, quad, 5.0) || centerY > 0.50 * h)
             ) {
@@ -1704,6 +1998,9 @@ object RawImageTableDetector {
      * Re-scans a circular region around [tapCenterPx] for missed or merged balls without pocket or
      * edge suppression. If no distinct foreground ball blob is found, falls back to sampling the
      * tapped region's dominant non-cloth colour so the caller can preselect a matching ball number.
+     *
+     * [endOnView] is the orientation already decided for this frame (see
+     * [TableQuadDetection.endOnView]); when null it is decided on [quadCornersPx].
      */
     fun rescanLocalRegion(
         frame: ArgbImageFrame,
@@ -1712,12 +2009,13 @@ object RawImageTableDetector {
         existingCandidates: List<DetectedBallCandidate>,
         clothOverride: DetectedClothSurface? = null,
         searchRadiusPx: Double? = null,
+        endOnView: Boolean? = null,
     ): LocalTapRescanResult {
         val w = frame.width
         val h = frame.height
         val cloth = clothOverride ?: detectClothSurface(frame)
         val localR = if (quadCornersPx.size == 4) {
-            val isEndOn = isEndOnPerspectiveQuad(quadCornersPx)
+            val isEndOn = endOnView ?: isEndOnPerspectiveQuad(quadCornersPx)
             val topWidth = quadCornersPx[0].distanceTo(quadCornersPx[1])
             val botWidth = quadCornersPx[3].distanceTo(quadCornersPx[2])
             val avgWidth = 0.5 * (topWidth + botWidth)
@@ -2180,7 +2478,7 @@ object RawImageTableDetector {
         val chromaticRatio = chromaticTotal.toDouble() / totalPixels
 
         val yellowVotes = votes[BallPaletteColor.YELLOW.ordinal]
-        val isWntNineBallStripe = yellowVotes >= 3 && blackRatio >= 0.08 && combinedWhiteRatio < 0.65
+        val isBroadcastNineBallStripe = yellowVotes >= 3 && blackRatio >= 0.08 && combinedWhiteRatio < 0.65
         val isStripedWithChromatic = excludeCloth != null && chromaticRatio >= 0.18 && whiteRatio in 0.18..0.84
 
         return when {
@@ -2192,7 +2490,7 @@ object RawImageTableDetector {
                 darkFraction = blackRatio,
                 meanValue = meanVal,
             )
-            isWntNineBallStripe -> BallColorEstimate(
+            isBroadcastNineBallStripe -> BallColorEstimate(
                 dominant = BallPaletteColor.YELLOW,
                 secondary = BallPaletteColor.BLACK,
                 whiteFraction = max(combinedWhiteRatio, 0.56),
@@ -2243,10 +2541,10 @@ object RawImageTableDetector {
     // ---------------------------------------------------------------------------------------
 
     private fun clothBaseArgb(category: ClothHueCategory): Int = when (category) {
-        ClothHueCategory.TOURNAMENT_BLUE -> 0xFF1E78B4L.toInt()
-        ClothHueCategory.CLASSIC_GREEN -> 0xFF1E824CL.toInt()
-        ClothHueCategory.CHAMPIONSHIP_RED -> 0xFFA82828L.toInt()
-        ClothHueCategory.SLATE_GREY -> 0xFF5A626AL.toInt()
+        ClothHueCategory.BLUE -> 0xFF1E78B4L.toInt()
+        ClothHueCategory.GREEN -> 0xFF1E824CL.toInt()
+        ClothHueCategory.RED -> 0xFFA82828L.toInt()
+        ClothHueCategory.GREY -> 0xFF5A626AL.toInt()
     }
 
     /** Flat ball body colour for each palette entry, chosen to be separable from all cloth hues. */
@@ -2279,6 +2577,41 @@ object RawImageTableDetector {
         return ((hash and 0x7FFFFFFF) % (2 * amp + 1)) - amp
     }
 
+    /**
+     * A flat object lying on the table plane in a synthetic render: a rectangle of
+     * [lengthMeters] x [widthMeters] centred at [centerMeters] with its long axis at [angleRad] to
+     * the table's `x` axis, filled with [argb]. Table-plane coordinates may lie beyond the nose, so
+     * it can lie across a cushion like a hand or a cue.
+     */
+    class SyntheticTableObject(
+        val centerMeters: Vec2,
+        val lengthMeters: Double,
+        val widthMeters: Double,
+        val angleRad: Double,
+        val argb: Int,
+    )
+
+    private fun drawTableObject(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        homography: PerspectiveHomography,
+        item: SyntheticTableObject,
+    ) {
+        val along = Vec2(cos(item.angleRad), sin(item.angleRad))
+        val across = Vec2(-along.y, along.x)
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val p = homography.imageToTableCloth(Vec2(x.toDouble(), y.toDouble()))
+                if (!p.x.isFinite() || !p.y.isFinite()) continue
+                val d = p - item.centerMeters
+                if (abs(d.dot(along)) <= 0.5 * item.lengthMeters && abs(d.dot(across)) <= 0.5 * item.widthMeters) {
+                    pixels[y * width + x] = item.argb
+                }
+            }
+        }
+    }
+
     /** How [renderSyntheticTablePhotoArgb] draws the cushions. */
     enum class SyntheticCushionStyle {
         /** No cushions: the cloth meets the rail at the playing-surface edge. */
@@ -2302,9 +2635,11 @@ object RawImageTableDetector {
      * full colour disk with a small white dot, stripes white caps around a coloured band.
      *
      * [quadCornersPx] is always the playing surface at the cushion noses. With [cushions] other
-     * than [SyntheticCushionStyle.NONE], cloth-covered cushions [CUSHION_VISIBLE_BAND_METERS] wide
-     * are drawn around it on the table plane and six pocket holes cut them, so the cloth region
-     * reaches the cushion backs as it does in photos.
+     * than [SyntheticCushionStyle.NONE], cloth-covered cushions [cushionWidthMeters] wide on the
+     * sides facing the camera (a face strip narrower on the side the camera stands behind) are drawn
+     * around it on the table plane and six pocket holes cut them, so the cloth region reaches the
+     * cushion backs as it does in photos. [cushionContrast] scales how far the cushion top and face
+     * differ from the bed (`1` is the default look, smaller is flatter).
      */
     fun renderSyntheticTablePhotoArgb(
         layout: TableLayout,
@@ -2312,10 +2647,13 @@ object RawImageTableDetector {
         cameraPoseMeters: Vec3,
         width: Int = 640,
         height: Int = 360,
-        clothCategory: ClothHueCategory = ClothHueCategory.TOURNAMENT_BLUE,
+        clothCategory: ClothHueCategory = ClothHueCategory.BLUE,
         ballSet: BallSetProfile = BallSetProfile.standardPool(),
         ballRadiusPx: Int = 11,
         cushions: SyntheticCushionStyle = SyntheticCushionStyle.NONE,
+        cushionWidthMeters: Double = CUSHION_VISIBLE_BAND_METERS,
+        cushionContrast: Double = 1.0,
+        objects: List<SyntheticTableObject> = emptyList(),
     ): ArgbImageFrame {
         require(quadCornersPx.size == 4) { "Exactly four table corners are required." }
         val pixels = IntArray(width * height)
@@ -2341,8 +2679,13 @@ object RawImageTableDetector {
                 }
             }
         } else {
-            drawCushionedTable(pixels, width, height, layout.table, homography, cameraPoseMeters, clothBase, railBase, cushions)
+            drawCushionedTable(
+                pixels, width, height, layout.table, homography, cameraPoseMeters, clothBase, railBase,
+                cushions, cushionWidthMeters, cushionContrast,
+            )
         }
+
+        for (item in objects) drawTableObject(pixels, width, height, homography, item)
 
         for (ball in layout.balls) {
             val center = homography.ballCenterMetersToImage(ball.position, ball.radiusMeters, cameraPoseMeters)
@@ -2354,9 +2697,10 @@ object RawImageTableDetector {
     /**
      * Draws the bed, cloth-covered cushions, rail and pocket holes on the table plane.
      *
-     * A cushion facing the camera shows its sloping nose face (a darker strip next to the bed) in
-     * front of its top, [CUSHION_VISIBLE_BAND_METERS] in all; the cushion the camera stands behind
-     * shows only its top, [CUSHION_TOP_WIDTH_METERS] wide.
+     * A cushion facing the camera shows its sloping nose face (a darker strip, [CUSHION_FACE_STRIP_METERS]
+     * wide, next to the bed) in front of its top, [cushionWidthMeters] in all; the cushion the camera
+     * stands behind shows only its top, the face strip narrower. [contrast] scales how far the
+     * top and the face differ from the bed.
      */
     private fun drawCushionedTable(
         pixels: IntArray,
@@ -2368,24 +2712,32 @@ object RawImageTableDetector {
         clothBase: Int,
         railBase: Int,
         style: SyntheticCushionStyle,
+        cushionWidthMeters: Double,
+        contrast: Double,
     ) {
         val l = table.lengthMeters
         val w = table.widthMeters
-        val faceStrip = CUSHION_VISIBLE_BAND_METERS - CUSHION_TOP_WIDTH_METERS
+        val faceStrip = CUSHION_FACE_STRIP_METERS
+        val topShade = (24.0 * contrast).roundToInt()
+        val faceShade = (-18.0 * contrast).roundToInt()
         // Band width per rail, from what the camera can see of it: head, foot, left, right.
-        fun band(cameraBeyondRail: Boolean) = if (cameraBeyondRail) CUSHION_TOP_WIDTH_METERS else CUSHION_VISIBLE_BAND_METERS
-        val headBand = band(cameraPoseMeters.x < 0.0)
-        val footBand = band(cameraPoseMeters.x > l)
-        val leftBand = band(cameraPoseMeters.y < 0.0)
-        val rightBand = band(cameraPoseMeters.y > w)
-        val corner = 0.45 * CUSHION_VISIBLE_BAND_METERS
+        fun band(cameraBeyondRail: Boolean) = if (cameraBeyondRail) cushionWidthMeters - faceStrip else cushionWidthMeters
+        val headFace = cameraPoseMeters.x >= 0.0
+        val footFace = cameraPoseMeters.x <= l
+        val leftFace = cameraPoseMeters.y >= 0.0
+        val rightFace = cameraPoseMeters.y <= w
+        val headBand = band(!headFace)
+        val footBand = band(!footFace)
+        val leftBand = band(!leftFace)
+        val rightBand = band(!rightFace)
+        val corner = 0.45 * cushionWidthMeters
         val pockets = listOf(
             Vec2(-corner, -corner) to 0.062,
             Vec2(l + corner, -corner) to 0.062,
             Vec2(l + corner, w + corner) to 0.062,
             Vec2(-corner, w + corner) to 0.062,
-            Vec2(0.5 * l, -0.6 * CUSHION_VISIBLE_BAND_METERS) to 0.056,
-            Vec2(0.5 * l, w + 0.6 * CUSHION_VISIBLE_BAND_METERS) to 0.056,
+            Vec2(0.5 * l, -0.6 * cushionWidthMeters) to 0.056,
+            Vec2(0.5 * l, w + 0.6 * cushionWidthMeters) to 0.056,
         )
         val pocketArgb = POCKET_ARGB.toInt()
         for (y in 0 until height) {
@@ -2406,16 +2758,16 @@ object RawImageTableDetector {
                 val beyondLeft = -p.y / leftBand
                 val beyondRight = (p.y - w) / rightBand
                 val reach = max(max(beyondHead, beyondFoot), max(beyondLeft, beyondRight))
-                val inFace = (beyondHead > 0.0 && -p.x <= faceStrip && headBand > CUSHION_TOP_WIDTH_METERS) ||
-                    (beyondFoot > 0.0 && p.x - l <= faceStrip && footBand > CUSHION_TOP_WIDTH_METERS) ||
-                    (beyondLeft > 0.0 && -p.y <= faceStrip && leftBand > CUSHION_TOP_WIDTH_METERS) ||
-                    (beyondRight > 0.0 && p.y - w <= faceStrip && rightBand > CUSHION_TOP_WIDTH_METERS)
+                val inFace = (beyondHead > 0.0 && -p.x <= faceStrip && headFace) ||
+                    (beyondFoot > 0.0 && p.x - l <= faceStrip && footFace) ||
+                    (beyondLeft > 0.0 && -p.y <= faceStrip && leftFace) ||
+                    (beyondRight > 0.0 && p.y - w <= faceStrip && rightFace)
                 pixels[y * width + x] = when {
                     reach > 1.0 -> shade(railBase, textureNoise(x, y, 2))
                     pockets.any { (c, r) -> p.distanceTo(c) <= r } -> shade(pocketArgb, textureNoise(x, y, 2))
                     style == SyntheticCushionStyle.CLOTH_MATCHED -> shade(clothBase, textureNoise(x, y, 4) + gradient)
-                    inFace -> shade(clothBase, textureNoise(x, y, 3) + gradient - 18)
-                    else -> shade(clothBase, textureNoise(x, y, 3) + gradient + 24)
+                    inFace -> shade(clothBase, textureNoise(x, y, 3) + gradient + faceShade)
+                    else -> shade(clothBase, textureNoise(x, y, 3) + gradient + topShade)
                 }
             }
         }
@@ -2483,6 +2835,7 @@ object RawImageTableDetector {
                 frame = entry.second,
                 quadOverridePx = quadCornersPx,
                 quadInsetPx = 0.0,
+                table = table,
             )
             val candidates = summary.detectedCandidates
             if (candidates.isEmpty()) continue

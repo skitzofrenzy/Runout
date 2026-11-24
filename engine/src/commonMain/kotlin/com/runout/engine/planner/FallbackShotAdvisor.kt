@@ -89,25 +89,33 @@ data class FallbackAdvice(
  * kick to make a legal hit, or a basic safety. It is a first step: one recommendation, chosen by a fixed rule, with no
  * model of the opponent beyond "has a direct pot or not" and no search over several shots.
  *
- * **Selection.** When the run-out planner has a direct pot ([MultiShotPlanner.planRunout] returns a plan), there is no
- * advice. Otherwise a combination whose make probability is at least [COMBINATION_MAKE_THRESHOLD] is played; else, if
- * the cue ball can hit the legal ball directly, the best safety; else the best kick. A weaker combination is offered
- * only when neither a safety nor a kick is found.
+ * **Selection.** When the run-out planner has a direct pot whose make probability is at least [DIRECT_POT_FLOOR]
+ * ([MultiShotPlanner.planRunout] returns a plan), there is no advice. Otherwise a combination whose make probability is
+ * at least [COMBINATION_MAKE_THRESHOLD] is played; else, if the cue ball can hit the legal ball directly, the best
+ * safety, or, when no safety is found, the best kick; else the best kick. A weaker combination is offered only when
+ * neither a safety nor a kick is found. When a direct pot exists but is below the floor, the advice says so in its
+ * reason.
  *
  * **Combination.** The legal ball `A` is sent at the ghost position of ball `B` for the pocket ([PocketGeometry.aimPoint]);
  * all three legs must be clear. Throw at both contacts is allowed for in the aim with
  * [BallBallContact.lineOfCentresForThrownDirection], the ball speeds come from [BallBallContact.resolve] and the cloth
- * ([BallMotion]). The cue-line error is propagated exactly through both contacts (to first order the second ball's
- * direction turns by the cue-line error times `d1 / (2R cos(cut1))` times `d2 / (2R cos(cut2))`, `d1` cue ball to the
- * first contact and `d2` the first ball's travel to the second); the change of throw with the error is neglected. The
- * probability is the normal mass of cue-line angles whose second ball lies inside the pocket's entry window at its
+ * ([BallMotion]). The cue-line error is propagated through both contacts with the geometric ghost-ball mapping (to
+ * first order the second ball's direction turns by the cue-line error times `d1 / (2R cos(cut1))` times
+ * `d2 / (2R cos(cut2))`, `d1` cue ball to the first contact and `d2` the first ball's travel to the second). The
+ * throw-compensated cue line the player is told to aim is, by construction, the one that sends the second ball along
+ * the intended line; the mapping is therefore centred on the cue line whose pure geometry gives that direction (the
+ * line of the uncompensated ghost ball), so that no error reproduces the intended direction. The throw is treated as
+ * a constant rotation over the error range (its change with the error is neglected), which is exact to first order.
+ * The probability is the normal mass of cue-line angles whose second ball lies inside the pocket's entry window at its
  * arrival-speed jaw tolerance, averaged over the player's speed error.
  *
  * **Kick.** For each cushion, cue-ball directions around the mirror-image line are traced with the table simulation
  * (centre ball, [TableCollisionSimulator] with the real cushion rebound); a direction counts when the cue ball meets
- * the legal ball after exactly one cushion, touching no other ball first and not dropping in a pocket. The chance of a
- * legal hit is the normal mass of the cue-line error inside the run of good directions around the aim, at each of three
- * speeds of the player's speed error.
+ * the legal ball after exactly one cushion, touching no other ball first and not dropping in a pocket, and then
+ * reaches a cushion again (the same "a ball reaches a cushion after the contact" rule as a safety; the legal ball's
+ * own path is not traced, so only the cue ball can satisfy it). The chance of a legal hit is the normal mass of the
+ * cue-line error inside the run of good directions around the aim, at each of three speeds of the player's speed
+ * error.
  *
  * **Safety.** A small stroke set (seven lines of contact, three speeds, centre ball or draw) is simulated on the whole
  * table. A stroke is a candidate when the cue ball hits the legal ball first, nothing drops, and a ball reaches a
@@ -118,6 +126,15 @@ data class FallbackAdvice(
 object FallbackShotAdvisor {
     /** Make probability at which a combination is preferred over a safety. A modelling choice. */
     const val COMBINATION_MAKE_THRESHOLD: Double = 0.40
+
+    /**
+     * Make probability below which a direct pot no longer counts as "a pot exists", so that a safety, kick or
+     * combination is advised alongside it. One chance in five: a pot that misses four times in five usually leaves the
+     * opponent an open table, so a controlled alternative is worth showing, while a pot above it is a shot the player
+     * can reasonably take. It is deliberately lower than [COMBINATION_MAKE_THRESHOLD], which decides when a
+     * combination is good enough to play in place of a safety. A modelling choice.
+     */
+    const val DIRECT_POT_FLOOR: Double = 0.20
 
     private const val MAX_FIRST_CUT_RAD: Double = 75.0 * PI / 180.0
     private const val MAX_SECOND_CUT_RAD: Double = 60.0 * PI / 180.0
@@ -142,8 +159,9 @@ object FallbackShotAdvisor {
     private const val CUSHION_TOLERANCE_METERS: Double = 2e-3
 
     /**
-     * The fallback for [layout] under [rules] and [profile], or `null` when the run-out planner has a direct pot or no
-     * fallback of the three kinds is found.
+     * The fallback for [layout] under [rules] and [profile], or `null` when the run-out planner has a direct pot that
+     * is at least [DIRECT_POT_FLOOR] likely to be made or no fallback of the three kinds is found. When a weaker direct
+     * pot exists the advice's reason names its make probability.
      */
     fun advise(
         layout: TableLayout,
@@ -153,17 +171,25 @@ object FallbackShotAdvisor {
         val cue = layout.cueBall() ?: return null
         val legal = rules.legalTargetBalls(layout)
         if (legal.isEmpty()) return null
-        if (MultiShotPlanner.planRunout(layout, rules, profile, horizonShots = 1).isNotEmpty()) return null
+        val directPlans = MultiShotPlanner.planRunout(layout, rules, profile, horizonShots = 1)
+        val bestDirect = directPlans.maxOfOrNull { it.steps.firstOrNull()?.uncertainty?.makeProbability ?: 0.0 }
+        if (bestDirect != null && bestDirect >= DIRECT_POT_FLOOR) return null
+        val weakPot = bestDirect?.let { percent(it) }
 
-        val combination = bestCombination(layout, rules, profile, cue, legal)
+        val combination = if (layout.objectBalls().size >= 2) {
+            bestCombination(layout, rules, profile, cue, legal, weakPot)
+        } else {
+            null
+        }
         if (combination != null && combination.outcomeProbability >= COMBINATION_MAKE_THRESHOLD) return combination
         val directHit = legal.any { target -> safetyAims(layout, cue, target).isNotEmpty() }
-        return if (directHit) {
-            bestSafety(layout, rules, profile, cue, legal) ?: combination
-        } else {
-            bestKick(layout, profile, cue, legal) ?: combination
-        }
+        val safety = if (directHit) bestSafety(layout, rules, profile, cue, legal, weakPot) else null
+        return safety ?: bestKick(layout, profile, cue, legal, weakPot) ?: combination
     }
+
+    /** The opening words of a reason: [noPot] when there is no direct pot, else the make chance of the weak one. */
+    private fun lead(noPot: String, weakPotPercent: Int?): String =
+        if (weakPotPercent == null) noPot else "The direct pot is low-percentage (about $weakPotPercent% to make)"
 
     // ---------------------------------------------------------------------------------------------
     // Combination
@@ -234,12 +260,13 @@ object FallbackShotAdvisor {
         profile: PlayerProfile,
         cue: Ball,
         legal: List<Ball>,
+        weakPotPercent: Int?,
     ): FallbackAdvice? {
         var best: FallbackAdvice? = null
         for (first in legal) {
             for (second in allowedSecondBalls(layout, rules, first)) {
                 for (pocket in layout.table.pockets) {
-                    val advice = evaluateCombination(layout, profile, cue, first, second, pocket) ?: continue
+                    val advice = evaluateCombination(layout, profile, cue, first, second, pocket, weakPotPercent) ?: continue
                     if (best == null || advice.outcomeProbability > best.outcomeProbability + 1e-12) best = advice
                 }
             }
@@ -254,7 +281,9 @@ object FallbackShotAdvisor {
         first: Ball,
         second: Ball,
         pocket: PocketSpec,
+        weakPotPercent: Int?,
     ): FallbackAdvice? {
+        if (first.number == second.number) return null
         val table = layout.table
         if (!PocketGeometry.entryWindow(second.position, pocket, second.radiusMeters, pocket.jawToleranceSlow).isOpen) return null
         val geometry = combinationGeometry(layout, cue.position, cue.radiusMeters, first, second, pocket) ?: return null
@@ -274,7 +303,7 @@ object FallbackShotAdvisor {
         for (speedUnits in COMBINATION_SPEED_UNITS) {
             val speed = profile.speedForUnits(speedUnits)
             val compensated = compensateThrow(table, cue, first, second, geometry, speed) ?: continue
-            val p = combinationProbability(table, profile, cue, first, second, pocket, compensated, speed, sigma)
+            val p = combinationProbability(table, profile, cue, first, second, pocket, geometry, compensated, speed, sigma)
             // Equal chances (within 0.2 %): the pace closer to medium.
             val clearlyBetter = p > bestP * (1.0 + NEAR_TIE_FRACTION) + 1e-12
             val asGoodAndCalmer = p >= bestP * (1.0 - NEAR_TIE_FRACTION) &&
@@ -300,9 +329,64 @@ object FallbackShotAdvisor {
             speedUnits = bestSpeed,
             tip = TipOffset(),
             outcomeProbability = bestP,
-            reason = "No direct pot: play ball #${first.number} into ball #${second.number} and send #${second.number} " +
-                "into the ${pocket.id.displayName} pocket ($pct% to make).",
+            reason = "${lead("No direct pot", weakPotPercent)}: play ball #${first.number} into ball #${second.number} " +
+                "and send #${second.number} into the ${pocket.id.displayName} pocket ($pct% to make).",
         )
+    }
+
+    /** The combination advice for one choice of balls and pocket, or `null` when it cannot be played (clear legs, cuts). */
+    internal fun combinationAdvice(
+        layout: TableLayout,
+        profile: PlayerProfile,
+        first: Ball,
+        second: Ball,
+        pocket: PocketSpec,
+    ): FallbackAdvice? {
+        val cue = layout.cueBall() ?: return null
+        return evaluateCombination(layout, profile, cue, first, second, pocket, weakPotPercent = null)
+    }
+
+    /**
+     * Make probability of the combination of [first] into [second] into [pocket] from the cue ball of [layout] at
+     * [speedUnits] (the model behind [FallbackAdvice.outcomeProbability] for one speed), or `0` when the combination
+     * cannot be set up at that speed.
+     */
+    internal fun combinationProbabilityAt(
+        layout: TableLayout,
+        profile: PlayerProfile,
+        first: Ball,
+        second: Ball,
+        pocket: PocketSpec,
+        speedUnits: Double,
+    ): Double {
+        val cue = layout.cueBall() ?: return 0.0
+        val geometry = combinationGeometry(layout, cue.position, cue.radiusMeters, first, second, pocket) ?: return 0.0
+        val speed = profile.speedForUnits(speedUnits)
+        val compensated = compensateThrow(layout.table, cue, first, second, geometry, speed) ?: return 0.0
+        val sigma = profile.aimErrorStdRad.coerceAtLeast(1e-4)
+        return combinationProbability(layout.table, profile, cue, first, second, pocket, geometry, compensated, speed, sigma)
+    }
+
+    /**
+     * Direction the second ball leaves in when the cue line is turned by [offset] radians from the line of
+     * [nominal], the geometry of [combinationGeometry] without throw: the geometric ghost-ball mapping through both
+     * contacts. Offset 0 is the intended second-ball direction ([CombinationGeometry.secondDirection]). `null` when
+     * the turned line misses a ball.
+     */
+    internal fun modelledSecondDirection(
+        cue: Ball,
+        first: Ball,
+        second: Ball,
+        nominal: CombinationGeometry,
+        offset: Double,
+    ): Vec2? {
+        val cueLine = (nominal.cueGhost - cue.position).normalized().rotate(offset)
+        val (firstDir, _) = ExecutionErrorModel.objectBallDirectionForCueLine(
+            cue.position, first.position, cueLine, cue.radiusMeters + first.radiusMeters,
+        ) ?: return null
+        return ExecutionErrorModel.objectBallDirectionForCueLine(
+            first.position, second.position, firstDir, first.radiusMeters + second.radiusMeters,
+        )?.first
     }
 
     /** Ball state of a centre-ball stroke at [cueSpeedMps] reaching [ghost] from [cuePos], or `null` if it stops short. */
@@ -374,9 +458,14 @@ object FallbackShotAdvisor {
     }
 
     /**
-     * Make probability of a combination along [geometry] at [cueSpeedMps]: for each speed of the player's speed error,
-     * whether the second ball reaches the pocket's capture line, and the normal mass of cue-line angles (standard
-     * deviation [sigma]) whose second-ball direction lies inside the entry window at its arrival-speed tolerance.
+     * Make probability of a combination at [cueSpeedMps]: for each speed of the player's speed error, whether the
+     * second ball reaches the pocket's capture line, and the normal mass of cue-line angles (standard deviation
+     * [sigma]) whose second-ball direction lies inside the entry window at its arrival-speed tolerance.
+     *
+     * [nominal] is the geometry without throw and [compensated] the one the player aims (see [compensateThrow]). The
+     * ball speeds come from the compensated contacts. The cue-line error is measured around the cue line of
+     * [nominal]: through the geometric mapping of [modelledSecondDirection] that line sends the second ball along the
+     * intended direction, which is what the compensated line does in the real contacts.
      */
     private fun combinationProbability(
         table: TableSpec,
@@ -385,35 +474,28 @@ object FallbackShotAdvisor {
         first: Ball,
         second: Ball,
         pocket: PocketSpec,
-        geometry: CombinationGeometry,
+        nominal: CombinationGeometry,
+        compensated: CombinationGeometry,
         cueSpeedMps: Double,
         sigma: Double,
     ): Double {
         val motion = BallMotion(table.cloth)
-        val cueLine = (geometry.cueGhost - cue.position).normalized()
-        val firstContact = cue.radiusMeters + first.radiusMeters
-        val secondContact = first.radiusMeters + second.radiusMeters
-        fun secondDirection(offset: Double): Vec2? {
-            val (firstDir, _) = ExecutionErrorModel.objectBallDirectionForCueLine(
-                cue.position, first.position, cueLine.rotate(offset), firstContact,
-            ) ?: return null
-            return ExecutionErrorModel.objectBallDirectionForCueLine(first.position, second.position, firstDir, secondContact)?.first
-        }
-        val drop = PocketGeometry.distanceToCaptureLine(second.position, geometry.secondDirection, pocket, second.radiusMeters)
-            ?: second.position.distanceTo(geometry.secondAimPoint)
+        val secondLine = (second.position - compensated.firstGhost).normalized()
+        val drop = PocketGeometry.distanceToCaptureLine(second.position, nominal.secondDirection, pocket, second.radiusMeters)
+            ?: second.position.distanceTo(nominal.secondAimPoint)
         val speedError = ExecutionErrorModel.speedErrorFraction(profile)
         var total = 0.0
         for (i in SPEED_NODES.indices) {
             val speed = cueSpeedMps * (1.0 + SPEED_NODES[i] * speedError)
-            val firstArrival = firstBallArrival(table, cue, first, geometry, speed) ?: continue
-            val struck = BallBallContact.resolve(firstArrival, BallState(second.position), geometry.secondDirection).struck
+            val firstArrival = firstBallArrival(table, cue, first, compensated, speed) ?: continue
+            val struck = BallBallContact.resolve(firstArrival, BallState(second.position), secondLine).struck
             val arrival = travel(motion, struck, drop) ?: continue
             val window = PocketGeometry.entryWindow(
                 second.position, pocket, second.radiusMeters, PocketGeometry.jawTolerance(pocket, arrival.velocity.length()),
             )
             if (!window.isOpen) continue
             total += SPEED_WEIGHTS[i] * massInside(sigma) { offset ->
-                val d = secondDirection(offset)
+                val d = modelledSecondDirection(cue, first, second, nominal, offset)
                 d != null && insideWindow(d, window)
             }
         }
@@ -487,6 +569,9 @@ object FallbackShotAdvisor {
         }
     }
 
+    private fun touchesCushion(p: Vec2, layout: TableLayout, r: Double): Boolean =
+        Cushion.entries.any { onCushion(p, it, layout, r) }
+
     /** Where a kick along [direction] at [speedMps] meets the cushion and then [target], or `null` if it does not. */
     private class KickTrace(val cushionPoint: Vec2, val contactPoint: Vec2)
 
@@ -516,7 +601,12 @@ object FallbackShotAdvisor {
         if (contactIndex <= 0) return null
         val cushionIndex = vertices.indexOfFirst { onCushion(it, cushion, layout, cue.radiusMeters) }
         if (cushionIndex <= 0 || cushionIndex >= contactIndex) return null
-        if ((1 until contactIndex).count { i -> Cushion.entries.any { onCushion(vertices[i], it, layout, cue.radiusMeters) } } != 1) {
+        if ((1 until contactIndex).count { i -> touchesCushion(vertices[i], layout, cue.radiusMeters) } != 1) {
+            return null
+        }
+        // As for a safety, a ball must reach a cushion after the contact. Only the cue ball's path is traced here, so
+        // it is the cue ball that has to.
+        if ((contactIndex + 1 until vertices.size).none { i -> touchesCushion(vertices[i], layout, cue.radiusMeters) }) {
             return null
         }
         // The cue ball must touch no other ball on the way to the contact.
@@ -530,7 +620,13 @@ object FallbackShotAdvisor {
         return KickTrace(vertices[cushionIndex], contact)
     }
 
-    private fun bestKick(layout: TableLayout, profile: PlayerProfile, cue: Ball, legal: List<Ball>): FallbackAdvice? {
+    private fun bestKick(
+        layout: TableLayout,
+        profile: PlayerProfile,
+        cue: Ball,
+        legal: List<Ball>,
+        weakPotPercent: Int?,
+    ): FallbackAdvice? {
         val sigma = profile.aimErrorStdRad.coerceAtLeast(1e-4)
         val speedError = ExecutionErrorModel.speedErrorFraction(profile)
         val steps = (KICK_SCAN_HALF_WIDTH_RAD / KICK_SCAN_STEP_RAD).roundToInt()
@@ -594,7 +690,7 @@ object FallbackShotAdvisor {
                         speedUnits = speedUnits,
                         tip = TipOffset(),
                         outcomeProbability = p.coerceIn(0.0, 1.0),
-                        reason = "Ball #${target.number} is hidden: kick off the ${cushion.label} cushion at the point shown, " +
+                        reason = "${lead("Ball #${target.number} is hidden", weakPotPercent)}: kick off the ${cushion.label} cushion at the point shown, " +
                             "centre ball at speed ${PlayerProfile.formatSpeedUnits(speedUnits)}, for a legal hit " +
                             "(${percent(p)}% chance).",
                     )
@@ -672,7 +768,7 @@ object FallbackShotAdvisor {
         val r = layout.table.ballRadiusMeters
         val railTouched = sim.cueBallTrajectory.cushionContacts > 0 ||
             (listOfNotNull(sim.targetBallTrajectory) + sim.disturbedBalls).any { path ->
-                path.points.drop(1).any { p -> Cushion.entries.any { onCushion(p, it, layout, r) } }
+                path.points.drop(1).any { p -> touchesCushion(p, layout, r) }
             }
         return if (railTouched) sim.resultingLayout else null
     }
@@ -683,6 +779,7 @@ object FallbackShotAdvisor {
         profile: PlayerProfile,
         cue: Ball,
         legal: List<Ball>,
+        weakPotPercent: Int?,
     ): FallbackAdvice? {
         class Candidate(
             val target: Ball,
@@ -738,10 +835,10 @@ object FallbackShotAdvisor {
             else -> "thin"
         }
         val sentence = if (pick.hidden >= 1.0 - 1e-9) {
-            "Ball #${pick.target.number} has no pot: hit it $hit at speed ${PlayerProfile.formatSpeedUnits(pick.speedUnits)} " +
+            "${lead("Ball #${pick.target.number} has no pot", weakPotPercent)}: hit it $hit at speed ${PlayerProfile.formatSpeedUnits(pick.speedUnits)} " +
                 "and leave your opponent no direct pot (${percent(chosenP)}% chance)."
         } else {
-            "Ball #${pick.target.number} has no pot: hit it $hit at speed ${PlayerProfile.formatSpeedUnits(pick.speedUnits)} " +
+            "${lead("Ball #${pick.target.number} has no pot", weakPotPercent)}: hit it $hit at speed ${PlayerProfile.formatSpeedUnits(pick.speedUnits)} " +
                 "to leave your opponent as little as possible (${percent(pick.hidden)}% of the pots blocked)."
         }
         return FallbackAdvice(

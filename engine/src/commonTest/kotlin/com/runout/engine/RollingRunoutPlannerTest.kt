@@ -9,13 +9,17 @@ import com.runout.engine.model.PlayerProfile
 import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
+import com.runout.engine.physics.DisplacedBallPath
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.planner.MultiShotPlanner
+import com.runout.engine.planner.PlanCache
 import com.runout.engine.planner.PlannedShotStep
 import com.runout.engine.planner.RollingPlanState
 import com.runout.engine.planner.RollingRunoutPlanner
 import com.runout.engine.planner.RunoutPlan
 import com.runout.engine.planner.StepOverride
+import kotlin.math.PI
+import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -803,6 +807,637 @@ class RollingRunoutPlannerTest {
         assertSame(window.steps[0], s1.acceptedSteps.single())
         assertEquals(listOf(1, 2, 3), s1.allSteps.map { it.stepNumber })
         assertEquals(s0, RollingRunoutPlanner.back(s1).copy(focusOverride = null, laterViews = emptyList()))
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Edit state across Prev and Next
+    // ---------------------------------------------------------------------------------------------
+
+    /** A speed-only edit that differs from what the planner chose for the focused step. */
+    private fun speedEdit(state: RollingPlanState): StepOverride {
+        val natural = assertNotNull(state.focusStep).recommendedSpeedUnits
+        return StepOverride(speedUnits = if (natural == 7.0) 5.0 else 7.0)
+    }
+
+    /** The invariant plus, for an edited focus, that the focus step carries the override it was planned with. */
+    private fun assertEditStateConsistent(state: RollingPlanState, where: String) {
+        assertTrue(state.isEditStateConsistent, "$where: edited focus without its override")
+        val override = state.focusOverride
+        val step = state.focusStep
+        if (state.isFocusEdited && override != null && step != null) {
+            override.speedUnits?.let { assertEquals(it, step.recommendedSpeedUnits, "$where: speed of the edit") }
+            override.tip?.let { assertEquals(it, step.recommendedTip, "$where: tip of the edit") }
+            override.pocketId?.let { assertEquals(it, step.pocketId, "$where: pocket of the edit") }
+            override.targetBallNumber?.let { assertEquals(it, step.targetBall.number, "$where: target of the edit") }
+        }
+    }
+
+    /** The first step the planner picks at the focus of [state] when nothing is forced. */
+    private fun ownPick(state: RollingPlanState): PlannedShotStep =
+        MultiShotPlanner.planRunout(state.focusLayout, state.focusRules, state.profile, state.horizon)
+            .first().steps.first()
+
+    @Test
+    fun editThenPrevThenNextKeepsTheEditAndResetStepReturnsToThePlannersPick() {
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(start())
+        val natural = assertNotNull(s1.focusStep)
+        val edit = speedEdit(s1)
+        val edited = RollingRunoutPlanner.setOverride(s1, edit)
+        assertEquals(edit.speedUnits, assertNotNull(edited.focusStep).recommendedSpeedUnits)
+
+        val back = RollingRunoutPlanner.back(edited)
+        val forward = RollingRunoutPlanner.acceptAndAdvance(back)
+
+        assertEditStateConsistent(forward, "after Prev and Next")
+        assertTrue(forward.isFocusEdited, "The edited step keeps its mark")
+        assertEquals(edit, forward.focusOverride, "The edit comes back with its view")
+        assertEquals(edit.speedUnits, assertNotNull(forward.focusStep).recommendedSpeedUnits)
+        assertEquals(edited, forward, "Prev then Next without an edit restores exactly what was shown")
+
+        val reset = RollingRunoutPlanner.clearOverride(forward)
+
+        assertEditStateConsistent(reset, "after Reset step")
+        assertFalse(reset.isFocusEdited)
+        assertNull(reset.focusOverride)
+        val resetStep = assertNotNull(reset.focusStep)
+        assertTrue(sameChoice(ownPick(reset), resetStep), "Reset returns to the planner's own first shot")
+        assertEquals(natural.recommendedSpeedUnits, resetStep.recommendedSpeedUnits)
+        assertNotEquals(edit.speedUnits, resetStep.recommendedSpeedUnits)
+    }
+
+    @Test
+    fun resetStepOnAnEditedFocusWithoutItsOverrideStillResets() {
+        // The state the earlier code produced after edit, Prev, Next: marked as edited, override lost.
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(start())
+        val edited = RollingRunoutPlanner.setOverride(s1, speedEdit(s1))
+        val broken = edited.copy(focusOverride = null)
+        assertFalse(broken.isEditStateConsistent)
+
+        val reset = RollingRunoutPlanner.clearOverride(broken)
+
+        assertEditStateConsistent(reset, "after Reset step")
+        assertFalse(reset.isFocusEdited)
+        assertTrue(sameChoice(ownPick(reset), assertNotNull(reset.focusStep)))
+        assertEquals(s1.focusStep?.recommendedSpeedUnits, reset.focusStep?.recommendedSpeedUnits)
+    }
+
+    @Test
+    fun prevOntoAnEditedStepBringsBackTheEditAsARealEdit() {
+        val s0 = start()
+        val edit = editOverride
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(RollingRunoutPlanner.setOverride(s0, edit))
+
+        val reopened = RollingRunoutPlanner.back(s1)
+
+        assertEditStateConsistent(reopened, "after Prev")
+        assertTrue(reopened.isFocusEdited)
+        assertEquals(edit, reopened.focusOverride, "The user's own override, not the pinned choices")
+        val reset = RollingRunoutPlanner.clearOverride(reopened)
+        assertFalse(reset.isFocusEdited)
+        assertEquals(s0.window, reset.window)
+        assertEditStateConsistent(reset, "after Reset step")
+    }
+
+    @Test
+    fun prevOntoAnUneditedStepIsNotAnEditAndLoadsThePinnedChoices() {
+        val s0 = start()
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(s0)
+
+        val reopened = RollingRunoutPlanner.back(s1)
+
+        assertEditStateConsistent(reopened, "after Prev")
+        assertFalse(reopened.isFocusEdited)
+        assertEquals(StepOverride.of(assertNotNull(s0.focusStep)), reopened.focusOverride)
+        assertTrue(reopened.userEditedStepNumbers.isEmpty())
+    }
+
+    @Test
+    fun anEditAfterPrevDiscardsTheLaterViewsAndKeepsTheStateConsistent() {
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(start())
+        val s1Edited = RollingRunoutPlanner.setOverride(s1, speedEdit(s1))
+        val s2 = RollingRunoutPlanner.acceptAndAdvance(s1Edited)
+        val back = RollingRunoutPlanner.back(RollingRunoutPlanner.back(s2))
+        assertEquals(2, back.laterViews.size)
+
+        val edited = RollingRunoutPlanner.setOverride(back, editOverride)
+
+        assertTrue(edited.laterViews.isEmpty())
+        assertEquals(setOf(1), edited.userEditedStepNumbers)
+        assertEditStateConsistent(edited, "after the edit")
+        val forward = RollingRunoutPlanner.acceptAndAdvance(edited)
+        assertEditStateConsistent(forward, "after Next")
+        assertFalse(forward.isFocusEdited)
+    }
+
+    @Test
+    fun rebaseAfterEditAndPrevStartsWithoutAnyEditState() {
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(start())
+        val edited = RollingRunoutPlanner.setOverride(s1, speedEdit(s1))
+        val forward = RollingRunoutPlanner.acceptAndAdvance(RollingRunoutPlanner.back(edited))
+        assertTrue(forward.isFocusEdited)
+
+        val rebased = RollingRunoutPlanner.rebase(forward, movedBall8(forward.focusLayout))
+
+        assertTrue(rebased.userEditedStepNumbers.isEmpty())
+        assertNull(rebased.focusOverride)
+        assertFalse(rebased.isFocusEdited)
+        assertEditStateConsistent(rebased, "after rebase")
+    }
+
+    /**
+     * Every sequence of five operations (Next, Prev, edit, Reset step) from the start keeps the edit state consistent,
+     * and Reset step on an edited focus returns to the planner's own choice.
+     */
+    @Test
+    fun everyShortSequenceOfEditsAndMovesKeepsTheEditStateConsistent() {
+        var visited = 0
+        var resetChecks = 0
+        fun walk(state: RollingPlanState, depth: Int, path: String) {
+            visited++
+            assertEditStateConsistent(state, path)
+            if (state.isFocusEdited && resetChecks < 6) {
+                resetChecks++
+                val reset = RollingRunoutPlanner.clearOverride(state)
+                assertFalse(reset.isFocusEdited, "$path: reset keeps the mark")
+                assertTrue(sameChoice(ownPick(reset), assertNotNull(reset.focusStep)), "$path: reset is not the planner's pick")
+            } else if (state.isFocusEdited) {
+                assertFalse(RollingRunoutPlanner.clearOverride(state).isFocusEdited, "$path: reset keeps the mark")
+            }
+            if (depth == 0) return
+            walk(RollingRunoutPlanner.acceptAndAdvance(state), depth - 1, "$path>next")
+            walk(RollingRunoutPlanner.back(state), depth - 1, "$path>prev")
+            if (state.focusStep != null && !state.isRackComplete) {
+                walk(RollingRunoutPlanner.setOverride(state, speedEdit(state)), depth - 1, "$path>edit")
+            }
+            walk(RollingRunoutPlanner.clearOverride(state), depth - 1, "$path>reset")
+        }
+        walk(start(), depth = 5, path = "start")
+        println("edit-state walk: $visited states, $resetChecks full reset checks")
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Horizon, alternatives and the default marker
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    fun withHorizonKeepsAcceptedStepsAndReplansTheWindowFromTheFocus() {
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(start(horizon = 3))
+        val before = s1.acceptedSteps.single()
+
+        val shorter = RollingRunoutPlanner.withHorizon(s1, 2, deepAnalysis = false)
+
+        assertSame(before, shorter.acceptedSteps.single())
+        assertEquals(2, shorter.horizon)
+        assertEquals(listOf(2, 3), shorter.window?.steps?.map { it.stepNumber })
+        val direct = MultiShotPlanner.planRunout(s1.focusLayout, s1.focusRules, profile, 2).first()
+        assertEquals(direct.steps.map { it.targetBall.number }, targets(shorter.window))
+        assertEquals(direct.steps.map { it.pocketId }, shorter.window?.steps?.map { it.pocketId })
+        assertTrue(shorter.laterViews.isEmpty() && shorter.earlierViews.isEmpty())
+        assertEditStateConsistent(shorter, "after withHorizon")
+        assertEquals(listOf(1, 2, 3), shorter.allSteps.map { it.stepNumber })
+
+        val longer = RollingRunoutPlanner.withHorizon(shorter, 4, deepAnalysis = false)
+        assertEquals(listOf(2, 3, 4, 5), longer.window?.steps?.map { it.stepNumber })
+        assertEquals(4, longer.horizon)
+
+        // Prev plans the reopened step with the new horizon; Next restores what was shown.
+        val reopened = RollingRunoutPlanner.back(longer)
+        assertEquals(4, reopened.window?.steps?.size)
+        assertEquals(listOf(1, 2, 3, 4), reopened.window?.steps?.map { it.stepNumber })
+        assertEquals(1, RollingRunoutPlanner.acceptAndAdvance(reopened).acceptedSteps.size)
+    }
+
+    @Test
+    fun withHorizonClearsStepForwardViewsAndKeepsAnEdit() {
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(start())
+        val edited = RollingRunoutPlanner.setOverride(s1, speedEdit(s1))
+        val back = RollingRunoutPlanner.back(edited)
+        assertTrue(back.laterViews.isNotEmpty())
+
+        val resized = RollingRunoutPlanner.withHorizon(back, 2, deepAnalysis = false)
+
+        assertTrue(resized.laterViews.isEmpty())
+        assertEquals(StepOverride.of(assertNotNull(start().focusStep)), resized.focusOverride)
+
+        val editedNow = RollingRunoutPlanner.setOverride(start(), editOverride)
+        val resizedEdited = RollingRunoutPlanner.withHorizon(editedNow, 2, deepAnalysis = false)
+        assertTrue(resizedEdited.isFocusEdited)
+        assertEquals(editOverride, resizedEdited.focusOverride)
+        assertEquals(editOverride.tip, resizedEdited.focusStep?.recommendedTip)
+        assertEquals(2, resizedEdited.window?.steps?.size)
+        assertEditStateConsistent(resizedEdited, "after withHorizon")
+    }
+
+    @Test
+    fun withHorizonChangesNothingWhenTheSettingsAreAlreadyInForceAndClampsTheHorizon() {
+        val s0 = start(horizon = 3)
+        assertSame(s0, RollingRunoutPlanner.withHorizon(s0, 3, deepAnalysis = false))
+        assertEquals(RollingRunoutPlanner.MAX_HORIZON, RollingRunoutPlanner.withHorizon(s0, 99, deepAnalysis = false).horizon)
+        assertEquals(1, RollingRunoutPlanner.withHorizon(s0, 0, deepAnalysis = false).horizon)
+    }
+
+    @Test
+    fun withHorizonCanSwitchDeepAnalysisOnAndOff() {
+        val s0 = RollingRunoutPlanner.start(lastThreeLayout, nineBallRules, profile, horizon = 1)
+        assertEquals(listOf(7), targets(s0.window))
+
+        val deep = RollingRunoutPlanner.withHorizon(s0, 1, deepAnalysis = true)
+
+        assertTrue(deep.deepAnalysis)
+        assertEquals(listOf(7, 8, 9), targets(deep.window))
+        val shallow = RollingRunoutPlanner.withHorizon(deep, 1, deepAnalysis = false)
+        assertEquals(listOf(7), targets(shallow.window))
+        assertEquals(s0.window, shallow.window)
+    }
+
+    /** The first base layout whose start window offers another first shot. */
+    private fun stateWithAlternatives(): RollingPlanState {
+        val rules = GameRulesState(GameType.EIGHT_BALL, EightBallGroup.OPEN)
+        for (layout in eightBallCandidates) {
+            val open = RollingRunoutPlanner.start(layout, rules, profile, 3)
+            if (open.window != null && open.alternatives.isNotEmpty()) return open
+        }
+        fail("No candidate table offers an alternative first shot; refresh the fixtures")
+    }
+
+    @Test
+    fun chooseAlternativeTakesAnotherFirstShotWithoutEditingOrSearching() {
+        val open = stateWithAlternatives()
+        val chosen = open.alternatives.first()
+        val oldWindow = assertNotNull(open.window)
+
+        val picked = RollingRunoutPlanner.chooseAlternative(open, chosen)
+
+        assertSame(chosen, picked.window)
+        assertEquals(open.cache.size, picked.cache.size, "No new search")
+        assertFalse(picked.isFocusEdited)
+        assertTrue(picked.userEditedStepNumbers.isEmpty())
+        assertEquals(StepOverride.of(chosen.steps.first()), picked.focusOverride)
+        assertTrue(oldWindow in picked.alternatives, "The window that was shown stays on offer")
+        assertFalse(chosen in picked.alternatives)
+        assertEditStateConsistent(picked, "after chooseAlternative")
+        assertTrue(picked.canAdvance)
+        val accepted = RollingRunoutPlanner.acceptAndAdvance(picked)
+        assertTrue(sameChoice(chosen.steps.first(), accepted.acceptedSteps.single()))
+
+        // The pin survives a horizon change; Reset step returns to the planner's own first shot.
+        val resized = RollingRunoutPlanner.withHorizon(picked, 2, deepAnalysis = false)
+        assertTrue(sameChoice(chosen.steps.first(), assertNotNull(resized.focusStep)))
+        val reset = RollingRunoutPlanner.clearOverride(picked)
+        assertEquals(open.window, reset.window)
+        assertNull(reset.focusOverride)
+    }
+
+    @Test
+    fun chooseAlternativeDropsTheEditMarkAndIgnoresAPlanThatIsNotOnOffer() {
+        val open = stateWithAlternatives()
+        val edited = RollingRunoutPlanner.setOverride(open, StepOverride(speedUnits = speedEdit(open).speedUnits))
+        assertTrue(edited.isFocusEdited)
+        val alternative = edited.alternatives.firstOrNull() ?: open.alternatives.first()
+
+        val picked = RollingRunoutPlanner.chooseAlternative(edited, alternative)
+        if (alternative in edited.alternatives) {
+            assertFalse(picked.isFocusEdited)
+            assertEditStateConsistent(picked, "after chooseAlternative")
+        }
+
+        val unrelated = assertNotNull(RollingRunoutPlanner.start(nineBallLayout, nineBallRules, profile, 1).window)
+        assertSame(open, RollingRunoutPlanner.chooseAlternative(open, unrelated))
+    }
+
+    @Test
+    fun theDefaultFocusStepIsTheFocusUntilAnEditAndThenComesFromTheMemo() {
+        val s0 = start()
+        val natural = assertNotNull(s0.focusStep)
+        assertSame(natural, s0.defaultFocusStep)
+
+        val edited = RollingRunoutPlanner.setOverride(s0, speedEdit(s0))
+        assertTrue(sameChoice(natural, assertNotNull(edited.defaultFocusStep)), "Known from the memo, no search needed")
+
+        val forgotten = edited.copy(cache = PlanCache.EMPTY)
+        assertNull(forgotten.defaultFocusStep)
+        val filled = RollingRunoutPlanner.withDefaultFocusStep(forgotten)
+        assertTrue(sameChoice(natural, assertNotNull(filled.defaultFocusStep)))
+        assertEquals(forgotten, filled, "Only the memo differs")
+
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(s0)
+        val edited1 = RollingRunoutPlanner.setOverride(s1, speedEdit(s1))
+        val default1 = assertNotNull(RollingRunoutPlanner.withDefaultFocusStep(edited1.copy(cache = PlanCache.EMPTY)).defaultFocusStep)
+        assertEquals(2, default1.stepNumber, "Numbered from the base table like the focus step")
+        assertTrue(sameChoice(ownPick(edited1), default1))
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Advancing a forced shot
+    // ---------------------------------------------------------------------------------------------
+
+    private val solidsRules = GameRulesState(GameType.EIGHT_BALL, EightBallGroup.SOLIDS)
+
+    private fun droppedBalls(step: PlannedShotStep): Map<Int, PocketId> =
+        step.uncertainty.postShotSimulation?.disturbedBalls.orEmpty()
+            .mapNotNull { path -> path.pocketedIn?.let { path.ballNumber to it } }
+            .toMap()
+
+    /** An 8-ball table with solids 1 and 2, stripes 9 and 10 and the 8 in the foot-left corner. */
+    private val eightDropLayout: TableLayout = layoutFrom(
+        listOf(0, 1, 2, 9, 10, 8),
+        doubleArrayOf(0.578, 0.460, 1.646, 0.334, 0.512, 0.997, 0.622, 0.591, 1.435, 0.396, 2.460, 0.100),
+    )
+
+    /** [state] with the focused step's simulation changed to drop the balls of [extra] and, if given, its target in [targetPocket]. */
+    private fun simulateDrops(
+        state: RollingPlanState,
+        extra: Map<Int, PocketId> = emptyMap(),
+        targetPocket: PocketId? = null,
+    ): RollingPlanState {
+        val window = assertNotNull(state.window)
+        val step = window.steps.first()
+        val simulation = assertNotNull(step.uncertainty.postShotSimulation)
+        val changed = simulation.copy(
+            disturbedBalls = simulation.disturbedBalls.filter { it.ballNumber !in extra } +
+                extra.map { (number, pocket) -> DisplacedBallPath(number, listOf(Vec2(0.0, 0.0)), pocketedIn = pocket) },
+            targetBallTrajectory = if (targetPocket == null) {
+                simulation.targetBallTrajectory
+            } else {
+                simulation.targetBallTrajectory?.copy(pocketedIn = targetPocket)
+            },
+        )
+        val newStep = step.copy(uncertainty = step.uncertainty.copy(postShotSimulation = changed))
+        return state.copy(window = window.copy(steps = listOf(newStep) + window.steps.drop(1)))
+    }
+
+    private fun refusalFor(state: RollingPlanState, extra: Map<Int, PocketId> = emptyMap(), targetPocket: PocketId? = null): String? {
+        assertNull(RollingRunoutPlanner.advanceRefusal(state), "Precondition: the planner's own shot can be accepted")
+        return RollingRunoutPlanner.advanceRefusal(simulateDrops(state, extra, targetPocket))
+    }
+
+    @Test
+    fun eightBallRefusesAnEightAnOpponentBallOrAnUnclearGroupButNotAnOwnBallDroppingWithTheTarget() {
+        val solids = RollingRunoutPlanner.start(eightDropLayout, solidsRules, profile, 1)
+        val target = assertNotNull(solids.focusStep).targetBall
+        assertTrue(target.isSolid, "Precondition: a solid is the target")
+        val otherSolid = listOf(1, 2, 3).first { it != target.number }
+        val pocket = PocketId.SIDE_LEFT
+
+        assertTrue("8-ball" in assertNotNull(refusalFor(solids, mapOf(8 to pocket))))
+        assertTrue("#9" in assertNotNull(refusalFor(solids, mapOf(9 to pocket))), "An opponent's stripe")
+        assertNull(refusalFor(solids, mapOf(otherSolid to pocket)), "A ball of the shooter's own group dropping with the target")
+        assertTrue("8-ball" in assertNotNull(refusalFor(solids, mapOf(8 to pocket, otherSolid to pocket))))
+
+        val open = RollingRunoutPlanner.start(eightDropLayout, GameRulesState(GameType.EIGHT_BALL, EightBallGroup.OPEN), profile, 1)
+        val openTarget = assertNotNull(open.focusStep).targetBall
+        val sameGroup = if (openTarget.isSolid) listOf(1, 2, 3).first { it != openTarget.number } else 10
+        val otherGroup = if (openTarget.isSolid) 9 else 2
+        assertNull(refusalFor(open, mapOf(sameGroup to pocket)), "Same group as the target on an open table")
+        assertNotNull(refusalFor(open, mapOf(otherGroup to pocket)), "The other group on an open table")
+        assertNotNull(refusalFor(open, mapOf(8 to pocket)))
+    }
+
+    @Test
+    fun theEightAsTheTargetRefusesEveryOtherBallThatDrops() {
+        val layout = layoutFrom(listOf(0, 8, 9), doubleArrayOf(0.70, 0.64, 1.60, 0.40, 1.30, 1.05))
+        val state = RollingRunoutPlanner.start(layout, solidsRules, profile, 1)
+        assertEquals(8, assertNotNull(state.focusStep).targetBall.number, "Precondition: the 8 is the only legal ball")
+
+        assertNull(refusalFor(state))
+        val reason = assertNotNull(refusalFor(state, mapOf(9 to PocketId.SIDE_LEFT)))
+        assertTrue("#9" in reason, reason)
+    }
+
+    @Test
+    fun nineBallNeverRefusesAnExtraBallThatDropsAfterTheLegalHit() {
+        val state = start(horizon = 1)
+        assertNull(refusalFor(state, mapOf(4 to PocketId.SIDE_LEFT)))
+        assertNull(refusalFor(state, mapOf(4 to PocketId.SIDE_LEFT, 9 to PocketId.FOOT_LEFT)))
+    }
+
+    @Test
+    fun aTargetDroppingInAnotherPocketIsRefusedInEveryGameNamingBothPockets() {
+        for (state in listOf(
+            start(horizon = 1),
+            RollingRunoutPlanner.start(eightDropLayout, solidsRules, profile, 1),
+        )) {
+            val step = assertNotNull(state.focusStep)
+            val other = PocketId.entries.first { it != step.pocketId }
+            val reason = assertNotNull(refusalFor(state, targetPocket = other))
+            assertTrue(other.displayName in reason && step.pocketId.displayName in reason, reason)
+            assertTrue("#${step.targetBall.number}" in reason, reason)
+        }
+    }
+
+    /**
+     * A solids table with the 8 close to a pocket, the 1 close to the 8, and 2, 3, the stripes 9 and 10 and the cue
+     * ball spread over the table: shots that send a ball into the 8 or follow through to it are common.
+     */
+    private fun eightNearAPocket(random: Random): TableLayout? {
+        val r = fixtureTable.ballRadiusMeters
+        val pocket = fixtureTable.pockets.random(random)
+        val towardTable = (Vec2(fixtureTable.lengthMeters / 2, fixtureTable.widthMeters / 2) - pocket.mouthCenter).normalized()
+        val eight = pocket.mouthCenter + towardTable * (0.10 + 0.2 * random.nextDouble())
+        val placed = mutableListOf(8 to eight)
+        for ((number, nearTheEight) in listOf(1 to true, 2 to false, 3 to false, 9 to false, 10 to false, 0 to false)) {
+            var spot: Vec2? = null
+            repeat(80) {
+                if (spot == null) {
+                    val candidate = if (nearTheEight) {
+                        eight + Vec2(1.0, 0.0).rotate(random.nextDouble() * 2 * PI) * (0.10 + 0.35 * random.nextDouble())
+                    } else {
+                        Vec2(
+                            r + 0.05 + random.nextDouble() * (fixtureTable.lengthMeters - 0.2),
+                            r + 0.05 + random.nextDouble() * (fixtureTable.widthMeters - 0.2),
+                        )
+                    }
+                    val inside = candidate.x > r + 0.02 && candidate.x < fixtureTable.lengthMeters - r - 0.02 &&
+                        candidate.y > r + 0.02 && candidate.y < fixtureTable.widthMeters - r - 0.02
+                    if (inside && placed.all { (_, p) -> p.distanceTo(candidate) > 2 * r + 0.015 }) spot = candidate
+                }
+            }
+            placed += number to (spot ?: return null)
+        }
+        return TableLayout(fixtureTable, placed.map { (number, position) -> Ball(number, position, r) })
+    }
+
+    @Test
+    fun noForcedShotThatDropsTheEightOrPutsTheTargetInAnotherPocketCanBeAdvanced() {
+        val random = Random(5)
+        val tips = listOf<TipOffset?>(null, TipOffset(0.0, 0.35), TipOffset(0.0, -0.30))
+        var tables = 0
+        var shots = 0
+        var eightDrops = 0
+        var otherPocket = 0
+        var firstEightDrop: RollingPlanState? = null
+        val mark = TimeSource.Monotonic.markNow()
+        while (tables < 60) {
+            val layout = eightNearAPocket(random) ?: continue
+            tables++
+            val start = RollingRunoutPlanner.start(layout, solidsRules, profile, 1)
+            for (target in 1..3) for (pocket in PocketId.entries) for (speed in listOf(5.0, 7.0, 9.0, 10.0)) for (tip in tips) {
+                val forced = RollingRunoutPlanner.setOverride(
+                    start,
+                    StepOverride(tip = tip, targetBallNumber = target, pocketId = pocket, speedUnits = speed),
+                )
+                val step = forced.focusStep ?: continue
+                shots++
+                if (8 in droppedBalls(step) && step.targetBall.number != 8) {
+                    eightDrops++
+                    assertFalse(forced.canAdvance, "The 8 drops with ball #${step.targetBall.number}: ${droppedBalls(step)}")
+                    if (firstEightDrop == null) firstEightDrop = forced
+                }
+                val landedIn = step.uncertainty.postShotSimulation?.targetBallTrajectory?.pocketedIn
+                if (landedIn != null && landedIn != step.pocketId) {
+                    otherPocket++
+                    assertFalse(forced.canAdvance, "Ball #${step.targetBall.number} drops in $landedIn, not ${step.pocketId}")
+                }
+            }
+        }
+        println("forced shots: $shots in $tables tables, the 8 drops in $eightDrops, another pocket in $otherPocket, ${mark.elapsedNow().inWholeSeconds} s")
+        assertTrue(eightDrops > 0, "The search never dropped the 8, so it proves nothing; change the seed or the setup")
+
+        // What Next says about one of them, and that resetting the step gives back a shot that can be accepted.
+        val forced = assertNotNull(firstEightDrop)
+        val reason = assertNotNull(RollingRunoutPlanner.advanceRefusal(forced))
+        assertTrue("8-ball" in reason, reason)
+        val refused = RollingRunoutPlanner.acceptAndAdvance(forced)
+        assertTrue(refused.acceptedSteps.isEmpty())
+        assertEquals(reason, refused.refusalReason)
+        assertNotNull(refused.window, "The shot is still shown so that the user can see what it does")
+    }
+
+    @Test
+    fun theNaturalShotOnAnEightBallTableStillAdvances() {
+        val start = RollingRunoutPlanner.start(eightDropLayout, solidsRules, profile, 3)
+        assertTrue(start.canAdvance, "The planner's own shot")
+        val accepted = RollingRunoutPlanner.acceptAndAdvance(start)
+        assertNull(accepted.refusalReason)
+        assertEquals(1, accepted.acceptedSteps.size)
+    }
+
+    @Test
+    fun aStepFlaggedAsNotLegalAsPlannedIsRefusedAndItsMessageIsShown() {
+        val state = start(horizon = 1)
+        assertNull(RollingRunoutPlanner.advanceRefusal(state), "Precondition: the planner's own shot can be accepted")
+        val window = assertNotNull(state.window)
+        val flagged = state.copy(window = window.copy(steps = listOf(window.steps.first().copy(legalAsPlanned = false))))
+
+        val reason = assertNotNull(RollingRunoutPlanner.advanceRefusal(flagged))
+        assertFalse(flagged.canAdvance)
+        val refused = RollingRunoutPlanner.acceptAndAdvance(flagged)
+        assertTrue(refused.acceptedSteps.isEmpty())
+        assertEquals(reason, refused.refusalReason)
+    }
+
+    @Test
+    fun aSpecificRefusalReasonIsKeptWhenTheStepIsAlsoFlaggedNotLegal() {
+        val solids = RollingRunoutPlanner.start(eightDropLayout, solidsRules, profile, 1)
+        val dropsTheEight = simulateDrops(solids, mapOf(8 to PocketId.SIDE_LEFT))
+        val window = assertNotNull(dropsTheEight.window)
+        val flagged = dropsTheEight.copy(
+            window = window.copy(steps = listOf(window.steps.first().copy(legalAsPlanned = false))),
+        )
+        val reason = assertNotNull(RollingRunoutPlanner.advanceRefusal(flagged))
+        assertTrue("8-ball" in reason, reason)
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Stopping a search
+    // ---------------------------------------------------------------------------------------------
+
+    private val stopNow: () -> Boolean = { true }
+
+    /** A hook that lets [polls] polls pass and then asks to stop, so that a search is interrupted part-way. */
+    private fun stopAfter(polls: Int): () -> Boolean {
+        var seen = 0
+        return { ++seen > polls }
+    }
+
+    @Test
+    fun aStoppedStartHasNoWindowAndRemembersNothing() {
+        val stopped = RollingRunoutPlanner.start(nineBallLayout, nineBallRules, profile, 3, shouldStop = stopNow)
+        assertNull(stopped.window)
+        assertEquals(0, stopped.cache.size)
+        assertEquals(nineBallLayout, stopped.baseLayout)
+
+        assertEquals(listOf(1, 2, 3), targets(start().window), "The same call without a stop plans as usual")
+    }
+
+    @Test
+    fun everyOperationThatSearchesReturnsTheIncomingStateWhenStopped() {
+        val s0 = start()
+        val sizeBefore = s0.cache.size
+
+        assertSame(s0, RollingRunoutPlanner.acceptAndAdvance(s0, stopNow))
+        assertSame(s0, RollingRunoutPlanner.setOverride(s0, speedEdit(s0), stopNow))
+        assertSame(s0, RollingRunoutPlanner.withHorizon(s0, 2, shouldStop = stopNow))
+        assertSame(s0, RollingRunoutPlanner.rebase(s0, movedBall8(nineBallLayout), shouldStop = stopNow))
+
+        // With an empty memo the planner has to search, so the hook is consulted.
+        val edited = RollingRunoutPlanner.setOverride(s0, speedEdit(s0)).copy(cache = PlanCache.EMPTY)
+        assertSame(edited, RollingRunoutPlanner.clearOverride(edited, stopNow))
+        assertSame(edited, RollingRunoutPlanner.withDefaultFocusStep(edited, stopNow))
+
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(s0)
+        val resized = RollingRunoutPlanner.withHorizon(s1, 2)
+        assertTrue(resized.earlierViews.isEmpty(), "Precondition: Prev has to plan the reopened step afresh")
+        assertSame(resized, RollingRunoutPlanner.back(resized, stopNow))
+
+        assertEquals(sizeBefore, s0.cache.size)
+    }
+
+    @Test
+    fun aSearchInterruptedPartWayLeavesNoPartialResultInTheMemo() {
+        val s0 = start()
+        for (polls in listOf(1, 5, 25, 120)) {
+            val hook = stopAfter(polls)
+            val stopped = RollingRunoutPlanner.acceptAndAdvance(s0, hook)
+            assertSame(s0, stopped, "Stopped after $polls polls")
+        }
+        // Whatever the interrupted searches saw, a full search afterwards gives what a fresh session gives.
+        assertSamePlan(RollingRunoutPlanner.acceptAndAdvance(start()).window, RollingRunoutPlanner.acceptAndAdvance(s0).window)
+    }
+
+    @Test
+    fun aHookThatNeverStopsChangesNothing() {
+        var polls = 0
+        val counted = RollingRunoutPlanner.start(nineBallLayout, nineBallRules, profile, 3, shouldStop = { polls++; false })
+        assertTrue(polls > 0, "The search polls the hook")
+        assertSamePlan(start().window, counted.window)
+    }
+
+    /** Same shots, strokes and numbers (the heat zone is compared by identity, so it is left out). */
+    private fun assertSamePlan(expected: RunoutPlan?, actual: RunoutPlan?) {
+        val e = assertNotNull(expected)
+        val a = assertNotNull(actual)
+        assertEquals(e.steps.size, a.steps.size)
+        e.steps.zip(a.steps).forEach { (x, y) ->
+            assertTrue(sameChoice(x, y), "Step ${x.stepNumber}: ${x.targetBall.number} vs ${y.targetBall.number}")
+        }
+        assertEquals(e.cumulativeRunoutProbability, a.cumulativeRunoutProbability, 1e-12)
+        assertEquals(e.expectedValueScore, a.expectedValueScore, 1e-12)
+    }
+
+    @Test
+    fun deepAnalysisTailReportsTheProbabilityOfTheStepsThatRemain() {
+        fun product(steps: List<PlannedShotStep>): Double {
+            var p = 1.0
+            steps.forEachIndexed { i, step ->
+                p *= step.uncertainty.makeProbability * (1.0 - step.uncertainty.scratchProbability)
+                if (i < steps.lastIndex) p *= step.positionHoldProbability
+            }
+            return p
+        }
+        val s0 = RollingRunoutPlanner.start(lastThreeLayout, nineBallRules, profile, horizon = 1, deepAnalysis = true)
+        val whole = assertNotNull(s0.window)
+        assertEquals(whole.cumulativeRunoutProbability, product(whole.steps), 1e-9, "The documented definition")
+
+        val s1 = RollingRunoutPlanner.acceptAndAdvance(s0)
+        val tail = assertNotNull(s1.window)
+        assertEquals(2, tail.steps.size)
+        assertEquals(product(tail.steps), tail.cumulativeRunoutProbability, 1e-12)
+        assertTrue(tail.cumulativeRunoutProbability >= whole.cumulativeRunoutProbability - 1e-12, "Fewer steps never lower it")
+        assertTrue(tail.cumulativeRunoutProbability <= 1.0)
+
+        val s2 = RollingRunoutPlanner.acceptAndAdvance(s1)
+        assertEquals(product(assertNotNull(s2.window).steps), assertNotNull(s2.window).cumulativeRunoutProbability, 1e-12)
     }
 
     // ---------------------------------------------------------------------------------------------

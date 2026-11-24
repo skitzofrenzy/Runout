@@ -51,6 +51,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -147,8 +149,14 @@ fun RunoutVectorIcon(
     icon: RunoutIcon,
     tint: Color,
     modifier: Modifier = Modifier.size(22.dp),
+    contentDescription: String? = null,
 ) {
-    Canvas(modifier = modifier) {
+    val semanticsModifier = if (contentDescription != null) {
+        modifier.semantics { this.contentDescription = contentDescription }
+    } else {
+        modifier
+    }
+    Canvas(modifier = semanticsModifier) {
         val w = size.width
         val h = size.height
         val stroke = w * 0.095f
@@ -606,6 +614,7 @@ fun GlossaryInfoButton(
             icon = RunoutIcon.INFO,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(18.dp),
+            contentDescription = "More information",
         )
     }
 

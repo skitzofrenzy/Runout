@@ -84,7 +84,7 @@ data class BallSetProfile(
             15 to BallPaletteColor.BROWN,
         )
 
-        private val WNT_TOURNAMENT_BLACK_MAP: Map<Int, BallPaletteColor> = TV_TOURNAMENT_MAP + mapOf(
+        private val BROADCAST_BLACK_MAP: Map<Int, BallPaletteColor> = TV_TOURNAMENT_MAP + mapOf(
             5 to BallPaletteColor.PURPLE,
             13 to BallPaletteColor.PURPLE,
         )
@@ -118,9 +118,9 @@ data class BallSetProfile(
             numberToColor = TV_TOURNAMENT_MAP,
         )
 
-        fun wntTournamentBlackPool(): BallSetProfile = BallSetProfile(
-            name = "WNT Tournament Black",
-            numberToColor = WNT_TOURNAMENT_BLACK_MAP,
+        fun broadcastBlackPool(): BallSetProfile = BallSetProfile(
+            name = "Broadcast Black Set",
+            numberToColor = BROADCAST_BLACK_MAP,
         )
 
         fun ukBlackballPool(): BallSetProfile = BallSetProfile(
@@ -130,7 +130,7 @@ data class BallSetProfile(
 
         /**
          * Infers whether a detected set of ball palette colours comes from a UK Blackball
-         * (yellows `1..7` and reds `9..15`), WNT Tournament Black (`4 = PINK, 5 = PURPLE,
+         * (yellows `1..7` and reds `9..15`), Broadcast Black Set (`4 = PINK, 5 = PURPLE,
          * 7 = BROWN`), TV Tournament (`4 = PINK, 7 = BROWN`), or the caller's [defaultProfile].
          */
         fun inferFromDetectedColors(
@@ -155,7 +155,7 @@ data class BallSetProfile(
             val hasBrown = BallPaletteColor.BROWN in colors
             val hasOrange = BallPaletteColor.ORANGE in colors
             return when {
-                (hasPink && hasPurple) || (hasBrown && hasPurple && !hasOrange) -> wntTournamentBlackPool()
+                (hasPink && hasPurple) || (hasBrown && hasPurple && !hasOrange) -> broadcastBlackPool()
                 hasPink || hasBrown -> tvTournamentPool()
                 else -> defaultProfile
             }

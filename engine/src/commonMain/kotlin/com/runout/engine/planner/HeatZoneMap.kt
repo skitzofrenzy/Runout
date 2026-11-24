@@ -340,7 +340,7 @@ object HeatZoneGenerator {
                 table = table,
             )
             if (!aim.isShotPlayable) continue
-            val quality = shotQuality(aim, pocket, aimErrorStdRad)
+            val quality = shotQuality(aim, pocket, aimErrorStdRad, objectBalls)
             if (quality > best) best = quality
         }
         return best
@@ -349,10 +349,20 @@ object HeatZoneGenerator {
     /**
      * Probability in `0.0..1.0` that a shot with geometry [aim] pots into [pocket] for a player whose cue line has
      * standard deviation [aimErrorStdRad]: [ExecutionErrorModel.directionalMakeProbability] at the jaw tolerance of a
-     * ball arriving at [PocketGeometry.NOMINAL_ARRIVAL_SPEED_MPS] (a position map has no stroke to take a speed from).
-     * A closed window scores zero.
+     * ball arriving at [PocketGeometry.NOMINAL_ARRIVAL_SPEED_MPS], with [otherBalls] narrowing the window.
+     *
+     * This is the stroke-free form of the make probability, used where no stroke has been chosen yet: position maps,
+     * the next-shot and look-ahead values of the run-out search, and the next-ball term of [OneShotPlanner]. It leaves
+     * out what only a stroke decides (the speed, so whether the ball reaches the pocket and the jaw tolerance of its
+     * arrival; side spin and the error it adds). A planned shot's own probability is
+     * [ExecutionErrorModel.makeProbability]. A closed window scores zero.
      */
-    internal fun shotQuality(aim: AimGeometry, pocket: PocketSpec, aimErrorStdRad: Double): Double {
+    internal fun shotQuality(
+        aim: AimGeometry,
+        pocket: PocketSpec,
+        aimErrorStdRad: Double,
+        otherBalls: List<Ball> = emptyList(),
+    ): Double {
         val ballRadius = aim.objectBallPos.distanceTo(aim.ghostBallCenter) * 0.5
         return ExecutionErrorModel.directionalMakeProbability(
             aim = aim,
@@ -361,6 +371,7 @@ object HeatZoneGenerator {
             cueBallRadiusMeters = ballRadius,
             jawTolerance = PocketGeometry.jawTolerance(pocket, PocketGeometry.NOMINAL_ARRIVAL_SPEED_MPS),
             cueLineErrorStdRad = aimErrorStdRad,
+            otherBalls = otherBalls,
         )
     }
 }

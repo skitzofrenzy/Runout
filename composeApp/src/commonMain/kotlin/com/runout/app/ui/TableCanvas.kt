@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -69,6 +73,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.runout.app.navigation.PlatformBackHandler
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.Ball
 import com.runout.engine.model.BallPaletteColor
@@ -428,6 +433,8 @@ fun PoolTableCanvas(
         ?.index
         ?.takeIf { it in pathWaypoints.indices }
     val activeWaypointIndex = selectedWaypointIndex
+    // Back closes the open path inspector card before anything else on the screen reacts.
+    PlatformBackHandler(enabled = selectedWaypointIndex != null) { waypointSelection = null }
     var zoomScale by remember { mutableStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     var lastCanvasSize by remember { mutableStateOf(Size.Zero) }
@@ -448,9 +455,17 @@ fun PoolTableCanvas(
         panOffset = clampTablePanOffset(rawPan, clamped, center.x * 2f, center.y * 2f)
     }
 
+    // Current rectangle of the path inspector card (null while it is hidden), kept outside snapshot state because
+    // only the gesture loop reads it.
+    val calloutCardRect = remember { arrayOfNulls<Rect>(1) }
+
     val interactiveGestureModifier = Modifier.pointerInput(Unit) {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
+            // A press that starts on the card belongs to the card: it must not dismiss it, pick a waypoint or
+            // pocket, drag a ball or pan the table. The card also consumes pointer input itself; this guards the
+            // canvas in case an event still reaches it.
+            if (isPointOnCallout(calloutCardRect[0], down.position)) return@awaitEachGesture
             val cSize = Size(size.width.toFloat(), size.height.toFloat())
             val startLayout = latestLayout
             val startGeom = computeTableCanvasGeometry(cSize.width, cSize.height, startLayout.table)
@@ -466,9 +481,9 @@ fun PoolTableCanvas(
                         )
                         val dist = hypot(down.position.x - screenPos.x, down.position.y - screenPos.y)
                         val hitR = max(
-                            36f,
+                            BALL_HIT_MIN_RADIUS_DP.dp.toPx(),
                             (ball.radiusMeters * startGeom.pxPerMeter * zoomScale * 2.0).toFloat(),
-                        ).coerceAtMost(74f)
+                        ).coerceAtMost(BALL_HIT_MAX_RADIUS_DP.dp.toPx())
                         Triple(ball, dist, hitR)
                     }
                     .filter { (_, dist, hitR) -> dist <= hitR }
@@ -478,77 +493,93 @@ fun PoolTableCanvas(
                 null
             }
             val initialBallPosMeters = hitBall?.position
+            val touchSlop = viewConfiguration.touchSlop
+            // Screen position of the pressed ball; a drag moves it by the finger's displacement from the press.
+            val ballStartScreen = hitBall?.let { ball ->
+                baseToScreenCanvasOffset(startGeom.toCanvasOffset(ball.position), cSize, zoomScale, panOffset)
+            }
             var isBallDragging = false
+            var dragWasActive = false
             var isPanning = false
             var enteredPinch = false
             var maxSingleMovePx = 0f
             var lastSinglePos = down.position
 
-            while (true) {
-                val event = awaitPointerEvent()
-                val pressed = event.changes.filter { it.pressed }
-                if (pressed.isEmpty()) break
+            try {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val pressed = event.changes.filter { it.pressed }
+                    if (pressed.isEmpty()) break
 
-                if (pressed.size >= 2) {
-                    if (isBallDragging && maxSingleMovePx < viewConfiguration.touchSlop * 2.5f) {
-                        if (hitBall != null && initialBallPosMeters != null) {
-                            latestOnMoveBall?.invoke(hitBall.number, initialBallPosMeters)
-                        }
-                        isBallDragging = false
-                        activeDraggedBallNumber = null
-                        activeDragCanvasPos = null
-                        latestOnDragStateChanged?.invoke(false)
-                    }
-                    enteredPinch = true
-                    if (!isBallDragging) {
-                        val zoomChange = event.calculateZoom()
-                        val panChange = event.calculatePan()
-                        val centroid = event.calculateCentroid(useCurrent = false)
-                        val oldZoom = zoomScale
-                        val newZoom = (oldZoom * zoomChange).coerceIn(MIN_TABLE_ZOOM, MAX_TABLE_ZOOM)
-                        val center = Offset(cSize.width * 0.5f, cSize.height * 0.5f)
-                        val focal = if (centroid != Offset.Unspecified) centroid else center
-                        val rel = focal - center
-                        val rawPan = rel + panChange - (rel - panOffset) * (newZoom / oldZoom.coerceAtLeast(1f))
-                        zoomScale = newZoom
-                        panOffset = clampTablePanOffset(rawPan, newZoom, cSize.width, cSize.height)
-                        event.changes.forEach { if (it.positionChanged()) it.consume() }
-                    }
-                } else if (!enteredPinch) {
-                    val change = pressed.first()
-                    lastSinglePos = change.position
-                    val totalMove = (change.position - down.position).getDistance()
-                    if (totalMove > maxSingleMovePx) maxSingleMovePx = totalMove
-
-                    if (hitBall != null && latestOnMoveBall != null) {
-                        if (maxSingleMovePx > viewConfiguration.touchSlop * 0.45f) {
-                            if (!isBallDragging) {
-                                isBallDragging = true
-                                activeDraggedBallNumber = hitBall.number
-                                latestOnDragStateChanged?.invoke(true)
+                    if (pressed.size >= 2) {
+                        if (isBallDragging && maxSingleMovePx < touchSlop * 2.5f) {
+                            if (hitBall != null && initialBallPosMeters != null) {
+                                latestOnMoveBall?.invoke(hitBall.number, initialBallPosMeters)
                             }
-                            change.consume()
-                            activeDragCanvasPos = change.position
-                            val curGeom = computeTableCanvasGeometry(cSize.width, cSize.height, latestLayout.table)
-                            val baseOffset = screenToBaseCanvasOffset(change.position, cSize, zoomScale, panOffset)
-                            latestOnMoveBall?.invoke(hitBall.number, curGeom.toTableMeters(baseOffset))
+                            isBallDragging = false
+                            activeDraggedBallNumber = null
+                            activeDragCanvasPos = null
+                            latestOnDragStateChanged?.invoke(false)
                         }
-                    } else if (zoomScale > 1.01f) {
-                        if (maxSingleMovePx > viewConfiguration.touchSlop * 0.6f) {
-                            isPanning = true
-                            val delta = change.position - change.previousPosition
-                            change.consume()
-                            panOffset = clampTablePanOffset(panOffset + delta, zoomScale, cSize.width, cSize.height)
+                        enteredPinch = true
+                        if (!isBallDragging) {
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+                            val centroid = event.calculateCentroid(useCurrent = false)
+                            val oldZoom = zoomScale
+                            val newZoom = (oldZoom * zoomChange).coerceIn(MIN_TABLE_ZOOM, MAX_TABLE_ZOOM)
+                            val center = Offset(cSize.width * 0.5f, cSize.height * 0.5f)
+                            val focal = if (centroid != Offset.Unspecified) centroid else center
+                            val rel = focal - center
+                            val rawPan = rel + panChange - (rel - panOffset) * (newZoom / oldZoom.coerceAtLeast(1f))
+                            zoomScale = newZoom
+                            panOffset = clampTablePanOffset(rawPan, newZoom, cSize.width, cSize.height)
+                            event.changes.forEach { if (it.positionChanged()) it.consume() }
+                        }
+                    } else if (!enteredPinch) {
+                        val change = pressed.first()
+                        lastSinglePos = change.position
+                        val totalMove = (change.position - down.position).getDistance()
+                        if (totalMove > maxSingleMovePx) maxSingleMovePx = totalMove
+
+                        if (hitBall != null && latestOnMoveBall != null && ballStartScreen != null) {
+                            // The same threshold separates a tap from a drag, so a wobbling tap never moves a ball.
+                            if (isBallDragging || maxSingleMovePx > touchSlop) {
+                                if (!isBallDragging) {
+                                    isBallDragging = true
+                                    activeDraggedBallNumber = hitBall.number
+                                    latestOnDragStateChanged?.invoke(true)
+                                }
+                                change.consume()
+                                activeDragCanvasPos = change.position
+                                val curGeom = computeTableCanvasGeometry(cSize.width, cSize.height, latestLayout.table)
+                                val target = ballStartScreen + (change.position - down.position)
+                                val baseOffset = screenToBaseCanvasOffset(target, cSize, zoomScale, panOffset)
+                                latestOnMoveBall?.invoke(hitBall.number, curGeom.toTableMeters(baseOffset))
+                            }
+                        } else if (zoomScale > 1.01f) {
+                            if (maxSingleMovePx > touchSlop * 0.6f) {
+                                isPanning = true
+                                val delta = change.position - change.previousPosition
+                                change.consume()
+                                panOffset = clampTablePanOffset(panOffset + delta, zoomScale, cSize.width, cSize.height)
+                            }
                         }
                     }
                 }
+            } finally {
+                // Runs on release, cancellation and when the canvas leaves composition mid-drag, so the
+                // application's dragging flag cannot stay set.
+                if (isBallDragging) {
+                    dragWasActive = true
+                    isBallDragging = false
+                    activeDraggedBallNumber = null
+                    activeDragCanvasPos = null
+                    latestOnDragStateChanged?.invoke(false)
+                }
             }
 
-            if (isBallDragging) {
-                activeDraggedBallNumber = null
-                activeDragCanvasPos = null
-                latestOnDragStateChanged?.invoke(false)
-            } else if (!enteredPinch && !isPanning && maxSingleMovePx <= viewConfiguration.touchSlop && !down.isConsumed) {
+            if (!dragWasActive && !enteredPinch && !isPanning && maxSingleMovePx <= touchSlop && !down.isConsumed) {
                 val activeLayout = latestLayout
                 val curGeom = computeTableCanvasGeometry(cSize.width, cSize.height, activeLayout.table)
                 var handledTap = false
@@ -563,9 +594,9 @@ fun PoolTableCanvas(
                         )
                         val cueDist = hypot(lastSinglePos.x - cueScreen.x, lastSinglePos.y - cueScreen.y)
                         val cueHitR = max(
-                            40f,
+                            CUE_BALL_HIT_MIN_RADIUS_DP.dp.toPx(),
                             (cueBall.radiusMeters * curGeom.pxPerMeter * zoomScale * 2.3).toFloat(),
-                        ).coerceAtMost(80f)
+                        ).coerceAtMost(CUE_BALL_HIT_MAX_RADIUS_DP.dp.toPx())
                         if (cueDist <= cueHitR) {
                             latestOnTapCueBall?.invoke()
                             handledTap = true
@@ -610,8 +641,9 @@ fun PoolTableCanvas(
                     } else {
                         null
                     }
-                    // Priority: ball, then path waypoint, then pocket. A waypoint only gives way to a pocket
-                    // when the tap is strictly closer to that pocket's centre than to the waypoint.
+                    // Only a tap on the cue ball is handled above; a tap on any other ball falls through to the
+                    // path waypoint and pocket choice below. A waypoint gives way to a pocket only when the tap
+                    // is strictly closer to that pocket's centre than to the waypoint.
                     if (waypointHit != null && (pocketHit == null || waypointHit.second <= pocketHit.second)) {
                         waypointSelection = PathWaypointSelection(wps, waypointHit.first)
                         handledTap = true
@@ -940,8 +972,8 @@ fun PoolTableCanvas(
                 ) {
                     Text(
                         text = "ⓘ Path physics",
-                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
-                        fontSize = 10.sp,
+                        modifier = Modifier.padding(horizontal = RunoutSpacing.Element, vertical = RunoutSpacing.Micro),
+                        style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = RunoutColors.PrimaryCyan,
                     )
@@ -965,6 +997,20 @@ fun PoolTableCanvas(
                 index = tooltipIdx,
                 count = pathWaypoints.size,
                 anchor = anchor,
+                otherAnchors = pathWaypoints.mapIndexedNotNull { i, other ->
+                    if (i == tooltipIdx || other.kind == PathWaypointKind.CUE_START) {
+                        null
+                    } else {
+                        baseToScreenCanvasOffset(
+                            geomNow.toCanvasOffset(other.position),
+                            lastCanvasSize,
+                            zoomScale,
+                            panOffset,
+                        )
+                    }
+                },
+                ringRadiusPx = markerRingRadiusPx((table.ballRadiusMeters * geomNow.pxPerMeter).toFloat()) * zoomScale,
+                onCardPlaced = { calloutCardRect[0] = it },
                 onPrev = {
                     waypointSelection = PathWaypointSelection(pathWaypoints, (tooltipIdx - 1).coerceAtLeast(0))
                 },
@@ -979,6 +1025,14 @@ fun PoolTableCanvas(
         }
     }
 }
+
+/** Smallest and largest touch radius, in dp, that grabs a ball (grows with the ball on a zoomed table). */
+private const val BALL_HIT_MIN_RADIUS_DP: Float = 24f
+private const val BALL_HIT_MAX_RADIUS_DP: Float = 48f
+
+/** Smallest and largest touch radius, in dp, for a tap on the cue ball. */
+private const val CUE_BALL_HIT_MIN_RADIUS_DP: Float = 28f
+private const val CUE_BALL_HIT_MAX_RADIUS_DP: Float = 52f
 
 /** Radius, in dp, within which a tap selects a path waypoint. */
 internal const val PATH_WAYPOINT_TAP_RADIUS_DP: Float = 24f
@@ -1019,20 +1073,26 @@ private fun pathWaypointColor(kind: PathWaypointKind): Color = when (kind) {
     PathWaypointKind.SCRATCH -> ScratchWarningColor
 }
 
+/** Radius of a path waypoint marker dot, before zoom. */
+private fun markerRadiusPx(ballRadiusPx: Float): Float = max(4.2f, ballRadiusPx * 0.30f)
+
+/** Radius of the highlight ring around the selected marker, before zoom. */
+private fun markerRingRadiusPx(ballRadiusPx: Float): Float = markerRadiusPx(ballRadiusPx) * 2.6f
+
 private fun DrawScope.drawPathWaypointMarkers(
     waypoints: List<PathWaypoint>,
     selectedIndex: Int?,
     ballRadiusPx: Float,
     toCanvasOffset: (Vec2) -> Offset,
 ) {
-    val r = max(4.2f, ballRadiusPx * 0.30f)
+    val r = markerRadiusPx(ballRadiusPx)
     for ((i, wp) in waypoints.withIndex()) {
         if (wp.kind == PathWaypointKind.CUE_START) continue
         val c = toCanvasOffset(wp.position)
         val color = pathWaypointColor(wp.kind)
         if (i == selectedIndex) {
-            drawCircle(color = color.copy(alpha = 0.28f), radius = r * 2.6f, center = c)
-            drawCircle(color = color, radius = r * 2.6f, center = c, style = Stroke(width = max(1.6f, r * 0.35f)))
+            drawCircle(color = color.copy(alpha = 0.28f), radius = markerRingRadiusPx(ballRadiusPx), center = c)
+            drawCircle(color = color, radius = markerRingRadiusPx(ballRadiusPx), center = c, style = Stroke(width = max(1.6f, r * 0.35f)))
         }
         drawCircle(color = Color(0xE6090D12), radius = r + max(1.4f, r * 0.30f), center = c)
         drawCircle(color = color, radius = r, center = c)
@@ -1362,9 +1422,149 @@ internal fun describePathWaypoint(
     }
 }
 
+/** Where the path inspector card goes, and the leader line that joins it to its point. */
+internal data class CalloutPlacement(
+    /** The card's rectangle in canvas pixels. */
+    val card: Rect,
+    /** Leader line start: the point on the card's edge nearest to the marker. */
+    val leaderStart: Offset,
+    /** Leader line end: on the marker's ring, outside the card. */
+    val leaderEnd: Offset,
+)
+
+/** True when [point] lies on the placed card, so the press belongs to the card and not to the table below. */
+internal fun isPointOnCallout(card: Rect?, point: Offset): Boolean = card != null && card.contains(point)
+
+private enum class CalloutSide { ABOVE, BELOW, LEFT, RIGHT }
+
 /**
- * Path inspector callout: a card anchored to a point on the table with a title, up to three short lines and
- * Back / Next / Close buttons that each have a 48 dp touch target.
+ * Chooses where the path inspector card goes so that it never covers [anchor] (the selected marker).
+ *
+ * The card keeps [gap] (at least [clearance], which is the marker's ring plus some air) between its edge and the
+ * anchor, and stays inside the canvas by [margin]. Sides are tried in the order above, below, left, right:
+ * 1. a side with room for the whole card, preferring the one that puts the fewest [others] (the shot's other
+ *    waypoints) under the card, ties going to the earlier side;
+ * 2. otherwise the card shrinks (its body scrolls) to a height of at least [minHeight] above or below, or a width
+ *    of at least [minWidth] left or right, on the side with the most room;
+ * 3. as a last resort, on a canvas too small for either, it docks to the canvas edge farthest from the anchor.
+ *
+ * [measure] returns the card's size for a width and a maximum height (the card is laid out at exactly that width).
+ */
+internal fun placeCallout(
+    canvas: Size,
+    anchor: Offset,
+    others: List<Offset>,
+    ringRadius: Float,
+    clearance: Float,
+    gap: Float,
+    margin: Float,
+    maxWidth: Float,
+    minWidth: Float,
+    minHeight: Float,
+    measure: (width: Float, maxHeight: Float) -> Size,
+): CalloutPlacement {
+    val a = Offset(anchor.x.coerceIn(0f, canvas.width), anchor.y.coerceIn(0f, canvas.height))
+    val offset = max(gap, clearance) + 1f
+    val availW = (canvas.width - 2f * margin).coerceAtLeast(1f)
+    val availH = (canvas.height - 2f * margin).coerceAtLeast(1f)
+    val fullW = min(maxWidth, availW)
+
+    fun room(side: CalloutSide): Float = when (side) {
+        CalloutSide.ABOVE -> a.y - offset - margin
+        CalloutSide.BELOW -> canvas.height - a.y - offset - margin
+        CalloutSide.LEFT -> a.x - offset - margin
+        CalloutSide.RIGHT -> canvas.width - a.x - offset - margin
+    }
+
+    fun rectFor(side: CalloutSide, size: Size): Rect {
+        val w = size.width
+        val h = size.height
+        val centredLeft = (a.x - w / 2f).coerceIn(margin, max(margin, canvas.width - margin - w))
+        val centredTop = (a.y - h / 2f).coerceIn(margin, max(margin, canvas.height - margin - h))
+        return when (side) {
+            CalloutSide.ABOVE -> Rect(centredLeft, a.y - offset - h, centredLeft + w, a.y - offset)
+            CalloutSide.BELOW -> Rect(centredLeft, a.y + offset, centredLeft + w, a.y + offset + h)
+            CalloutSide.LEFT -> Rect(a.x - offset - w, centredTop, a.x - offset, centredTop + h)
+            CalloutSide.RIGHT -> Rect(a.x + offset, centredTop, a.x + offset + w, centredTop + h)
+        }
+    }
+
+    fun finish(card: Rect): CalloutPlacement {
+        val start = Offset(a.x.coerceIn(card.left, card.right), a.y.coerceIn(card.top, card.bottom))
+        val dx = start.x - a.x
+        val dy = start.y - a.y
+        val dist = hypot(dx, dy)
+        val end = if (dist > 1e-3f) {
+            val reach = min(ringRadius, dist * 0.5f)
+            Offset(a.x + dx / dist * reach, a.y + dy / dist * reach)
+        } else {
+            a
+        }
+        return CalloutPlacement(card, start, end)
+    }
+
+    val sides = CalloutSide.entries
+
+    // 1. A side that holds the whole card.
+    val whole = measure(fullW, availH)
+    val fitting = sides.filter { side ->
+        when (side) {
+            CalloutSide.ABOVE, CalloutSide.BELOW -> whole.height <= room(side)
+            CalloutSide.LEFT, CalloutSide.RIGHT -> whole.width <= room(side)
+        }
+    }
+    fitting.minByOrNull { side -> rectFor(side, whole).let { r -> others.count { r.contains(it) } } }
+        ?.let { return finish(rectFor(it, whole)) }
+
+    // 2. A shrunken card on the side with the most room.
+    var best: Pair<CalloutSide, Size>? = null
+    var bestRoom = 0f
+    for (side in sides) {
+        val r = room(side)
+        val size = when (side) {
+            CalloutSide.ABOVE, CalloutSide.BELOW ->
+                if (r >= minHeight) measure(fullW, r).let { Size(it.width, min(it.height, r)) } else null
+            CalloutSide.LEFT, CalloutSide.RIGHT ->
+                if (r >= minWidth) measure(min(fullW, r), availH).let { Size(min(it.width, r), it.height) } else null
+        }
+        if (size != null && r > bestRoom) {
+            best = side to size
+            bestRoom = r
+        }
+    }
+    best?.let { (side, size) -> return finish(rectFor(side, size)) }
+
+    // 3. Dock to the canvas edge farthest from the anchor.
+    val w = whole.width
+    val h = whole.height
+    val left = (a.x - w / 2f).coerceIn(margin, max(margin, canvas.width - margin - w))
+    val top = (a.y - h / 2f).coerceIn(margin, max(margin, canvas.height - margin - h))
+    val farthest = listOf(
+        CalloutSide.ABOVE to a.y,
+        CalloutSide.BELOW to canvas.height - a.y,
+        CalloutSide.LEFT to a.x,
+        CalloutSide.RIGHT to canvas.width - a.x,
+    ).maxByOrNull { it.second }?.first ?: CalloutSide.ABOVE
+    return finish(
+        when (farthest) {
+            CalloutSide.ABOVE -> Rect(left, margin, left + w, margin + h)
+            CalloutSide.BELOW -> Rect(left, canvas.height - margin - h, left + w, canvas.height - margin)
+            CalloutSide.LEFT -> Rect(margin, top, margin + w, top + h)
+            CalloutSide.RIGHT -> Rect(canvas.width - margin - w, top, canvas.width - margin, top + h)
+        },
+    )
+}
+
+private const val CALLOUT_MAX_WIDTH_DP: Float = 280f
+private const val CALLOUT_MIN_WIDTH_DP: Float = 144f
+private const val CALLOUT_MIN_HEIGHT_DP: Float = 128f
+private const val CALLOUT_GAP_DP: Float = 24f
+private const val CALLOUT_CLEARANCE_DP: Float = 12f
+
+/**
+ * Path inspector callout: a card with a title, up to three short lines and Back / Next / Close buttons that each
+ * have a 48 dp touch target. It is placed by [placeCallout] so it never covers [anchor], and a leader line joins
+ * it to the marker's ring.
  */
 @Composable
 private fun PathWaypointCallout(
@@ -1373,114 +1573,172 @@ private fun PathWaypointCallout(
     index: Int,
     count: Int,
     anchor: Offset,
+    otherAnchors: List<Offset>,
+    ringRadiusPx: Float,
+    onCardPlaced: (Rect?) -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onClose: () -> Unit,
 ) {
     val density = LocalDensity.current
+    val colors = MaterialTheme.colorScheme
+    // Written while laying out and read while drawing, so the line always matches the card's actual position.
+    var placement by remember { mutableStateOf<CalloutPlacement?>(null) }
+    val lastPlacement = remember { arrayOfNulls<CalloutPlacement>(1) }
+    val latestOnCardPlaced by rememberUpdatedState(onCardPlaced)
+    DisposableEffect(Unit) { onDispose { latestOnCardPlaced(null) } }
+    val halo = RunoutColors.Background.copy(alpha = 0.9f)
     Layout(
         content = {
             Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = Color(0xF20F1720),
+                // Takes every press that starts on the card, so nothing underneath reacts to it; the buttons and
+                // the scrolling body inside still get their own events first.
+                modifier = Modifier.pointerInput(Unit) { awaitEachGesture { awaitFirstDown(requireUnconsumed = false) } },
+                shape = RoundedCornerShape(RunoutSpacing.Card),
+                color = colors.surface.copy(alpha = 0.96f),
                 border = BorderStroke(1.dp, accent.copy(alpha = 0.85f)),
                 shadowElevation = 6.dp,
             ) {
                 Column(
-                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier.padding(start = RunoutSpacing.Card, end = RunoutSpacing.Element),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .size(8.dp)
+                                .size(RunoutSpacing.Element)
                                 .background(accent, RoundedCornerShape(50)),
                         )
                         Text(
                             text = card.title,
-                            modifier = Modifier.padding(start = 6.dp),
-                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(horizontal = RunoutSpacing.Element),
+                            style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
-                            color = Color(0xFFF8FAFC),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    for (line in card.lines.take(3)) {
-                        Text(
-                            text = line,
-                            fontSize = 10.5.sp,
-                            lineHeight = 13.sp,
-                            color = Color(0xFFCBD5E1),
+                            color = colors.onSurface,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        CalloutButton(label = "Close", enabled = true, onClick = onClose)
+                    }
+                    // The lines take the height they need; a very tall card scrolls here, so the title row
+                    // and the navigation row stay in reach.
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Micro),
+                    ) {
+                        for (line in card.lines.take(3)) {
+                            Text(
+                                text = line,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Micro),
                     ) {
-                        CalloutButton(label = "‹ Back", enabled = index > 0, onClick = onPrev)
+                        CalloutButton(
+                            label = "‹ Back",
+                            enabled = index > 0,
+                            onClick = onPrev,
+                            modifier = Modifier.weight(1f),
+                        )
                         Text(
                             text = "${index + 1} / $count",
-                            fontSize = 10.sp,
+                            style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFF94A3B8),
+                            color = colors.onSurfaceVariant,
                         )
-                        CalloutButton(label = "Next ›", enabled = index < count - 1, onClick = onNext)
-                        CalloutButton(label = "Close", enabled = true, onClick = onClose)
+                        CalloutButton(
+                            label = "Next ›",
+                            enabled = index < count - 1,
+                            onClick = onNext,
+                            modifier = Modifier.weight(1f),
+                        )
                     }
                 }
             }
         },
-        modifier = Modifier.fillMaxSize(),
+        // Drawn behind the card and above the table, which is a sibling underneath.
+        modifier = Modifier
+            .fillMaxSize()
+            .drawBehind {
+                val p = placement ?: return@drawBehind
+                val haloWidth = 4.dp.toPx()
+                val lineWidth = 2.dp.toPx()
+                drawLine(halo, p.leaderStart, p.leaderEnd, strokeWidth = haloWidth, cap = StrokeCap.Round)
+                drawLine(accent, p.leaderStart, p.leaderEnd, strokeWidth = lineWidth, cap = StrokeCap.Round)
+                drawCircle(halo, radius = 4.5.dp.toPx(), center = p.leaderStart)
+                drawCircle(accent, radius = 3.dp.toPx(), center = p.leaderStart)
+            },
     ) { measurables, constraints ->
-        val margin = with(density) { 6.dp.roundToPx() }
-        val gap = with(density) { 14.dp.roundToPx() }
         val fullW = constraints.maxWidth
         val fullH = constraints.maxHeight
-        val cardW = minOf(fullW - 2 * margin, with(density) { 280.dp.roundToPx() }).coerceAtLeast(1)
-        val placeable = measurables.first().measure(
-            Constraints(minWidth = cardW, maxWidth = cardW, minHeight = 0, maxHeight = fullH.coerceAtLeast(1)),
+        val measurable = measurables.first()
+        val result = placeCallout(
+            canvas = Size(fullW.toFloat(), fullH.toFloat()),
+            anchor = anchor,
+            others = otherAnchors,
+            ringRadius = ringRadiusPx,
+            clearance = ringRadiusPx + CALLOUT_CLEARANCE_DP.dp.toPx(),
+            gap = CALLOUT_GAP_DP.dp.toPx(),
+            margin = RunoutSpacing.Element.toPx(),
+            maxWidth = CALLOUT_MAX_WIDTH_DP.dp.toPx(),
+            minWidth = CALLOUT_MIN_WIDTH_DP.dp.toPx(),
+            minHeight = CALLOUT_MIN_HEIGHT_DP.dp.toPx(),
+        ) { width, maxHeight ->
+            val w = width.toInt().coerceAtLeast(1)
+            val p = measurable.measure(
+                Constraints(minWidth = w, maxWidth = w, minHeight = 0, maxHeight = maxHeight.toInt().coerceAtLeast(1)),
+            )
+            Size(p.width.toFloat(), p.height.toFloat())
+        }
+        // Measure once more at exactly the chosen size, so the placed card is the one the rectangle describes.
+        val chosenW = result.card.width.toInt().coerceAtLeast(1)
+        val placeable = measurable.measure(
+            Constraints(
+                minWidth = chosenW,
+                maxWidth = chosenW,
+                minHeight = 0,
+                maxHeight = result.card.height.toInt().coerceAtLeast(1),
+            ),
         )
+        if (lastPlacement[0] != result) {
+            lastPlacement[0] = result
+            latestOnCardPlaced(result.card)
+            placement = result
+        }
         layout(fullW, fullH) {
-            val ax = anchor.x.coerceIn(0f, fullW.toFloat())
-            val ay = anchor.y.coerceIn(0f, fullH.toFloat())
-            val x = (ax - placeable.width / 2f).roundToInt()
-                .coerceIn(margin, (fullW - placeable.width - margin).coerceAtLeast(margin))
-            val above = (ay - gap - placeable.height).roundToInt()
-            val below = (ay + gap).roundToInt()
-            val y = when {
-                above >= margin -> above
-                below + placeable.height <= fullH - margin -> below
-                ay > fullH / 2f -> margin
-                else -> (fullH - placeable.height - margin).coerceAtLeast(0)
-            }
-            placeable.place(x, y)
+            placeable.place(result.card.left.roundToInt(), result.card.top.roundToInt())
         }
     }
 }
 
 /** Text button with a 48 dp touch target around a smaller visible pill. */
 @Composable
-private fun CalloutButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun CalloutButton(label: String, enabled: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
     Box(
-        modifier = Modifier
-            .defaultMinSize(minWidth = 56.dp, minHeight = 48.dp)
+        modifier = modifier
+            .defaultMinSize(minWidth = RunoutSpacing.MinTouchTarget, minHeight = RunoutSpacing.MinTouchTarget)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Surface(
-            shape = RoundedCornerShape(6.dp),
-            color = if (enabled) Color(0xFF1E293B) else Color(0x661E293B),
+            shape = RoundedCornerShape(RunoutSpacing.Element),
+            color = if (enabled) colors.surfaceVariant else colors.surfaceVariant.copy(alpha = 0.4f),
         ) {
             Text(
                 text = label,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = RunoutSpacing.Element, vertical = RunoutSpacing.Micro),
+                style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = if (enabled) Color(0xFFE2E8F0) else Color(0xFF64748B),
+                color = if (enabled) colors.onSurface else colors.onSurfaceVariant.copy(alpha = 0.6f),
             )
         }
     }

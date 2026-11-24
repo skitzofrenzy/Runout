@@ -10,11 +10,16 @@ import com.runout.engine.model.PlayerProfile
 import com.runout.engine.model.ShaftType
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
+import com.runout.engine.planner.MultiShotPlanner
 import com.runout.engine.planner.PlannedShotStep
 import com.runout.engine.planner.RunoutPlan
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.roundToInt
+import kotlin.random.Random
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 /**
  * Typed-in table layouts for the planner scenarios. Coordinates are table metres on a 9 ft table: `x` from the head
@@ -185,6 +190,80 @@ internal object PlannerScenarios {
         8 to (1.9222 at 0.8200),
         9 to (1.7344 at 0.6363),
     )
+
+    /**
+     * Balls [numbers] (the first is usually the cue ball) placed uniformly at random, from [seed], at least a centimetre
+     * from the cushions and half a centimetre apart.
+     */
+    fun randomLayout(seed: Int, numbers: List<Int>): TableLayout {
+        val random = Random(seed)
+        val placed = ArrayList<Ball>()
+        for (n in numbers) {
+            while (true) {
+                val p = Vec2(
+                    random.nextDouble(r + 0.01, table.lengthMeters - r - 0.01),
+                    random.nextDouble(r + 0.01, table.widthMeters - r - 0.01),
+                )
+                if (placed.none { it.position.distanceTo(p) < 2.0 * r + 0.005 }) {
+                    placed += Ball(number = n, position = p, radiusMeters = r)
+                    break
+                }
+            }
+        }
+        return TableLayout(table, placed)
+    }
+
+    /** Fifteen object balls and the cue ball spread over the table: an open 8-ball table after a break. */
+    val openFifteen: TableLayout = randomLayout(77, (0..15).toList())
+
+    /**
+     * Checks what every plan from [layout] under [rules] must satisfy, with [why] in the messages: steps numbered from
+     * one; each target legal on the table the step before left, under the rules after the pots before it; each step
+     * legal as planned (pots its ball in the called pocket, drops nothing else); probabilities in `0..1`; the reported
+     * probability equal to its definition (makes, scratches and the holds of all steps but the last) and never above
+     * the product of makes; the ranking value never above the probability with the last hold.
+     */
+    fun assertPlanInvariants(plan: RunoutPlan, layout: TableLayout, rules: GameRulesState, why: String = describe(plan)) {
+        assertTrue(plan.steps.isNotEmpty(), "A plan has steps: $why")
+        var table = layout
+        var currentRules = rules
+        var product = 1.0
+        var expected = 1.0
+        for ((index, step) in plan.steps.withIndex()) {
+            assertEquals(index + 1, step.stepNumber, "Steps are numbered in order: $why")
+            assertTrue(
+                currentRules.legalTargetBalls(table).any { it.number == step.targetBall.number },
+                "Step ${step.stepNumber} targets a legal ball (#${step.targetBall.number}): $why",
+            )
+            assertTrue(step.legalAsPlanned, "Step ${step.stepNumber} is legal as planned: $why")
+            assertTrue(step.uncertainty.targetBallPotted, "Step ${step.stepNumber} pots its ball in the called pocket: $why")
+            val u = step.uncertainty
+            for ((name, p) in listOf("make" to u.makeProbability, "scratch" to u.scratchProbability, "hold" to step.positionHoldProbability)) {
+                assertTrue(p in 0.0..1.0, "Step ${step.stepNumber} $name probability $p in 0..1: $why")
+            }
+            step.positionSuccessProbability?.let { assertTrue(it in 0.0..1.0, "Position probability $it: $why") }
+            val after = assertNotNull(step.resultingLayout, "Step ${step.stepNumber} has a resulting table: $why")
+            assertEquals(
+                table.objectBalls().map { it.number }.toSet() - step.targetBall.number,
+                after.objectBalls().map { it.number }.toSet(),
+                "Step ${step.stepNumber} removes its ball and nothing else: $why",
+            )
+            val stepProbability = u.makeProbability * (1.0 - u.scratchProbability)
+            product *= stepProbability
+            expected *= stepProbability
+            if (index < plan.steps.lastIndex) expected *= step.positionHoldProbability
+            table = after
+            currentRules = MultiShotPlanner.rulesAfterPotting(currentRules, step.targetBall)
+        }
+        assertTrue(plan.cumulativeRunoutProbability in 0.0..1.0, "Probability in 0..1: $why")
+        assertEquals(expected, plan.cumulativeRunoutProbability, 1e-9, "Probability matches its definition: $why")
+        assertTrue(plan.cumulativeRunoutProbability <= product + 1e-12, "Never above the product of makes: $why")
+        val lastHold = plan.steps.last().positionHoldProbability
+        assertTrue(
+            plan.expectedValueScore <= plan.cumulativeRunoutProbability * lastHold + 1e-12,
+            "The ranking value is the probability times factors of at most one: $why",
+        )
+    }
 
     // ---------------------------------------------------------------------------------------------
     // Reading a plan

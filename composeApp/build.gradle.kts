@@ -61,18 +61,99 @@ abstract class GenerateLegalDocumentsTask : DefaultTask() {
     }
 }
 
+/**
+ * Fails when a bracketed placeholder is still visible in the legal documents the app would show, i.e. after the
+ * values in `LegalConfig.kt` have been substituted. It runs only as part of release builds.
+ *
+ * The substitution itself lives in `LegalConfig.applyPlaceholders`; this task does not copy it. It reads the
+ * placeholder texts and the configured values straight out of `LegalConfig.kt` with a deliberately simple parse
+ * (see [readString]): each is one `val NAME: String? = "..."` or `= null` declaration, or one
+ * `const val NAME: String = "..."` declaration, with a plain string literal. Keep them in that shape.
+ */
+abstract class VerifyLegalPlaceholdersTask : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val legalConfigFile: RegularFileProperty
+
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val legalDirectory: DirectoryProperty
+
+    @get:Input
+    abstract val documentPaths: ListProperty<String>
+
+    /** The value of `val|const val NAME ... = "..."` in [source], `null` for `= null`, or fails if absent. */
+    private fun readString(source: String, name: String): String? {
+        val pattern = Regex("""val\s+$name\s*:\s*String\??\s*=\s*(null|"((?:[^"\\]|\\.)*)")""")
+        val match = pattern.find(source)
+            ?: throw GradleException("Could not find '$name' in LegalConfig.kt; keep it a plain string or null.")
+        val literal = match.groups[2]?.value ?: return null
+        return literal.replace("\\\"", "\"").replace("\\\\", "\\")
+    }
+
+    @TaskAction
+    fun verify() {
+        val source = legalConfigFile.get().asFile.readText(Charsets.UTF_8)
+        // Same rule as LegalConfig.applyPlaceholders: a blank or null value leaves its placeholder in place.
+        val substitutions = listOf(
+            "DEVELOPER_NAME" to "DEVELOPER_NAME_PLACEHOLDER",
+            "EFFECTIVE_DATE" to "EFFECTIVE_DATE_PLACEHOLDER",
+            "PROPRIETOR_LEGAL_NAME" to "PROPRIETOR_LEGAL_NAME_PLACEHOLDER",
+        ).map { (valueName, placeholderName) ->
+            Triple(valueName, readString(source, placeholderName)!!, readString(source, valueName))
+        }
+        val root = legalDirectory.get().asFile
+        val unresolved = sortedSetOf<String>()
+        val unsetValues = sortedSetOf<String>()
+        for (path in documentPaths.get()) {
+            var text = root.resolve(path).readText(Charsets.UTF_8)
+            for ((valueName, placeholder, value) in substitutions) {
+                if (!value.isNullOrBlank()) text = text.replace(placeholder, value)
+                if (text.contains(placeholder)) {
+                    unresolved += "$placeholder in docs/legal/$path"
+                    unsetValues += valueName
+                }
+            }
+        }
+        if (unresolved.isNotEmpty()) {
+            throw GradleException(
+                "Release build stopped: the legal documents still contain placeholders.\n" +
+                    unresolved.joinToString("\n") { "  - $it" } + "\n" +
+                    "Set ${unsetValues.joinToString(", ")} in " +
+                    "composeApp/src/commonMain/kotlin/com/runout/app/legal/LegalConfig.kt " +
+                    "(and read docs/legal/store-declarations.md section 7) before building a release.",
+            )
+        }
+    }
+}
+
+val legalDocumentPaths = listOf(
+    "terms-of-use.md",
+    "privacy-policy.md",
+    "third-party-notices.md",
+    "licenses/Apache-2.0.txt",
+    "licenses/BSD-3-Clause-Skia.txt",
+)
+
 val generateLegalDocuments = tasks.register<GenerateLegalDocumentsTask>("generateLegalDocuments") {
     legalDirectory.set(rootProject.layout.projectDirectory.dir("docs/legal"))
-    documentPaths.set(
-        listOf(
-            "terms-of-use.md",
-            "privacy-policy.md",
-            "third-party-notices.md",
-            "licenses/Apache-2.0.txt",
-            "licenses/BSD-3-Clause-Skia.txt",
-        ),
-    )
+    documentPaths.set(legalDocumentPaths)
     outputDirectory.set(layout.buildDirectory.dir("generated/legal/commonMain/kotlin"))
+}
+
+val verifyLegalPlaceholders = tasks.register<VerifyLegalPlaceholdersTask>("verifyLegalPlaceholders") {
+    group = "verification"
+    description = "Fails while a bracketed placeholder remains in the bundled legal documents (release builds only)."
+    legalConfigFile.set(layout.projectDirectory.file("src/commonMain/kotlin/com/runout/app/legal/LegalConfig.kt"))
+    legalDirectory.set(rootProject.layout.projectDirectory.dir("docs/legal"))
+    documentPaths.set(legalDocumentPaths)
+}
+
+// Release builds only: the entry points that produce a release APK or bundle, and the release iOS frameworks.
+// Debug builds, unit tests and `check` are not affected.
+val releaseEntryPoints = setOf("assembleRelease", "bundleRelease", "packageRelease", "packageReleaseBundle")
+tasks.configureEach {
+    if (name in releaseEntryPoints || name.startsWith("linkRelease")) dependsOn(verifyLegalPlaceholders)
 }
 
 kotlin {

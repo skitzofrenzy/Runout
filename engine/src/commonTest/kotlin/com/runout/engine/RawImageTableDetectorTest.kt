@@ -151,9 +151,9 @@ class RawImageTableDetectorTest {
         val black = RawImageTableDetector.rgbToHsv(0xFF000000.toInt())
         assertEquals(0.0, black.third, 1e-9)
 
-        val tournament = RawImageTableDetector.rgbToHsv(0xFF1E78B4.toInt())
-        assertTrue(tournament.first in 195.0..215.0, "hue was ${tournament.first}")
-        assertTrue(tournament.second in 0.75..0.90)
+        val clothBlue = RawImageTableDetector.rgbToHsv(0xFF1E78B4.toInt())
+        assertTrue(clothBlue.first in 195.0..215.0, "hue was ${clothBlue.first}")
+        assertTrue(clothBlue.second in 0.75..0.90)
 
         // Hue wraps into 0..360 for reddish colours with blue above green.
         val crimson = RawImageTableDetector.rgbToHsv(0xFFDC143C.toInt())
@@ -163,8 +163,8 @@ class RawImageTableDetectorTest {
     @Test
     fun detectClothSurfaceClassifiesAllFourClothCategories() {
         val expectedHueRange = mapOf(
-            ClothHueCategory.TOURNAMENT_BLUE to 175.0..255.0,
-            ClothHueCategory.CLASSIC_GREEN to 75.0..175.0,
+            ClothHueCategory.BLUE to 175.0..255.0,
+            ClothHueCategory.GREEN to 75.0..175.0,
         )
         for (category in ClothHueCategory.values()) {
             val frame = RawImageTableDetector.renderSyntheticTablePhotoArgb(
@@ -180,13 +180,13 @@ class RawImageTableDetectorTest {
                 "Coverage for $category was ${cloth.clothCoverageFraction}",
             )
             when (category) {
-                ClothHueCategory.CHAMPIONSHIP_RED -> assertTrue(
+                ClothHueCategory.RED -> assertTrue(
                     cloth.dominantHueDegrees <= 35.0 || cloth.dominantHueDegrees >= 325.0,
                 )
-                ClothHueCategory.SLATE_GREY -> assertTrue(cloth.meanSaturation < 0.22)
+                ClothHueCategory.GREY -> assertTrue(cloth.meanSaturation < 0.22)
                 else -> assertTrue(cloth.dominantHueDegrees in expectedHueRange.getValue(category))
             }
-            if (category != ClothHueCategory.SLATE_GREY) {
+            if (category != ClothHueCategory.GREY) {
                 assertTrue(cloth.meanSaturation > 0.5, "Saturation for $category was ${cloth.meanSaturation}")
             }
         }
@@ -198,10 +198,10 @@ class RawImageTableDetectorTest {
             layout = nineBallLayout(),
             quadCornersPx = angledQuad,
             cameraPoseMeters = camera,
-            clothCategory = ClothHueCategory.CLASSIC_GREEN,
+            clothCategory = ClothHueCategory.GREEN,
         )
         val cloth = RawImageTableDetector.detectClothSurface(frame)
-        assertEquals(ClothHueCategory.CLASSIC_GREEN, cloth.category)
+        assertEquals(ClothHueCategory.GREEN, cloth.category)
         assertTrue(RawImageTableDetector.isClothPixel(frame.pixelAt(300, 200), cloth))
         assertTrue(!RawImageTableDetector.isClothPixel(frame.pixelAt(2, 2), cloth), "Rail must not be cloth")
     }
@@ -326,7 +326,7 @@ class RawImageTableDetectorTest {
 
     @Test
     fun cushionsMatchingTheBedFallBackToTheCushionWidthAndAskForReview() {
-        val frame = renderAtDefaultPose(endOnRawQuad, ClothHueCategory.TOURNAMENT_BLUE, SyntheticCushionStyle.CLOTH_MATCHED)
+        val frame = renderAtDefaultPose(endOnRawQuad, ClothHueCategory.BLUE, SyntheticCushionStyle.CLOTH_MATCHED)
         val summary = RawImageTableDetector.analyzeArgbFrame(frame)
         assertTrue(summary.quadNeedsCornerReview)
         assertTrue(summary.quadEdges.all { it.usedFallback && it.confidence < 0.5 }, "edges ${summary.quadEdges}")
@@ -408,7 +408,7 @@ class RawImageTableDetectorTest {
         assertRoundTrip(
             layout = nineBallLayout(),
             quad = angledQuad,
-            cloth = ClothHueCategory.TOURNAMENT_BLUE,
+            cloth = ClothHueCategory.BLUE,
             ballSet = BallSetProfile.standardPool(),
         )
     }
@@ -418,18 +418,18 @@ class RawImageTableDetectorTest {
         assertRoundTrip(
             layout = tvEightBallLayout(),
             quad = greenGameQuad,
-            cloth = ClothHueCategory.CLASSIC_GREEN,
+            cloth = ClothHueCategory.GREEN,
             ballSet = BallSetProfile.tvTournamentPool(),
         )
     }
 
     @Test
-    fun wntTournamentBlackSetAndEndOnOrientationRoundTrip() {
+    fun broadcastBlackSetAndEndOnOrientationRoundTrip() {
         assertRoundTrip(
             layout = nineBallLayout(),
             quad = trapezoidQuad,
-            cloth = ClothHueCategory.SLATE_GREY,
-            ballSet = BallSetProfile.wntTournamentBlackPool(),
+            cloth = ClothHueCategory.GREY,
+            ballSet = BallSetProfile.broadcastBlackPool(),
         )
         val endOnQuad = listOf(
             Vec2(210.0, 20.0),
@@ -481,11 +481,11 @@ class RawImageTableDetectorTest {
             layout = layout,
             quadCornersPx = steepRedQuad,
             cameraPoseMeters = camera,
-            clothCategory = ClothHueCategory.CHAMPIONSHIP_RED,
+            clothCategory = ClothHueCategory.RED,
             ballSet = BallSetProfile.standardPool(),
         )
         val summary = RawImageTableDetector.analyzeArgbFrame(frame)
-        assertEquals(ClothHueCategory.CHAMPIONSHIP_RED, summary.clothSurface.category)
+        assertEquals(ClothHueCategory.RED, summary.clothSurface.category)
         assertEquals(4, summary.outerQuadCornersPx.size)
         for (i in 0 until 4) {
             assertTrue(
@@ -602,7 +602,7 @@ class RawImageTableDetectorTest {
     }
 
     @Test
-    fun brightNeutralGreyClothWithWarmWoodRailsDetectsAllNineWntBalls() {
+    fun brightNeutralGreyClothWithWarmWoodRailsDetectsAllNineBroadcastBalls() {
         val w = 640
         val h = 520
         val rawQuad = listOf(
@@ -611,7 +611,7 @@ class RawImageTableDetectorTest {
             Vec2(560.0, 475.0),
             Vec2(55.0, 475.0),
         )
-        val wntBalls = listOf(
+        val broadcastBalls = listOf(
             ball(0, 0.95, 0.28),
             ball(2, 2.02, 1.02),
             ball(3, 1.84, 0.98),
@@ -622,11 +622,11 @@ class RawImageTableDetectorTest {
             ball(8, 0.76, 1.06),
             ball(9, 1.98, 0.64),
         )
-        val layout = TableLayout(table, wntBalls)
+        val layout = TableLayout(table, broadcastBalls)
         val (orientedQuad, endCamera) = RawImageTableDetector.orientQuadForHomography(rawQuad, table)
         val homography = PerspectiveHomography.fromTableQuad(orientedQuad, table)
 
-        // Start from warm beige wood rails (~S=0.11, V=0.88) and bright Shark Grey cloth (~S=0.03, V=0.81).
+        // Start from warm beige wood rails (~S=0.11, V=0.88) and bright neutral grey cloth (~S=0.03, V=0.81).
         val pixels = IntArray(w * h) { idx ->
             val x = idx % w
             val y = idx / w
@@ -637,7 +637,7 @@ class RawImageTableDetectorTest {
             }
         }
 
-        val ballSet = BallSetProfile.wntTournamentBlackPool()
+        val ballSet = BallSetProfile.broadcastBlackPool()
         val paletteArgb = mapOf(
             com.runout.engine.model.BallPaletteColor.WHITE to 0xFFFBFBFB.toInt(),
             com.runout.engine.model.BallPaletteColor.YELLOW to 0xFFF0DC1E.toInt(),
@@ -671,7 +671,7 @@ class RawImageTableDetectorTest {
 
         val frame = ArgbImageFrame(w, h, pixels)
         val summary = RawImageTableDetector.analyzeArgbFrame(frame)
-        assertEquals(ClothHueCategory.SLATE_GREY, summary.clothSurface.category)
+        assertEquals(ClothHueCategory.GREY, summary.clothSurface.category)
         assertEquals(9, summary.detectedCandidates.size, "All 9 balls must be detected on bright neutral-grey cloth")
         for (corner in summary.detectedQuadCornersPx) {
             assertTrue(corner.y >= 135.0 && corner.y <= 495.0, "Quad corner leaked onto wood rails/arena: $corner")
@@ -686,7 +686,7 @@ class RawImageTableDetectorTest {
             ballSet = ballSet,
             cameraPositionMeters = detCamera,
         )
-        assertEquals(wntBalls.map { it.number }.toSet(), rectified.layout.balls.map { it.number }.toSet())
+        assertEquals(broadcastBalls.map { it.number }.toSet(), rectified.layout.balls.map { it.number }.toSet())
     }
 
     @Test
@@ -704,7 +704,7 @@ class RawImageTableDetectorTest {
             layout = layout,
             quadCornersPx = trapezoidQuad,
             cameraPoseMeters = camera,
-            clothCategory = ClothHueCategory.TOURNAMENT_BLUE,
+            clothCategory = ClothHueCategory.BLUE,
             ballSet = BallSetProfile.standardPool(),
             ballRadiusPx = 11,
         )

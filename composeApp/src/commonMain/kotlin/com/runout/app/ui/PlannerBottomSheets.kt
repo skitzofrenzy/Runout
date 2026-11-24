@@ -55,6 +55,7 @@ import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
 import com.runout.engine.model.PocketPreset
 import com.runout.engine.model.PocketSpec
+import com.runout.engine.model.TableKind
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.AimGeometry
@@ -79,15 +80,14 @@ enum class PlanningHorizonOption(
 
 private data class SheetTableSizeOption(
     val label: String,
-    val specName: String,
     val createSpec: () -> TableSpec,
 )
 
 private val SHEET_TABLE_SIZE_OPTIONS = listOf(
-    SheetTableSizeOption("7-ft Bar Box", "7 ft Pool") { TableSpec.sevenFootPool() },
-    SheetTableSizeOption("8-ft Pool", "8 ft Pool") { TableSpec.eightFootPool() },
-    SheetTableSizeOption("9-ft Pro", "9 ft Pool") { TableSpec.nineFootPool() },
-    SheetTableSizeOption("12-ft Snooker", "12 ft Snooker") { TableSpec.fullSizeSnooker() },
+    SheetTableSizeOption("7-ft Bar Box") { TableSpec.sevenFootPool() },
+    SheetTableSizeOption("8-ft Pool") { TableSpec.eightFootPool() },
+    SheetTableSizeOption("9-ft Pro") { TableSpec.nineFootPool() },
+    SheetTableSizeOption("12-ft Snooker") { TableSpec.fullSizeSnooker() },
 )
 
 private val SHEET_POCKET_PRESET_OPTIONS = listOf(
@@ -96,15 +96,13 @@ private val SHEET_POCKET_PRESET_OPTIONS = listOf(
     PocketPreset.BAR_BOX to "Bar box",
 )
 
-/** The pool pocket cut that [table]'s pockets match, or `null` for a custom set. */
-internal fun pocketPresetOf(table: TableSpec): PocketPreset? =
-    PocketPreset.entries.firstOrNull { preset ->
-        table.pockets == TableSpec.defaultPockets(table.lengthMeters, table.widthMeters, table.ballRadiusMeters, preset)
-    }
+private const val TABLE_SIZE_MATCH_TOLERANCE_METERS = 1e-6
 
-/** [table] with its six pockets rebuilt as [preset]. */
-internal fun TableSpec.withPocketPreset(preset: PocketPreset): TableSpec =
-    copy(pockets = TableSpec.defaultPockets(lengthMeters, widthMeters, ballRadiusMeters, preset))
+/** True when [table] is a table of the kind and size [option] offers, whatever the table is called. */
+private fun isTableOfSize(table: TableSpec, option: TableSpec): Boolean =
+    table.kind == option.kind &&
+        abs(table.lengthMeters - option.lengthMeters) < TABLE_SIZE_MATCH_TOLERANCE_METERS &&
+        abs(table.widthMeters - option.widthMeters) < TABLE_SIZE_MATCH_TOLERANCE_METERS
 
 private data class SheetGameOption(
     val label: String,
@@ -212,10 +210,11 @@ fun GameAndTableSetupSheet(
                     horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Element),
                 ) {
                     SHEET_TABLE_SIZE_OPTIONS.forEach { option ->
-                        val isSelected = currentLayout.table.name == option.specName
+                        val optionSpec = remember(option) { option.createSpec() }
+                        val isSelected = isTableOfSize(currentLayout.table, optionSpec)
                         FilterChip(
                             selected = isSelected,
-                            onClick = { onResizeTable(option.createSpec()) },
+                            onClick = { onResizeTable(optionSpec) },
                             modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
                             label = {
                                 Text(
@@ -229,8 +228,8 @@ fun GameAndTableSetupSheet(
             }
 
             // Pocket size (this session only; not saved). Snooker tables keep their own cut.
-            if (PocketPreset.forBallRadius(currentLayout.table.ballRadiusMeters) != PocketPreset.SNOOKER) {
-                val activePocketPreset = pocketPresetOf(currentLayout.table)
+            if (currentLayout.table.kind == TableKind.POOL) {
+                val activePocketPreset = currentLayout.table.pocketPreset
                 Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element)) {
                     Text(
                         text = "Pockets",

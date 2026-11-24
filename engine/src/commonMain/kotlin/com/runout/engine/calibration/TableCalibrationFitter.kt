@@ -1,6 +1,7 @@
 package com.runout.engine.calibration
 
 import com.runout.engine.math.Vec2
+import com.runout.engine.model.BallContactParams
 import com.runout.engine.model.ClothParams
 import com.runout.engine.physics.BallMotion
 import com.runout.engine.physics.BallState
@@ -74,7 +75,8 @@ data class CutThrowDrillTrial(
  *
  * [ballBallFrictionMuB] is the ball-ball friction at 1 m/s of sliding speed
  * ([SpinPhysics.BALL_BALL_FRICTION_REFERENCE_SPEED_MPS]); the throw law scales its whole speed-dependent
- * friction curve by `ballBallFrictionMuB / SpinPhysics.DEFAULT_BALL_BALL_FRICTION_MU`. The cushion restitution and
+ * friction curve by `ballBallFrictionMuB / SpinPhysics.DEFAULT_BALL_BALL_FRICTION_MU`; a calibrated table carries it
+ * as [BallContactParams.frictionMu] ([SavedTableProfile.toEffectiveTableSpec]). The cushion restitution and
  * friction are in [cloth] ([ClothParams.cushionRestitutionEc], [ClothParams.cushionFrictionFc]).
  */
 data class CalibratedTableParams(
@@ -128,8 +130,8 @@ object TableCalibrationFitter {
     private const val MAX_EC = ClothParams.MAX_CUSHION_RESTITUTION_EC
     private const val MIN_FC = ClothParams.MIN_CUSHION_FRICTION_FC
     private const val MAX_FC = ClothParams.MAX_CUSHION_FRICTION_FC
-    private const val MIN_MU_B = 0.02
-    private const val MAX_MU_B = 0.12
+    private const val MIN_MU_B = BallContactParams.MIN_FRICTION_MU
+    private const val MAX_MU_B = BallContactParams.MAX_FRICTION_MU
 
     /** Rounds of alternating the cushion restitution and friction fits. */
     private const val CUSHION_FIT_ROUNDS = 3

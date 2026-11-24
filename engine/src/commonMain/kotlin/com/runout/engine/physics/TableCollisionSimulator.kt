@@ -66,15 +66,20 @@ data class CueBallPathEvent(
 /**
  * Full multi-ball result of simulating post-impact cue-ball motion against remaining object balls
  * and cushions, yielding the evolved [resultingLayout] and scattered [disturbedBalls] paths.
+ *
+ * [truncated] is true when the event budget ran out with balls still moving. The balls were then each run on to rest
+ * against the cushions and pockets alone, without further contacts between balls, so [resultingLayout] holds rest
+ * positions, but the later part of the shot is not the full simulation.
  */
 data class PostShotTableSimulation(
     val cueBallTrajectory: CueBallTrajectory,
     val disturbedBalls: List<DisplacedBallPath>,
     val resultingLayout: TableLayout,
     val targetBallTrajectory: DisplacedBallPath? = null,
-    val targetBallPotted: Boolean = true,
+    val targetBallPotted: Boolean,
     val cueBallStoppedBeforeImpact: Boolean = false,
     val cueBallEvents: List<CueBallPathEvent> = emptyList(),
+    val truncated: Boolean = false,
 )
 
 /**
@@ -84,7 +89,19 @@ data class PostShotTableSimulation(
  * parabola until the slip is gone, then a straight roll to rest. The simulation jumps from event to event: the end
  * of a slide, a ball coming to rest, a cushion (the root of a quadratic), a pocket, or two balls touching
  * ([BallMotion.contactTime]). Ball-ball contacts use [BallBallContact] with both balls' real velocities and spins and
- * leave both sliding with their spin; cushions use [CushionContact].
+ * the table's ball-ball friction and restitution ([TableSpec.ballContact]), and leave both sliding with their spin;
+ * cushions use [CushionContact].
+ *
+ * **Balls on a cushion line.** A ball whose centre is on a cushion line (within
+ * [BallMotion.BOUND_CONTACT_TOLERANCE_METERS]), such as a ball frozen to a cushion, strikes the cushion at once when
+ * it moves into it, or drops if that point of the cushion line lies in a pocket mouth. Every cushion contact leaves the
+ * ball with no velocity into the cushion, so such a contact happens once. A ball resting on a cushion line whose slide
+ * pushes it into the cushion is resolved at once by [CushionContact.pressedAgainst] and then slides along the
+ * cushion. When a ball touches two cushion lines at once the two contacts are applied one after the other.
+ *
+ * **Event budget.** Each slide end, stop, cushion, contact and pocket drop is one event; the default budget grows with
+ * the number of balls ([defaultMaxEvents]). If it runs out with balls still moving, each ball is run on to rest
+ * against the cushions and pockets alone, and the result is marked truncated.
  */
 object TableCollisionSimulator {
     private const val MIN_DISPLACEMENT_RECORD_METERS: Double = 0.002
@@ -93,11 +110,18 @@ object TableCollisionSimulator {
     /** Gap left between two balls after a contact so the pair is not found touching again at once, metres. */
     private const val CONTACT_SEPARATION_METERS: Double = 1e-6
 
+    /**
+     * Events allowed per moving ball, once the budget has run out, to run each ball on to rest against the cushions
+     * and pockets alone.
+     */
+    private const val FINISH_EVENTS_PER_BALL: Int = 48
+
     private class SimBall(
         val number: Int,
         val radius: Double,
         val initialPos: Vec2,
         var state: BallState,
+        val massKg: Double = Ball.DEFAULT_POOL_BALL_MASS_KG,
         var active: Boolean = true,
         var pocketedIn: PocketId? = null,
         var railBounces: Int = 0,
@@ -107,16 +131,26 @@ object TableCollisionSimulator {
         val vertices: MutableList<Vec2> = mutableListOf(initialPos)
     }
 
+    /** What the event loop reports besides the balls' own states. */
+    private class RunOutcome(val cueScratchPocket: PocketId?, val truncated: Boolean)
+
     private sealed interface SimEvent {
         val time: Double
 
         data class PhaseEnd(override val time: Double) : SimEvent
 
+        /**
+         * The ball meets the cushion line on the side given by [inwardX] (`+1` the head cushion `x = R`, `-1` the foot
+         * cushion, `0` neither) and [inwardY] (`+1` the left cushion `y = R`, `-1` the right one, `0` neither): the
+         * sign is that of the cushion's inward normal. [pressed] marks a ball at rest against the cushion that its
+         * slide pushes into it ([CushionContact.pressedAgainst]) rather than one moving into it.
+         */
         data class RailHit(
             override val time: Double,
             val ballIndex: Int,
-            val hitVertical: Boolean,
-            val hitHorizontal: Boolean,
+            val inwardX: Int,
+            val inwardY: Int,
+            val pressed: Boolean = false,
         ) : SimEvent
 
         /** The ball's centre reaches [pocket]'s capture line or the mouth gap in a cushion line. */
@@ -137,7 +171,8 @@ object TableCollisionSimulator {
      * Simulates the table after the cue ball, struck at [cueSpeedMps] with [tip] along [aim], meets [targetBall]:
      * the contact ([SpinPhysics.computePostImpactCueState]) launches the object ball along
      * [AimGeometry.objectBallDirection] and sends the cue ball off from [AimGeometry.ghostBallCenter] with its speed and
-     * spin, and every ball left on [layout] then moves, collides and comes to rest.
+     * spin, and every ball left on [layout] then moves, collides and comes to rest. An object ball that already lies in
+     * a pocket ([PocketGeometry.containsRestingBall]) drops at the start, as the cue ball does.
      */
     fun simulatePostImpact(
         layout: TableLayout,
@@ -145,7 +180,7 @@ object TableCollisionSimulator {
         aim: GhostBallAim,
         cueSpeedMps: Double,
         tip: TipOffset,
-        maxEvents: Int = DEFAULT_MAX_EVENTS,
+        maxEvents: Int = defaultMaxEvents(layout.balls.size),
     ): PostShotTableSimulation {
         val table = layout.table
         val preset = tip.toSpinPreset()
@@ -196,12 +231,14 @@ object TableCollisionSimulator {
             radius = cueRadius,
             initialPos = startCuePos,
             state = post.cue.copy(position = startCuePos),
+            massKg = layout.cueBall()?.massKg ?: Ball.DEFAULT_POOL_BALL_MASS_KG,
         )
         simBalls += SimBall(
             number = targetBall.number,
             radius = targetBall.radiusMeters,
             initialPos = targetBall.position,
             state = post.objectBall.copy(position = targetBall.position),
+            massKg = targetBall.massKg,
         )
         for (ball in remaining) {
             simBalls += SimBall(
@@ -209,19 +246,24 @@ object TableCollisionSimulator {
                 radius = ball.radiusMeters,
                 initialPos = ball.position,
                 state = BallState(ball.position),
+                massKg = ball.massKg,
             )
         }
+        for (index in 1 until simBalls.size) dropIfInPocket(simBalls[index], table)
 
         val cueEvents = ArrayList<CueBallPathEvent>()
         var cueScratchPocket: PocketId? = detectPocketAtPoint(startCuePos, table.pockets, cueRadius)?.id
+        var truncated = false
         if (cueScratchPocket == null) {
-            cueScratchPocket = run(
+            val outcome = run(
                 table = table,
                 simBalls = simBalls,
                 maxCueCushions = Int.MAX_VALUE,
                 maxEvents = maxEvents,
                 cueEvents = cueEvents,
             )
+            cueScratchPocket = outcome.cueScratchPocket
+            truncated = outcome.truncated
         }
 
         val surviving = simBalls.filter { it.number == 0 || it.active }
@@ -238,6 +280,7 @@ object TableCollisionSimulator {
             rollingDeflectionAngleRad = post.rollingDeflectionAngleRad,
             cushionContacts = cueSim.railBounces,
             ballContacts = cueSim.ballCollisions,
+            truncated = truncated,
         )
         val targetTrajectory = DisplacedBallPath(
             ballNumber = targetSim.number,
@@ -270,6 +313,7 @@ object TableCollisionSimulator {
                 number = sb.number,
                 position = layoutPos,
                 radiusMeters = sb.radius,
+                massKg = sb.massKg,
             )
         }
 
@@ -281,6 +325,7 @@ object TableCollisionSimulator {
             targetBallPotted = targetSim.pocketedIn != null,
             cueBallStoppedBeforeImpact = false,
             cueBallEvents = cueEvents.toList(),
+            truncated = truncated,
         )
     }
 
@@ -298,24 +343,29 @@ object TableCollisionSimulator {
         rollingDeflectionAngleRad: Double,
         obstacleBalls: List<Ball> = emptyList(),
         maxCushions: Int = Int.MAX_VALUE,
-        maxEvents: Int = DEFAULT_MAX_EVENTS,
+        maxEvents: Int = defaultMaxEvents(obstacleBalls.size + 1),
     ): CueBallTrajectory {
         val start = cueState.position
         val cue = SimBall(0, cueRadius, start, cueState)
         val balls = ArrayList<SimBall>(obstacleBalls.size + 1)
         balls += cue
         for (ball in obstacleBalls) {
-            balls += SimBall(ball.number, ball.radiusMeters, ball.position, BallState(ball.position))
+            val obstacle = SimBall(ball.number, ball.radiusMeters, ball.position, BallState(ball.position), ball.massKg)
+            dropIfInPocket(obstacle, table)
+            balls += obstacle
         }
         var scratch = detectPocketAtPoint(start, table.pockets, cueRadius)?.id
+        var truncated = false
         if (scratch == null) {
-            scratch = run(
+            val outcome = run(
                 table = table,
                 simBalls = balls,
                 maxCueCushions = maxCushions.coerceAtLeast(0),
                 maxEvents = maxEvents,
                 cueEvents = ArrayList(),
             )
+            scratch = outcome.cueScratchPocket
+            truncated = outcome.truncated
         }
         if (cue.active) closePath(cue, cue.state.position)
         return CueBallTrajectory(
@@ -327,15 +377,35 @@ object TableCollisionSimulator {
             rollingDeflectionAngleRad = rollingDeflectionAngleRad,
             cushionContacts = cue.railBounces,
             ballContacts = cue.ballCollisions,
+            truncated = truncated,
         )
     }
 
-    /** Default cap on simulated events per shot; each slide end, stop, cushion, contact and pocket drop is one. */
+    /** Events allowed for a shot with no balls; [defaultMaxEvents] adds [MAX_EVENTS_PER_BALL] per ball. */
     const val DEFAULT_MAX_EVENTS: Int = 64
+
+    /** Events the default budget allows per ball on the table. */
+    const val MAX_EVENTS_PER_BALL: Int = 16
+
+    /**
+     * Default event budget for a shot with [ballCount] balls on the table, cue ball included:
+     * [DEFAULT_MAX_EVENTS] plus [MAX_EVENTS_PER_BALL] per ball.
+     */
+    fun defaultMaxEvents(ballCount: Int): Int = DEFAULT_MAX_EVENTS + MAX_EVENTS_PER_BALL * ballCount.coerceAtLeast(1)
+
+    /** Takes [sb] off the table into the pocket it already lies in, if any. */
+    private fun dropIfInPocket(sb: SimBall, table: TableSpec) {
+        val pocket = detectPocketAtPoint(sb.state.position, table.pockets, sb.radius) ?: return
+        sb.active = false
+        sb.pocketedIn = pocket.id
+        sb.state = BallState(pocket.holeCenter)
+        closePath(sb, pocket.holeCenter)
+    }
 
     /**
      * Runs the event loop over [simBalls] (index 0 is the cue ball) and returns the pocket the cue ball drops into,
-     * if any.
+     * if any, and whether the budget of [maxEvents] ran out with balls still moving. In that case the balls are run
+     * on without contacts between them, against the cushions and pockets, until they rest.
      */
     private fun run(
         table: TableSpec,
@@ -343,7 +413,7 @@ object TableCollisionSimulator {
         maxCueCushions: Int,
         maxEvents: Int,
         cueEvents: MutableList<CueBallPathEvent>,
-    ): PocketId? {
+    ): RunOutcome {
         val motion = BallMotion(table.cloth)
         var cueScratchPocket: PocketId? = null
         val n = simBalls.size
@@ -351,8 +421,12 @@ object TableCollisionSimulator {
         val accel = arrayOfNulls<Vec2>(n)
         val moving = BooleanArray(n)
         val movingIndices = IntArray(n)
+        val budget = maxEvents.coerceAtLeast(1)
+        var eventsUsed = 0
+        var ballContacts = true
+        var finishEventsLeft = 0
 
-        for (step in 0 until maxEvents.coerceAtLeast(1)) {
+        while (true) {
             var movingCount = 0
             for (idx in 0 until n) {
                 val sb = simBalls[idx]
@@ -368,6 +442,16 @@ object TableCollisionSimulator {
                 }
             }
             if (movingCount == 0) break
+            if (ballContacts && eventsUsed >= budget) {
+                ballContacts = false
+                finishEventsLeft = FINISH_EVENTS_PER_BALL * movingCount
+            }
+            if (ballContacts) {
+                eventsUsed++
+            } else {
+                if (finishEventsLeft <= 0) break
+                finishEventsLeft--
+            }
 
             var earliest: SimEvent? = null
             fun consider(candidate: SimEvent) {
@@ -387,7 +471,7 @@ object TableCollisionSimulator {
                 val sb = simBalls[idx]
                 val tPhase = phaseEnd[idx]
                 val a = accel[idx] ?: Vec2.ZERO
-                val rail = earliestRailHit(sb.state, a, tPhase, table, sb.radius)
+                val rail = earliestRailHit(motion, sb.state, a, tPhase, table, sb.radius)
                 val entry = earliestPocketEntry(motion, sb.state, a, tPhase, rail, table, sb.radius, idx)
                 if (entry != null && (rail == null || entry.time <= rail.time)) {
                     consider(entry)
@@ -397,7 +481,7 @@ object TableCollisionSimulator {
             }
 
             // 3. Ball-ball contacts before the earliest event found so far.
-            for (k in 0 until movingCount) {
+            for (k in 0 until (if (ballContacts) movingCount else 0)) {
                 val i = movingIndices[k]
                 val ballA = simBalls[i]
                 for (j in 0 until n) {
@@ -478,8 +562,9 @@ object TableCollisionSimulator {
                     val pocket = event.pocket
                     addVertex(sb, arriving.position)
                     // It drops if its line clears both points of the pocket by the jaw tolerance for its speed;
-                    // otherwise it strikes a jaw and comes back off it like off a cushion.
-                    val clears = PocketGeometry.clearsJaws(
+                    // otherwise it strikes a jaw and comes back off it like off a cushion. A ball with no speed left
+                    // at the mouth (one its spin pulls over the edge) has nothing to carry it onto a point.
+                    val clears = speed <= BallMotion.SPEED_EPSILON_MPS || PocketGeometry.clearsJaws(
                         arriving.position,
                         arriving.velocity,
                         pocket,
@@ -528,13 +613,31 @@ object TableCollisionSimulator {
                 is SimEvent.RailHit -> {
                     val sb = simBalls[event.ballIndex]
                     val arriving = sb.state
+                    val normals = buildList {
+                        if (event.inwardX != 0) add(Vec2(event.inwardX.toDouble(), 0.0))
+                        if (event.inwardY != 0) add(Vec2(0.0, event.inwardY.toDouble()))
+                    }
+                    if (event.pressed) {
+                        var held = arriving
+                        for (normal in normals) held = CushionContact.pressedAgainst(held, normal)
+                        sb.state = held
+                        continue
+                    }
+                    var leaving = arriving
+                    if (normals.all { -arriving.velocity.dot(it) <= CushionContact.MIN_APPROACH_SPEED_MPS }) {
+                        // A touch with no measurable impulse: the cushion only stops the drift into it.
+                        for (normal in normals) leaving = CushionContact.rebound(leaving, normal, table.cloth)
+                        sb.state = leaving
+                        continue
+                    }
                     addVertex(sb, arriving.position)
                     if (event.ballIndex == 0 && sb.railBounces >= maxCueCushions) {
                         sb.state = BallState(arriving.position, sideSpinSurfaceSpeedMps = arriving.sideSpinSurfaceSpeedMps)
                         continue
                     }
-                    val normal = inwardNormalForHit(event.hitVertical, event.hitHorizontal, table, arriving.position)
-                    sb.state = CushionContact.rebound(arriving, normal, table.cloth)
+                    // Two cushions met at once (a ball in a corner) give two contacts, one after the other.
+                    for (normal in normals) leaving = CushionContact.rebound(leaving, normal, table.cloth)
+                    sb.state = leaving
                     if (motion.phaseOf(sb.state) == BallMotionPhase.STATIONARY) continue
                     sb.railBounces++
                     if (event.ballIndex == 0) {
@@ -570,7 +673,13 @@ object TableCollisionSimulator {
                     }
                     addVertex(ballA, ballA.state.position)
                     addVertex(ballB, ballB.state.position)
-                    val outcome = BallBallContact.resolve(ballA.state, ballB.state, normal)
+                    val outcome = BallBallContact.resolve(
+                        striking = ballA.state,
+                        struck = ballB.state,
+                        lineOfCentres = normal,
+                        restitution = table.ballContact.restitution,
+                        ballBallFrictionMu = table.ballContact.frictionMu,
+                    )
                     ballA.state = outcome.striking
                     ballB.state = outcome.struck
                     ballA.ballCollisions++
@@ -594,11 +703,11 @@ object TableCollisionSimulator {
             }
         }
 
-        // Balls still moving when the event budget runs out stay where the last event left them.
+        // A ball still moving when even the run-on budget is spent stays where the last event left it.
         for (sb in simBalls) {
             if (sb.active) closePath(sb, sb.state.position)
         }
-        return cueScratchPocket
+        return RunOutcome(cueScratchPocket, truncated = !ballContacts)
     }
 
     /**
@@ -641,7 +750,7 @@ object TableCollisionSimulator {
     /** Pushes apart resting balls that ended up overlapping and moves the ends of their paths with them. */
     private fun separateRestingBalls(surviving: List<SimBall>, table: TableSpec) {
         val before = surviving.map { it.state.position }
-        repeat(4) {
+        for (pass in 0 until 4) {
             var anyOverlap = false
             for (i in surviving.indices) {
                 for (j in i + 1 until surviving.size) {
@@ -659,7 +768,7 @@ object TableCollisionSimulator {
                     }
                 }
             }
-            if (!anyOverlap) return@repeat
+            if (!anyOverlap) break
         }
         for ((index, sb) in surviving.withIndex()) {
             if (!sb.active) continue
@@ -681,39 +790,59 @@ object TableCollisionSimulator {
     }
 
     /**
-     * Earliest crossing of a cushion line (`R` from the cushion nose) by [state] within `(0, tMax]` of its current
-     * phase, moving outward.
+     * Earliest contact of [state] with a cushion line (`R` from the cushion nose) within `[0, tMax]` of its current
+     * phase ([BallMotion.timeToContactBound]): at once for a ball on the line moving into it, otherwise where it
+     * crosses the line moving outward. With no contact at once, a sliding ball resting on a line (no velocity across
+     * it) whose slide pushes it into the cushion gives a pressed contact at once.
      */
-    private fun earliestRailHit(state: BallState, a: Vec2, tMax: Double, table: TableSpec, radius: Double): SimEvent.RailHit? {
+    private fun earliestRailHit(
+        motion: BallMotion,
+        state: BallState,
+        a: Vec2,
+        tMax: Double,
+        table: TableSpec,
+        radius: Double,
+    ): SimEvent.RailHit? {
         val minX = radius
         val maxX = (table.lengthMeters - radius).coerceAtLeast(radius)
         val minY = radius
         val maxY = (table.widthMeters - radius).coerceAtLeast(radius)
         val p = state.position
         val v = state.velocity
-        val tx = minOf(
-            BallMotion.timeToReachCoordinate(p.x, v.x, a.x, maxX, +1, tMax) ?: Double.POSITIVE_INFINITY,
-            BallMotion.timeToReachCoordinate(p.x, v.x, a.x, minX, -1, tMax) ?: Double.POSITIVE_INFINITY,
-        )
-        val ty = minOf(
-            BallMotion.timeToReachCoordinate(p.y, v.y, a.y, maxY, +1, tMax) ?: Double.POSITIVE_INFINITY,
-            BallMotion.timeToReachCoordinate(p.y, v.y, a.y, minY, -1, tMax) ?: Double.POSITIVE_INFINITY,
-        )
-        val t = min(tx, ty)
+        fun contact(p0: Double, v0: Double, a0: Double, bound: Double, direction: Int): Double =
+            BallMotion.timeToContactBound(p0, v0, a0, bound, direction, tMax) ?: Double.POSITIVE_INFINITY
+        val txHead = contact(p.x, v.x, a.x, minX, -1)
+        val txFoot = contact(p.x, v.x, a.x, maxX, +1)
+        val tyLeft = contact(p.y, v.y, a.y, minY, -1)
+        val tyRight = contact(p.y, v.y, a.y, maxY, +1)
+        val t = minOf(minOf(txHead, txFoot), minOf(tyLeft, tyRight))
+
+        if (!(t <= 0.0) && motion.phaseOf(state) == BallMotionPhase.SLIDING) {
+            fun pressed(p0: Double, v0: Double, a0: Double, bound: Double, direction: Int): Boolean =
+                (bound - p0) * direction <= BallMotion.BOUND_CONTACT_TOLERANCE_METERS && v0 == 0.0 && a0 * direction > 0.0
+            val inwardX = if (pressed(p.x, v.x, a.x, minX, -1)) 1 else if (pressed(p.x, v.x, a.x, maxX, +1)) -1 else 0
+            val inwardY = if (pressed(p.y, v.y, a.y, minY, -1)) 1 else if (pressed(p.y, v.y, a.y, maxY, +1)) -1 else 0
+            if (inwardX != 0 || inwardY != 0) return SimEvent.RailHit(0.0, -1, inwardX, inwardY, pressed = true)
+        }
         if (!t.isFinite()) return null
+        fun at(time: Double): Boolean = abs(time - t) <= SIMULTANEOUS_CONTACT_SECONDS
         return SimEvent.RailHit(
             time = t,
             ballIndex = -1,
-            hitVertical = abs(tx - t) <= 1e-9,
-            hitHorizontal = abs(ty - t) <= 1e-9,
+            inwardX = if (at(txHead)) 1 else if (at(txFoot)) -1 else 0,
+            inwardY = if (at(tyLeft)) 1 else if (at(tyRight)) -1 else 0,
         )
     }
 
+    /** Two cushion contacts closer together than this are taken as one contact with both cushions, seconds. */
+    private const val SIMULTANEOUS_CONTACT_SECONDS: Double = 1e-9
+
     /**
-     * First moment within `(0, tMax]` of [state]'s current phase at which the ball's centre enters a pocket: it
-     * crosses a corner pocket's mouth on the cloth, or it reaches a cushion line (`R` from the nose) where the nose is
+     * First moment within `[0, tMax]` of [state]'s current phase at which the ball's centre enters a pocket: it
+     * crosses a corner pocket's mouth on the cloth, or it meets a cushion line (`R` from the nose) where the nose is
      * cut away by a mouth ([PocketGeometry.isInMouth]; for a side pocket that is its capture line). [rail] is the
-     * ball's earliest cushion-line crossing, if any.
+     * ball's earliest cushion-line contact, if any. A ball already on a mouth line and moving into the pocket, or
+     * pressed toward it on a cushion line inside a mouth, enters at once.
      */
     private fun earliestPocketEntry(
         motion: BallMotion,
@@ -729,8 +858,8 @@ object TableCollisionSimulator {
         if (rail != null) {
             val at = motion.positionAt(state, rail.time)
             val contacts = buildList {
-                if (rail.hitVertical) add(Vec2(if (at.x <= table.lengthMeters * 0.5) 0.0 else table.lengthMeters, at.y))
-                if (rail.hitHorizontal) add(Vec2(at.x, if (at.y <= table.widthMeters * 0.5) 0.0 else table.widthMeters))
+                if (rail.inwardX != 0) add(Vec2(if (rail.inwardX > 0) 0.0 else table.lengthMeters, at.y))
+                if (rail.inwardY != 0) add(Vec2(at.x, if (rail.inwardY > 0) 0.0 else table.widthMeters))
             }
             val pocket = table.pockets.firstOrNull { p -> contacts.any { PocketGeometry.isInMouth(it, p) } }
             if (pocket != null) best = SimEvent.PocketEntry(rail.time, ballIndex, pocket)
@@ -739,7 +868,7 @@ object TableCollisionSimulator {
             if (pocket.kind != PocketKind.CORNER) continue
             val axis = pocket.axisIntoPocket
             val mid = pocket.mouthCenter
-            val t = BallMotion.timeToReachCoordinate(
+            val t = BallMotion.timeToContactBound(
                 p0 = (state.position - mid).dot(axis),
                 v0 = state.velocity.dot(axis),
                 a = a.dot(axis),
@@ -759,6 +888,8 @@ object TableCollisionSimulator {
      * Normal of the jaw a ball at [state] strikes when it enters [pocket] without clearing the points: the facing at
      * the tip it passes closest to, if the ball is moving into that facing; else the line from the tip to the ball's
      * centre, if it is moving toward the tip; `null` if it is moving away from both (it has already passed the point).
+     * Moving into a jaw means faster than [CushionContact.MIN_APPROACH_SPEED_MPS], the least approach a cushion contact
+     * rebounds from, so a ball just sent off a jaw is not found striking it again.
      */
     private fun jawNormal(state: BallState, pocket: PocketSpec): Vec2? {
         val dir = state.velocity
@@ -769,34 +900,14 @@ object TableCollisionSimulator {
             pocket.jawTipB
         }
         val facing = PocketGeometry.facingNormal(pocket, tip)
-        if (dir.dot(facing) < 0.0) return facing
+        if (dir.dot(facing) < -CushionContact.MIN_APPROACH_SPEED_MPS) return facing
         val toBall = (pos - tip).normalized()
-        if (dir.dot(toBall) < 0.0) return toBall
+        if (dir.dot(toBall) < -CushionContact.MIN_APPROACH_SPEED_MPS) return toBall
         return null
     }
 
     private fun detectPocketAtPoint(point: Vec2, pockets: List<PocketSpec>, radius: Double): PocketSpec? =
         pockets.firstOrNull { PocketGeometry.containsRestingBall(point, it, radius) }
-
-    private fun inwardNormalForHit(
-        hitVertical: Boolean,
-        hitHorizontal: Boolean,
-        table: TableSpec,
-        pos: Vec2,
-    ): Vec2 {
-        val nx = if (hitVertical) {
-            if (pos.x <= table.lengthMeters * 0.5) 1.0 else -1.0
-        } else {
-            0.0
-        }
-        val ny = if (hitHorizontal) {
-            if (pos.y <= table.widthMeters * 0.5) 1.0 else -1.0
-        } else {
-            0.0
-        }
-        val raw = Vec2(nx, ny)
-        return if (raw.lengthSquared() < 1e-12) Vec2(1.0, 0.0) else raw.normalized()
-    }
 
     private fun clampToBounds(pos: Vec2, table: TableSpec, radius: Double): Vec2 {
         val minX = radius.coerceAtMost(table.lengthMeters * 0.5)

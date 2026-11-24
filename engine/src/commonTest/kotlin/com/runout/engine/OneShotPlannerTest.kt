@@ -265,6 +265,61 @@ class OneShotPlannerTest {
         )
     }
 
+    /**
+     * The score is a product of factors of at most one, so it stays in `(0, 1]` without clipping, and two different
+     * pots do not tie at the top (they used to, at exactly 1.0, on most open 8-ball tables).
+     */
+    @Test
+    fun differentShotsDoNotTieAtTheTopOnRandomTables() {
+        val open = GameRulesState(gameType = GameType.EIGHT_BALL, eightBallGroup = EightBallGroup.OPEN)
+        val nine = GameRulesState(gameType = GameType.NINE_BALL)
+        var tables = 0
+        for (seed in 1..40) {
+            for ((layout, rules) in listOf(
+                PlannerScenarios.randomLayout(seed, (0..15).toList()) to open,
+                PlannerScenarios.randomLayout(1000 + seed, (0..9).toList()) to nine,
+            )) {
+                val ranked = OneShotPlanner.rankShots(layout, rules)
+                if (ranked.size < 2) continue
+                tables++
+                assertTrue(ranked.all { it.score > 0.0 && it.score <= 1.0 }, "Scores in (0, 1]")
+                assertTrue(ranked.all { it.makeProbability in 0.0..1.0 && it.score <= it.makeProbability + 1e-12 })
+                assertTrue(ranked[0].score > ranked[1].score, "seed $seed ${rules.gameType}: top two tie at ${ranked[0].score}")
+            }
+        }
+        assertTrue(tables >= 40, "Enough tables with two or more pots ($tables)")
+    }
+
+    @Test
+    fun onAnOpenTableTheNextBallFollowsTheGroupOfTheBallPotted() {
+        val open = GameRulesState(gameType = GameType.EIGHT_BALL, eightBallGroup = EightBallGroup.OPEN)
+        val solid3 = Ball(number = 3, position = Vec2(1.40, 0.45), radiusMeters = r)
+        val eight = Ball(number = 8, position = Vec2(1.50, 0.635), radiusMeters = r)
+        val stripe11 = Ball(number = 11, position = Vec2(1.40, 0.85), radiusMeters = r)
+        val stripe12 = Ball(number = 12, position = Vec2(2.00, 0.85), radiusMeters = r)
+        val cue = Ball(number = 0, position = Vec2(0.60, 0.635), radiusMeters = r)
+        val all = listOf(cue, solid3, eight, stripe11, stripe12)
+        fun after(potted: Ball) = OneShotPlanner.nextLegalTargetsAfterPotting(
+            TableLayout(table, all.filter { it.number != potted.number }), potted, open,
+        ).map { it.number }
+        // Potting the last solid makes the player solids, and the 8 is next.
+        assertEquals(listOf(8), after(solid3))
+        // Potting a stripe makes the player stripes: the other stripe is next, not the solid.
+        assertEquals(listOf(12), after(stripe11))
+        // The game ball ends the rack.
+        assertEquals(emptyList(), OneShotPlanner.nextLegalTargetsAfterPotting(
+            TableLayout(table, listOf(cue)), eight, GameRulesState(gameType = GameType.EIGHT_BALL, eightBallGroup = EightBallGroup.SOLIDS),
+        ))
+        // In the ranked list, the shot on the last solid is played for position on the 8.
+        val ranked = OneShotPlanner.rankShots(TableLayout(table, all), open)
+        val onThree = ranked.filter { it.targetBall.number == 3 }
+        assertTrue(onThree.isNotEmpty())
+        assertTrue(onThree.all { it.nextTargetBallNumber == null || it.nextTargetBallNumber == 8 }, onThree.map { it.nextTargetBallNumber }.toString())
+        assertTrue(onThree.any { it.nextTargetBallNumber == 8 })
+        val onEleven = ranked.filter { it.targetBall.number == 11 }
+        assertTrue(onEleven.all { it.nextTargetBallNumber == null || it.nextTargetBallNumber == 12 }, onEleven.map { it.nextTargetBallNumber }.toString())
+    }
+
     @Test
     fun rankShotsReturnsEmptyWhenCueBallOrLegalTargetsMissing() {
         val ball1 = Ball(number = 1, position = Vec2(1.5, 0.635), radiusMeters = r)
