@@ -376,4 +376,106 @@ class LandingZoneAndPhysicsAuditTest {
         }
         assertTrue(positiveCount > 10, "Open table should contain viable leave cells")
     }
+
+    @Test
+    fun halfTableMaxDrawAtSpeedTwoPointFiveTransitionsFromDrawToForwardRoll() {
+        val profile = PlayerProfile()
+        val pocket = table.pocketById(PocketId.FOOT_RIGHT).copy(center = Vec2(2.50, 0.635))
+        val obj = Ball(1, Vec2(1.80, 0.635), r)
+        val ghost = Vec2(1.80 - 2.0 * r, 0.635)
+        // Cue ball half a 9-ft table away (1.27 m cue-to-ghost)
+        val halfTableCue = Ball(0, ghost - Vec2(1.27, 0.0), r)
+        val halfTableAim = GhostBallAiming.computeAimGeometry(
+            halfTableCue,
+            obj,
+            pocket,
+            listOf(halfTableCue, obj),
+            table = table,
+        )
+        assertTrue(halfTableAim.isShotPlayable)
+
+        val maxDrawTip = TipOffset(sideRatio = 0.0, verticalRatio = -0.45)
+        val speed25Mps = profile.speedForUnits(2.5)
+        val preAt25 = SpinPhysics.computePreImpactCueState(
+            cueSpeedMps = speed25Mps,
+            tip = maxDrawTip,
+            cueToGhostDistanceMeters = halfTableAim.cueToGhostDistanceMeters,
+            table = table,
+        )
+        assertTrue(preAt25.initialSpinFactorK < -1.0, "Strike starts with max backspin")
+        assertEquals(
+            SpinPhysics.ImpactSpinState.NATURAL_FORWARD_ROLL,
+            preAt25.state,
+            "At speed 2.5 over half-table (1.27m), max draw must wear off through stun into forward roll",
+        )
+        assertTrue(preAt25.impactSpeedMps > 0.0)
+
+        val pathAt25 = SpinPhysics.traceCueBallPathWithSpin(halfTableAim, speed25Mps, maxDrawTip, table, r)
+        val projAt25 = (pathAt25.points.last() - halfTableAim.ghostBallCenter).dot(halfTableAim.objectBallDirection)
+        assertTrue(projAt25 > 0.0, "Post-impact cue ball at speed 2.5 must roll forward (+x), got $projAt25")
+
+        // At firm speed 6.5 over the same 1.27m distance, backspin survives and draws backward
+        val speed65Mps = profile.speedForUnits(6.5)
+        val preAt65 = SpinPhysics.computePreImpactCueState(
+            cueSpeedMps = speed65Mps,
+            tip = maxDrawTip,
+            cueToGhostDistanceMeters = halfTableAim.cueToGhostDistanceMeters,
+            table = table,
+        )
+        assertEquals(SpinPhysics.ImpactSpinState.BACKSPIN_DRAW, preAt65.state)
+        val pathAt65 = SpinPhysics.traceCueBallPathWithSpin(halfTableAim, speed65Mps, maxDrawTip, table, r)
+        val projAt65 = (pathAt65.points.last() - halfTableAim.ghostBallCenter).dot(halfTableAim.objectBallDirection)
+        assertTrue(projAt65 < -0.05, "At speed 6.5 over 1.27m, max draw must pull backward, got $projAt65")
+
+        // At close range (0.22 m), even speed 2.5 holds backspin and draws backward
+        val closeCue = Ball(0, ghost - Vec2(0.22, 0.0), r)
+        val closeAim = GhostBallAiming.computeAimGeometry(closeCue, obj, pocket, listOf(closeCue, obj), table = table)
+        val closePath25 = SpinPhysics.traceCueBallPathWithSpin(closeAim, speed25Mps, maxDrawTip, table, r)
+        val closeProj25 = (closePath25.points.last() - closeAim.ghostBallCenter).dot(closeAim.objectBallDirection)
+        assertTrue(closeProj25 < -0.02, "Close-range speed 2.5 max draw must still draw back, got $closeProj25")
+    }
+
+    @Test
+    fun twentyPointSpeedScaleAndMultiLevelSpinDescriptionsWorkAccurately() {
+        val profile = PlayerProfile()
+        val units = PlayerProfile.TWENTY_POINT_SPEED_UNITS
+        assertEquals(20, units.size)
+        assertEquals(0.5, units.first(), 1e-9)
+        assertEquals(10.0, units.last(), 1e-9)
+        assertEquals("2.5", PlayerProfile.formatSpeedUnits(2.5))
+        assertEquals("5", PlayerProfile.formatSpeedUnits(5.0))
+
+        for (i in 1 until units.size) {
+            assertTrue(
+                profile.speedForUnits(units[i]) > profile.speedForUnits(units[i - 1]),
+                "20-point speed units must map strictly monotonically",
+            )
+        }
+        for (intScale in 1..10) {
+            assertEquals(profile.speedForScale(intScale), profile.speedForUnits(intScale.toDouble()), 1e-12)
+        }
+
+        assertEquals("Center Ball (Stun)", TipOffset(0.0, 0.0).describeSpinLabel())
+        assertEquals("Touch of Low (Drag Stun)", TipOffset(0.0, -0.12).describeSpinLabel())
+        assertEquals("Controlled Follow + 1/2-Tip Left", TipOffset(-0.20, 0.22).describeSpinLabel())
+        assertEquals("Firm Draw + Touch of Right", TipOffset(0.11, -0.34).describeSpinLabel())
+        assertEquals("Max Power Draw", TipOffset(0.0, -0.45).describeSpinLabel())
+        assertEquals("Center + Firm Left English", TipOffset(-0.32, 0.0).describeSpinLabel())
+
+        val layout = TableLayout(
+            table,
+            listOf(
+                Ball(0, Vec2(0.85, 0.635), r),
+                Ball(1, Vec2(1.45, 0.50), r),
+                Ball(9, Vec2(2.00, 0.85), r),
+            ),
+        )
+        val plans = MultiShotPlanner.planRunout(
+            layout = layout,
+            rulesState = GameRulesState(GameType.NINE_BALL),
+            customFirstShotSpeedUnits = 3.5,
+        )
+        assertTrue(plans.isNotEmpty())
+        assertEquals(3.5, plans.first().steps.first().recommendedSpeedUnits, 1e-9)
+    }
 }

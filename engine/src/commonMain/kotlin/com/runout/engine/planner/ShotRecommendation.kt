@@ -19,6 +19,7 @@ data class ShotRecommendation(
     val recommendedCueSpeedMps: Double,
     val score: Double,
     val recommendedSpeedScale: Int = 5,
+    val recommendedSpeedUnits: Double = recommendedSpeedScale.toDouble(),
     val nextTargetBallNumber: Int? = null,
     val nextTargetPositionLine: Pair<Vec2, Vec2>? = null,
 )

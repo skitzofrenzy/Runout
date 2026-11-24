@@ -67,6 +67,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -2308,7 +2309,7 @@ private fun DrawScope.drawImageSpaceBall(
             textLayoutResult = labelLayout,
             topLeft = Offset(
                 x = center.x - labelLayout.size.width * 0.5f,
-                y = center.y - labelLayout.size.height * 0.5f,
+                y = centeredDigitTopY(center.y, labelLayout, fontSizeSp.toPx()),
             ),
         )
     }
@@ -2616,6 +2617,12 @@ private fun BallNumberSelectionGrid(
     onSelectNumber: (Int) -> Unit,
 ) {
     val allNumbers = remember { listOf(0) + (1..15).toList() }
+    val centeredLineStyle = remember {
+        LineHeightStyle(
+            alignment = LineHeightStyle.Alignment.Center,
+            trim = LineHeightStyle.Trim.Both,
+        )
+    }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         allNumbers.chunked(4).forEach { rowNumbers ->
             Row(
@@ -2649,16 +2656,18 @@ private fun BallNumberSelectionGrid(
                             horizontalArrangement = Arrangement.Center,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(9.dp)
-                                    .clip(CircleShape)
-                                    .background(ballBaseColor(number, ballSet)),
+                            BallNumberBadge(
+                                ballNumber = number,
+                                ballSet = ballSet,
+                                sizeDp = 18.dp,
                             )
                             Spacer(modifier = Modifier.width(5.dp))
                             Text(
                                 text = if (number == 0) "Cue" else "$number",
-                                style = MaterialTheme.typography.labelMedium,
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    lineHeight = 14.sp,
+                                    lineHeightStyle = centeredLineStyle,
+                                ),
                                 fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
                                 color = if (isCurrent) {
                                     MaterialTheme.colorScheme.primary
@@ -2679,43 +2688,11 @@ private fun MiniBallSwatch(
     ballNumber: Int,
     ballSet: BallSetProfile,
 ) {
-    val ballColor = ballBaseColor(ballNumber, ballSet)
-    val isStripe = ballNumber in 9..15
-    val whiteBase = Color(0xFFF8FAFC)
-
-    Box(
-        modifier = Modifier
-            .size(28.dp)
-            .clip(CircleShape)
-            .background(if (isStripe) whiteBase else ballColor)
-            .border(1.dp, Color(0xAA0F172A), CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (isStripe) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(15.dp)
-                    .background(ballColor),
-            )
-        }
-        if (ballNumber != 0) {
-            Box(
-                modifier = Modifier
-                    .size(15.dp)
-                    .clip(CircleShape)
-                    .background(whiteBase),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = ballNumber.toString(),
-                    fontSize = 8.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF0F172A),
-                )
-            }
-        }
-    }
+    BallNumberBadge(
+        ballNumber = ballNumber,
+        ballSet = ballSet,
+        sizeDp = 28.dp,
+    )
 }
 
 @Composable

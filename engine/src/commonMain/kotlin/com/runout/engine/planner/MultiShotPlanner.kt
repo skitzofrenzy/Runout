@@ -58,6 +58,7 @@ data class PlannedShotStep(
     val resultingLayout: TableLayout? = null,
     val disturbedBalls: List<DisplacedBallPath> = emptyList(),
     val positionSuccessProbability: Double? = null,
+    val recommendedSpeedUnits: Double = recommendedSpeedScale.toDouble(),
 ) {
     val makeDifficulty: ShotDifficultyTier
         get() = ShotDifficultyTier.fromProbability(uncertainty.makeProbability)
@@ -113,14 +114,17 @@ object MultiShotPlanner {
     private const val GREEDY_SPEED_SCALE: Int = 6
     private const val LANDING_CLEARANCE_FACTOR: Double = 2.0
 
-    private val SPEED_SCALES: List<Int> = listOf(3, 5, 7, 8)
+    private val PLY1_SPEED_UNITS: List<Double> = listOf(2.0, 2.5, 3.5, 4.5, 5.5, 6.5, 8.0)
+    private val DEEP_PLY_SPEED_UNITS: List<Double> = listOf(2.5, 4.0, 5.5, 7.0)
 
     private val DEEP_PLY_TIPS: List<TipOffset> = listOf(
         TipOffset(sideRatio = 0.0, verticalRatio = 0.0),
+        TipOffset(sideRatio = 0.0, verticalRatio = 0.18),
         TipOffset(sideRatio = 0.0, verticalRatio = 0.35),
-        TipOffset(sideRatio = 0.0, verticalRatio = -0.38),
-        TipOffset(sideRatio = -0.30, verticalRatio = 0.35),
-        TipOffset(sideRatio = 0.30, verticalRatio = 0.35),
+        TipOffset(sideRatio = 0.0, verticalRatio = -0.14),
+        TipOffset(sideRatio = 0.0, verticalRatio = -0.28),
+        TipOffset(sideRatio = -0.16, verticalRatio = 0.20),
+        TipOffset(sideRatio = 0.16, verticalRatio = 0.20),
     )
 
     fun planRunout(
@@ -134,22 +138,29 @@ object MultiShotPlanner {
         customFirstShotTargetBallNumber: Int? = null,
         customFirstShotPocketId: PocketId? = null,
         allowHighScratchFirstShot: Boolean = false,
+        customFirstShotSpeedUnits: Double? = null,
     ): List<RunoutPlan> {
         if (layout.cueBall() == null) return emptyList()
         val objectBallCount = layout.balls.count { it.number != 0 }
         if (objectBallCount == 0) return emptyList()
 
         val maxDepth = if (deepAnalysis) objectBallCount.coerceIn(1, 6) else horizonShots.coerceIn(1, 5)
-        val beamWidth = if (deepAnalysis) 8 else 5
+        val beamWidth = if (deepAnalysis) 9 else 6
+
+        val resolvedCustomSpeedUnits = when {
+            customFirstShotSpeedUnits != null -> PlayerProfile.snapSpeedUnits(customFirstShotSpeedUnits)
+            customFirstShotSpeedScale != null -> customFirstShotSpeedScale.coerceIn(
+                PlayerProfile.MIN_SPEED_SCALE,
+                PlayerProfile.MAX_SPEED_SCALE,
+            ).toDouble()
+            else -> null
+        }
 
         val initialProblemBalls = ProblemBallAnalyzer.analyzeProblemBalls(layout, rulesState)
         val context = SearchContext(
             profile = playerProfile,
             customTip = customFirstShotTip,
-            customSpeedScale = customFirstShotSpeedScale?.coerceIn(
-                PlayerProfile.MIN_SPEED_SCALE,
-                PlayerProfile.MAX_SPEED_SCALE,
-            ),
+            customSpeedUnits = resolvedCustomSpeedUnits,
             customTargetBallNumber = customFirstShotTargetBallNumber,
             customPocketId = customFirstShotPocketId,
             allowHighScratchFirstShot = allowHighScratchFirstShot,
@@ -274,7 +285,7 @@ object MultiShotPlanner {
     private class SearchContext(
         val profile: PlayerProfile,
         val customTip: TipOffset?,
-        val customSpeedScale: Int?,
+        val customSpeedUnits: Double?,
         val customTargetBallNumber: Int? = null,
         val customPocketId: PocketId? = null,
         val allowHighScratchFirstShot: Boolean = false,
@@ -315,6 +326,7 @@ object MultiShotPlanner {
         val compensatedAim: SpinCompensatedAim,
         val uncertainty: ShotUncertaintyResult,
         val cueSpeedMps: Double,
+        val preImpact: SpinPhysics.PreImpactCueState,
     ) {
         val stepProbability: Double
             get() = (uncertainty.makeProbability * (1.0 - uncertainty.scratchProbability)).coerceIn(0.0, 1.0)
@@ -333,12 +345,16 @@ object MultiShotPlanner {
         if (targets.isEmpty()) return emptyList()
 
         val problemBalls = context.problemBalls(node.layout, node.rules)
-        val customSpeed = context.customSpeedScale
+        val customSpeed = context.customSpeedUnits
         val customTip = context.customTip
-        val speeds = if (ply == 1 && customSpeed != null) listOf(customSpeed) else SPEED_SCALES
+        val speeds = when {
+            ply == 1 && customSpeed != null -> listOf(customSpeed)
+            ply == 1 -> PLY1_SPEED_UNITS
+            else -> DEEP_PLY_SPEED_UNITS
+        }
         val tips = when {
             ply == 1 && customTip != null -> listOf(customTip)
-            ply == 1 -> TipOffset.standardCandidates()
+            ply == 1 -> TipOffset.gradedPlannerCandidates()
             else -> DEEP_PLY_TIPS
         }
         val pockets = if (ply == 1 && context.customPocketId != null) {
@@ -351,8 +367,8 @@ object MultiShotPlanner {
         for (target in targets) {
             for (pocket in pockets) {
                 val aim = playableAim(node.layout, cue, target, pocket) ?: continue
-                var bestChild: SearchNode? = null
-                for (scale in speeds) {
+                val pairCandidates = ArrayList<SearchNode>(speeds.size * tips.size)
+                for (speedUnits in speeds) {
                     for (tip in tips) {
                         val child = buildChild(
                             node = node,
@@ -361,16 +377,31 @@ object MultiShotPlanner {
                             target = target,
                             pocket = pocket,
                             aim = aim,
-                            scale = scale,
+                            speedUnits = speedUnits,
                             tip = tip,
                             problemBalls = problemBalls,
                             context = context,
                         ) ?: continue
-                        val currentBest = bestChild
-                        if (currentBest == null || child.value > currentBest.value) bestChild = child
+                        pairCandidates += child
                     }
                 }
-                bestChild?.let { children += it }
+                if (pairCandidates.isEmpty()) continue
+                pairCandidates.sortWith(NODE_ORDER)
+                val primary = pairCandidates.first()
+                children += primary
+                // On Ply 1, also retain a distinct alternative cue-ball position route (e.g. hold short vs 1-rail roll)
+                if (ply == 1 && customSpeed == null && customTip == null) {
+                    val primaryLanding = primary.layout.cueBall()?.position
+                    if (primaryLanding != null) {
+                        val distinctAlt = pairCandidates.drop(1).firstOrNull { alt ->
+                            val altLanding = alt.layout.cueBall()?.position
+                            altLanding != null && altLanding.distanceTo(primaryLanding) >= 0.40
+                        }
+                        if (distinctAlt != null) {
+                            children += distinctAlt
+                        }
+                    }
+                }
             }
         }
         return children
@@ -383,7 +414,7 @@ object MultiShotPlanner {
         target: Ball,
         pocket: PocketSpec,
         aim: AimGeometry,
-        scale: Int,
+        speedUnits: Double,
         tip: TipOffset,
         problemBalls: List<ProblemBallReport>,
         context: SearchContext,
@@ -395,7 +426,7 @@ object MultiShotPlanner {
             target = target,
             pocket = pocket,
             aim = aim,
-            scale = scale,
+            speedUnits = speedUnits,
             tip = tip,
             profile = context.profile,
             allowHighScratch = ply == 1 && context.allowHighScratchFirstShot,
@@ -427,9 +458,10 @@ object MultiShotPlanner {
         val landing = advanced.layout.cueBall()?.position ?: uncertainty.nominalLandingPosition
         val terminal = advanced.nextTargets.isEmpty()
         val virtualCueAtLanding = Ball(number = 0, position = landing, radiusMeters = cue.radiusMeters)
+        val bounceCount = (uncertainty.nominalTrajectory.points.size - 2).coerceAtLeast(0)
         val (leaveFactor, positionSuccessProbability) = when {
             terminal -> computeExecutionSimplicityFactor(
-                scale = scale,
+                speedUnits = speedUnits,
                 tip = tip,
                 bounceCount = 0,
                 isTerminalShot = true,
@@ -462,9 +494,9 @@ object MultiShotPlanner {
                     profile = context.profile,
                 )
                 val simplicity = computeExecutionSimplicityFactor(
-                    scale = scale,
+                    speedUnits = speedUnits,
                     tip = tip,
-                    bounceCount = (uncertainty.nominalTrajectory.points.size - 2).coerceAtLeast(0),
+                    bounceCount = bounceCount,
                     isTerminalShot = false,
                 )
                 val combinedEase = (0.75 * cloudEase + 0.25 * heatValue).coerceIn(0.0, 1.0) * simplicity
@@ -476,7 +508,7 @@ object MultiShotPlanner {
                     landing = landing,
                     hasClearNextShot = hasClearNextShot,
                     cueRadius = cue.radiusMeters,
-                    scale = scale,
+                    speedUnits = speedUnits,
                     tip = tip,
                 )
                 factor to posProb
@@ -510,12 +542,27 @@ object MultiShotPlanner {
                     landing = landing,
                     hasClearNextShot = hasClearNextShot,
                     cueRadius = cue.radiusMeters,
-                    scale = scale,
+                    speedUnits = speedUnits,
                     tip = tip,
                 )
                 factor to posProb
             }
         }
+
+        val controlFactor = computeHumanShotControlFactor(
+            aim = aim,
+            pocket = pocket,
+            uncertainty = uncertainty,
+            preImpact = evaluation.preImpact,
+            speedUnits = speedUnits,
+            tip = tip,
+            positionSuccessProbability = positionSuccessProbability,
+            hasBreakout = breakout != null,
+        )
+        val scaleInt = speedUnits.roundToInt().coerceIn(
+            PlayerProfile.MIN_SPEED_SCALE,
+            PlayerProfile.MAX_SPEED_SCALE,
+        )
 
         val step = PlannedShotStep(
             stepNumber = ply,
@@ -523,15 +570,16 @@ object MultiShotPlanner {
             pocketId = pocket.id,
             pocketCenter = pocket.center,
             compensatedAim = evaluation.compensatedAim,
-            recommendedSpeedScale = scale,
+            recommendedSpeedScale = scaleInt,
             cueSpeedMps = evaluation.cueSpeedMps,
             recommendedTip = tip,
             uncertainty = uncertainty,
             breakoutOpportunity = breakout,
-            stepScore = stepProbability * (1.0 + breakoutBonus),
+            stepScore = stepProbability * controlFactor * (1.0 + breakoutBonus),
             resultingLayout = advanced.layout,
             disturbedBalls = uncertainty.postShotSimulation?.disturbedBalls.orEmpty(),
             positionSuccessProbability = positionSuccessProbability,
+            recommendedSpeedUnits = speedUnits,
         )
 
         return SearchNode(
@@ -539,7 +587,7 @@ object MultiShotPlanner {
             rules = advanced.rules,
             steps = node.steps + step,
             cumulativeProbability = node.cumulativeProbability * stepProbability,
-            bonusFactor = node.bonusFactor * (1.0 + breakoutBonus),
+            bonusFactor = node.bonusFactor * controlFactor * (1.0 + breakoutBonus),
             leaveFactor = leaveFactor,
             terminal = terminal,
         )
@@ -564,12 +612,19 @@ object MultiShotPlanner {
         target: Ball,
         pocket: PocketSpec,
         aim: AimGeometry,
-        scale: Int,
+        speedUnits: Double,
         tip: TipOffset,
         profile: PlayerProfile,
         allowHighScratch: Boolean = false,
     ): ShotEvaluation? {
-        val cueSpeed = profile.speedForScale(scale)
+        val cueSpeed = profile.speedForUnits(speedUnits)
+        val preImpact = SpinPhysics.computePreImpactCueState(
+            cueSpeedMps = cueSpeed,
+            tip = tip,
+            cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+            table = layout.table,
+        )
+        if (!allowHighScratch && preImpact.state == SpinPhysics.ImpactSpinState.STOPPED_SHORT) return null
         val compensated = SpinPhysics.solveCompensatedAim(
             aim,
             cue.radiusMeters,
@@ -589,7 +644,7 @@ object MultiShotPlanner {
             playerProfile = profile,
         )
         if (!allowHighScratch && uncertainty.scratchProbability >= MAX_SCRATCH_PROBABILITY) return null
-        return ShotEvaluation(compensated, uncertainty, cueSpeed)
+        return ShotEvaluation(compensated, uncertainty, cueSpeed, preImpact)
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -658,7 +713,7 @@ object MultiShotPlanner {
         landing: Vec2,
         hasClearNextShot: Boolean,
         cueRadius: Double,
-        scale: Int,
+        speedUnits: Double,
         tip: TipOffset,
     ): Double {
         val cloud = uncertainty.landingCloud.ifEmpty { listOf(landing) }
@@ -706,9 +761,10 @@ object MultiShotPlanner {
         val travelPenalty = (0.09 * (travelMeters - 0.35).coerceAtLeast(0.0)).coerceAtMost(0.24)
         val spreadPenalty = 0.28 * (uncertainty.landingSpreadRadiusMeters / 0.55).coerceIn(0.0, 1.0)
         val speedStress = when {
-            scale <= 2 -> 0.10
-            scale >= 9 -> 0.22 + 0.06 * (scale - 9)
-            scale >= 7 -> 0.08 * (scale - 6)
+            speedUnits <= 1.5 -> 0.12
+            speedUnits <= 2.0 -> 0.06
+            speedUnits >= 9.0 -> 0.22 + 0.06 * (speedUnits - 9.0)
+            speedUnits >= 6.5 -> 0.08 * (speedUnits - 6.0)
             else -> 0.0
         }
         val strokeControl = (1.0 - spinPenalty - railPenalty - travelPenalty - spreadPenalty - speedStress)
@@ -717,15 +773,89 @@ object MultiShotPlanner {
         return (zoneAccuracy * strokeControl * scratchSurvival).coerceIn(0.02, 0.98)
     }
 
+    /**
+     * Evaluates realistic human cue-ball control on every step so the beam search strongly favors
+     * short, natural 0-to-1 rail position routes and clean pockets over multi-rail, high-spin "robot" shots.
+     */
+    private fun computeHumanShotControlFactor(
+        aim: AimGeometry,
+        pocket: PocketSpec,
+        uncertainty: ShotUncertaintyResult,
+        preImpact: SpinPhysics.PreImpactCueState,
+        speedUnits: Double,
+        tip: TipOffset,
+        positionSuccessProbability: Double?,
+        hasBreakout: Boolean,
+    ): Double {
+        val pts = uncertainty.nominalTrajectory.points
+        val bounceCount = (pts.size - 2).coerceAtLeast(0)
+        var travelMeters = 0.0
+        for (i in 1 until pts.size) {
+            travelMeters += pts[i - 1].distanceTo(pts[i])
+        }
+
+        val posFactor = if (positionSuccessProbability != null) {
+            (0.45 + 0.55 * positionSuccessProbability).coerceIn(0.38, 1.0)
+        } else {
+            1.0
+        }
+
+        val railSimplicity = when (bounceCount) {
+            0, 1 -> 1.0
+            2 -> 0.87
+            else -> (0.68 - 0.07 * (bounceCount - 3)).coerceAtLeast(0.50)
+        }
+
+        val travelControl = if (travelMeters <= 0.80 || hasBreakout) {
+            1.0
+        } else {
+            (1.0 - 0.09 * (travelMeters - 0.80)).coerceIn(0.76, 1.0)
+        }
+
+        val sideMag = abs(tip.clampedSideRatio)
+        val drawMag = (-tip.clampedVerticalRatio).coerceAtLeast(0.0)
+        var spinSimplicity = (1.0 - 0.12 * sideMag - 0.14 * drawMag).coerceIn(0.76, 1.0)
+        if (drawMag > 0.25 && sideMag > 0.20) {
+            spinSimplicity *= 0.88
+        }
+        // Penalize asking for draw at a soft speed / long distance where draw completely dies into forward roll
+        if (tip.clampedVerticalRatio < -0.18 && preImpact.state == SpinPhysics.ImpactSpinState.NATURAL_FORWARD_ROLL) {
+            spinSimplicity *= 0.80
+        }
+
+        val cutComfort = if (abs(aim.cutAngleRadians) <= 0.84) {
+            1.0
+        } else {
+            (1.0 - 0.22 * ((abs(aim.cutAngleRadians) - 0.84) / 0.55).coerceIn(0.0, 1.0))
+        }
+        val pocketComfort = if (
+            (pocket.id == PocketId.SIDE_LEFT || pocket.id == PocketId.SIDE_RIGHT) &&
+            abs(aim.objectBallDirection.y) < 0.62
+        ) {
+            0.84
+        } else {
+            1.0
+        }
+
+        val speedComfort = if (speedUnits in 2.5..5.5 || hasBreakout) {
+            1.0
+        } else {
+            (1.0 - 0.035 * abs(speedUnits - 4.0)).coerceIn(0.85, 1.0)
+        }
+
+        return (posFactor * railSimplicity * travelControl * spinSimplicity * cutComfort * pocketComfort * speedComfort)
+            .coerceIn(0.22, 1.0)
+    }
+
     private fun computeExecutionSimplicityFactor(
-        scale: Int,
+        speedUnits: Double,
         tip: TipOffset,
         bounceCount: Int,
         isTerminalShot: Boolean,
     ): Double = if (isTerminalShot) {
-        (1.0 - 0.04 * tip.magnitudeRatio - 0.015 * abs(scale - 4)).coerceIn(0.84, 1.0)
+        (1.0 - 0.06 * tip.magnitudeRatio - 0.055 * abs(speedUnits - 4.0)).coerceIn(0.74, 1.0)
     } else {
-        (1.0 - 0.08 * tip.magnitudeRatio - 0.022 * abs(scale - 4) - 0.045 * (bounceCount - 1).coerceAtLeast(0))
+        (1.0 - 0.08 * tip.magnitudeRatio - 0.022 * abs(speedUnits - 4.0) - 0.045 * (bounceCount - 1).coerceAtLeast(0))
             .coerceIn(0.70, 1.0)
     }
 
@@ -828,19 +958,7 @@ object MultiShotPlanner {
 
     private fun percent(value: Double): Int = (value * 100.0).roundToInt().coerceIn(0, 100)
 
-    private fun describeTip(tip: TipOffset): String {
-        val vertical = when {
-            tip.clampedVerticalRatio > 0.12 -> "follow (top spin)"
-            tip.clampedVerticalRatio < -0.12 -> "draw (back spin)"
-            else -> "stun (centre ball)"
-        }
-        val side = when {
-            tip.clampedSideRatio > 0.12 -> " with right english"
-            tip.clampedSideRatio < -0.12 -> " with left english"
-            else -> ""
-        }
-        return vertical + side
-    }
+    private fun describeTip(tip: TipOffset): String = tip.describeSpinLabel(short = false).lowercase()
 
     private fun buildExplanations(
         steps: List<PlannedShotStep>,
@@ -856,8 +974,9 @@ object MultiShotPlanner {
             val posSummary = step.positionSuccessProbability?.let { posProb ->
                 ", ${percent(posProb)}% position (${step.positionDifficulty!!.label})"
             } ?: ", final ball"
+            val speedLabel = PlayerProfile.formatSpeedUnits(step.recommendedSpeedUnits)
             reasons += "Step ${step.stepNumber}: pot ball #$ballNumber in the ${step.pocketId.displayName} pocket " +
-                "at speed ${step.recommendedSpeedScale}/10, ${percent(step.uncertainty.makeProbability)}% to make (${step.makeDifficulty.label})$posSummary."
+                "at speed $speedLabel/10, ${percent(step.uncertainty.makeProbability)}% to make (${step.makeDifficulty.label})$posSummary."
 
             val nextStep = steps.getOrNull(index + 1)
             val spinText = describeTip(step.recommendedTip)
@@ -976,7 +1095,7 @@ object MultiShotPlanner {
                 for (pocket in layout.table.pockets) {
                     val aim = playableAim(layout, cue, target, pocket) ?: continue
                     val evaluation = evaluateShot(
-                        layout, cue, target, pocket, aim, GREEDY_SPEED_SCALE, centerTip, profile,
+                        layout, cue, target, pocket, aim, GREEDY_SPEED_SCALE.toDouble(), centerTip, profile,
                     ) ?: continue
                     val currentBest = bestEvaluation
                     if (currentBest == null || evaluation.stepProbability > currentBest.stepProbability) {

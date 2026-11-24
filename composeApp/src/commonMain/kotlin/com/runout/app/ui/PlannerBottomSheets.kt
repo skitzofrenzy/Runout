@@ -33,14 +33,18 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.clickable
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.runout.engine.model.AssumedSurfacePreset
 import com.runout.engine.model.BallSetProfile
 import com.runout.engine.model.ClothParams
@@ -51,6 +55,7 @@ import com.runout.engine.model.PlayerProfile
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.CueBallSpinPreset
+import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -316,6 +321,12 @@ fun EditBallsSheet(
                 }
             }
 
+            val centeredChipText = remember {
+                LineHeightStyle(
+                    alignment = LineHeightStyle.Alignment.Center,
+                    trim = LineHeightStyle.Trim.Both,
+                )
+            }
             (1..15).chunked(5).forEach { rowNumbers ->
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -323,7 +334,6 @@ fun EditBallsSheet(
                 ) {
                     rowNumbers.forEach { ballNumber ->
                         val isPresent = currentLayout.ballByNumber(ballNumber) != null
-                        val dotColor = ballBaseColor(ballNumber, ballSet)
                         FilterChip(
                             selected = isPresent,
                             onClick = { onToggleBall(ballNumber) },
@@ -331,16 +341,19 @@ fun EditBallsSheet(
                                 .weight(1f)
                                 .defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
                             leadingIcon = {
-                                Box(
-                                    modifier = Modifier
-                                        .size(10.dp)
-                                        .clip(CircleShape)
-                                        .background(dotColor),
+                                BallNumberBadge(
+                                    ballNumber = ballNumber,
+                                    ballSet = ballSet,
+                                    sizeDp = 18.dp,
                                 )
                             },
                             label = {
                                 Text(
                                     text = "$ballNumber",
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        lineHeight = 14.sp,
+                                        lineHeightStyle = centeredChipText,
+                                    ),
                                     fontWeight = if (isPresent) FontWeight.Bold else FontWeight.Normal,
                                 )
                             },
@@ -377,8 +390,8 @@ fun ShotOptionsSheet(
     playerProfile: PlayerProfile,
     selectedHorizon: PlanningHorizonOption,
     onSelectHorizon: (PlanningHorizonOption) -> Unit,
-    speedScaleOverride: Int?,
-    onSelectSpeedScale: (Int?) -> Unit,
+    speedUnitsOverride: Double?,
+    onSelectSpeedUnits: (Double?) -> Unit,
     showHeatZone: Boolean,
     onToggleHeatZone: () -> Unit,
     showLandingCloud: Boolean,
@@ -490,15 +503,15 @@ fun ShotOptionsSheet(
                 }
             }
 
-            // Speed Scale
+            // 20-Point Speed Scale (0.5 .. 10.0)
             Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Element)) {
-                val speedSummary = if (speedScaleOverride == null) {
+                val speedSummary = if (speedUnitsOverride == null) {
                     "Auto (${playerProfile.name})"
                 } else {
-                    "$speedScaleOverride/10"
+                    "${PlayerProfile.formatSpeedUnits(speedUnitsOverride)}/10 (${sandboxSpeedLabel(speedUnitsOverride)})"
                 }
                 Text(
-                    text = "Cue Speed: $speedSummary",
+                    text = "Cue Speed (20-Point Scale): $speedSummary",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
@@ -510,17 +523,18 @@ fun ShotOptionsSheet(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     FilterChip(
-                        selected = speedScaleOverride == null,
-                        onClick = { onSelectSpeedScale(null) },
+                        selected = speedUnitsOverride == null,
+                        onClick = { onSelectSpeedUnits(null) },
                         modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
                         label = { Text("Auto") },
                     )
-                    for (scale in 1..10) {
+                    PlayerProfile.TWENTY_POINT_SPEED_UNITS.forEach { units ->
+                        val isSelected = speedUnitsOverride != null && abs(speedUnitsOverride - units) < 0.01
                         FilterChip(
-                            selected = speedScaleOverride == scale,
-                            onClick = { onSelectSpeedScale(scale) },
+                            selected = isSelected,
+                            onClick = { onSelectSpeedUnits(units) },
                             modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
-                            label = { Text("$scale") },
+                            label = { Text(PlayerProfile.formatSpeedUnits(units)) },
                         )
                     }
                 }
@@ -557,6 +571,7 @@ fun QuickSpinSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = RunoutSpacing.Margin, vertical = RunoutSpacing.Element),
             verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
         ) {
@@ -565,15 +580,15 @@ fun QuickSpinSheet(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Cue Spin Selection",
+                    text = "Cue Spin & English Mix",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f),
                 )
                 GlossaryInfoButton(
-                    term = "Stun, Follow & Draw",
-                    explanation = "Stun sends the cue ball along the 90° tangent line after contact; Follow rolls it forward (~30°); Draw pulls it backward after hitting the object ball.",
+                    term = "Spin Levels & Mixing",
+                    explanation = "Mild offsets (Drag Stun, Touch of Follow/Draw, 1/2-Tip English) hold cleaner control and less squirt/throw than max spin. On long shots, soft draw wears off into stun or forward roll.",
                 )
                 TextButton(
                     onClick = onDismiss,
@@ -585,10 +600,17 @@ fun QuickSpinSheet(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
             val presets = listOf(
-                Triple("Auto Recommended", "Let Runout pick the best spin for position", null),
-                Triple("Center Stun (90°)", "Cue ball slides cleanly sideways after impact", TipOffset(0.0, 0.0)),
-                Triple("Top Follow (30°)", "Natural forward roll toward the foot rail", TipOffset.fromPreset(CueBallSpinPreset.FOLLOW)),
-                Triple("Bottom Draw", "Pulls the cue ball backward off the shot line", TipOffset.fromPreset(CueBallSpinPreset.DRAW)),
+                Triple("Auto Recommended", "Let Runout pick the cleanest natural spin & speed", null),
+                Triple("Center Ball (Pure Stun)", "Slides along 90° tangent on close/medium shots; rolls forward on long soft shots", TipOffset(0.0, 0.0)),
+                Triple("Touch of Low (Drag Stun)", "Holds the 90° stun line longer across medium-to-long distance", TipOffset(0.0, -0.14)),
+                Triple("Controlled Follow", "Smooth half-tip topspin rolling naturally forward (~30°)", TipOffset(0.0, 0.20)),
+                Triple("Firm Top Follow", "Full 1-tip topspin driving through cushions", TipOffset.fromPreset(CueBallSpinPreset.FOLLOW)),
+                Triple("Controlled Draw", "Balanced half-tip backspin for short pullback without wild squirt", TipOffset(0.0, -0.25)),
+                Triple("Firm / Max Draw", "Deep backspin — requires enough speed over distance so draw doesn't fade to roll", TipOffset(0.0, -0.42)),
+                Triple("Controlled Follow + 1/2-Tip Left", "Mixed high-left english to widen/check rail rebound", TipOffset(-0.18, 0.22)),
+                Triple("Controlled Follow + 1/2-Tip Right", "Mixed high-right english to widen/check rail rebound", TipOffset(0.18, 0.22)),
+                Triple("Controlled Draw + 1/2-Tip Left", "Mixed low-left english for angled pullback off cushions", TipOffset(-0.18, -0.24)),
+                Triple("Controlled Draw + 1/2-Tip Right", "Mixed low-right english for angled pullback off cushions", TipOffset(0.18, -0.24)),
             )
 
             presets.forEach { (title, subtitle, tip) ->
@@ -647,24 +669,49 @@ fun CueBallSandboxPanel(
     activeTip: TipOffset,
     defaultTip: TipOffset?,
     customTipOffset: TipOffset?,
-    activeSpeedScale: Int,
-    speedScaleOverride: Int?,
+    activeSpeedUnits: Double,
+    speedUnitsOverride: Double?,
     lockedTargetBallNumber: Int?,
     hasOverrides: Boolean,
     onUpdateTip: (TipOffset?) -> Unit,
-    onUpdateSpeedScale: (Int?) -> Unit,
+    onUpdateSpeedUnits: (Double?) -> Unit,
     onResetDefaults: () -> Unit,
     onClose: () -> Unit,
     compactVertical: Boolean = false,
+    cueToObjectDistanceMeters: Double? = null,
+    playerProfile: PlayerProfile = PlayerProfile(),
+    tableSpec: TableSpec = TableSpec.nineFootPool(),
     modifier: Modifier = Modifier,
 ) {
+    val snappedSpeed = PlayerProfile.snapSpeedUnits(activeSpeedUnits)
+    val formattedSpeed = PlayerProfile.formatSpeedUnits(snappedSpeed)
+    val speedWord = sandboxSpeedLabel(snappedSpeed)
+    val spinMixSummary = activeTip.describeSpinLabel(short = compactVertical)
+    val impactTransitionNote = remember(activeTip, snappedSpeed, cueToObjectDistanceMeters, playerProfile, tableSpec) {
+        cueToObjectDistanceMeters?.let { dist ->
+            SpinPhysics.describeImpactTransition(
+                tip = activeTip,
+                cueSpeedMps = playerProfile.speedForUnits(snappedSpeed),
+                cueToGhostDistanceMeters = dist,
+                table = tableSpec,
+            )
+        }
+    }
+
     val spinPresets = listOf(
         "Auto" to null,
-        "Stun" to TipOffset(sideRatio = 0.0, verticalRatio = 0.0),
-        "Follow" to TipOffset.fromPreset(CueBallSpinPreset.FOLLOW),
-        "Draw" to TipOffset.fromPreset(CueBallSpinPreset.DRAW),
-        "Left" to TipOffset(sideRatio = -0.30, verticalRatio = 0.0),
-        "Right" to TipOffset(sideRatio = 0.30, verticalRatio = 0.0),
+        "Center" to TipOffset(sideRatio = 0.0, verticalRatio = 0.0),
+        "Drag Stun" to TipOffset(sideRatio = 0.0, verticalRatio = -0.14),
+        "Ctrl Follow" to TipOffset(sideRatio = 0.0, verticalRatio = 0.20),
+        "Firm Follow" to TipOffset.fromPreset(CueBallSpinPreset.FOLLOW),
+        "Ctrl Draw" to TipOffset(sideRatio = 0.0, verticalRatio = -0.25),
+        "Max Draw" to TipOffset(sideRatio = 0.0, verticalRatio = -0.44),
+        "1/2 Left" to TipOffset(sideRatio = -0.18, verticalRatio = 0.0),
+        "1/2 Right" to TipOffset(sideRatio = 0.18, verticalRatio = 0.0),
+        "Hi-Left" to TipOffset(sideRatio = -0.18, verticalRatio = 0.22),
+        "Hi-Right" to TipOffset(sideRatio = 0.18, verticalRatio = 0.22),
+        "Lo-Left" to TipOffset(sideRatio = -0.18, verticalRatio = -0.24),
+        "Lo-Right" to TipOffset(sideRatio = 0.18, verticalRatio = -0.24),
     )
 
     Surface(
@@ -748,38 +795,28 @@ fun CueBallSandboxPanel(
                         modifier = Modifier.size(116.dp),
                     )
                     Text(
-                        text = formatSandboxSpinSummary(activeTip),
+                        text = "Spin: $spinMixSummary",
                         style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+                    if (impactTransitionNote != null) {
                         Text(
-                            text = "Speed: $activeSpeedScale/10 (${sandboxSpeedLabel(activeSpeedScale)})",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface,
+                            text = impactTransitionNote,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
                         )
-                        if (speedScaleOverride == null) {
-                            Text(
-                                text = "Auto",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.secondary,
-                            )
-                        }
                     }
-                    Slider(
-                        value = activeSpeedScale.toFloat(),
-                        onValueChange = { onUpdateSpeedScale(it.roundToInt().coerceIn(1, 10)) },
-                        valueRange = 1f..10f,
-                        steps = 8,
-                        modifier = Modifier.fillMaxWidth(),
+                    SpeedHalfStepControlBlock(
+                        snappedSpeed = snappedSpeed,
+                        formattedSpeed = formattedSpeed,
+                        speedWord = speedWord,
+                        isAuto = speedUnitsOverride == null,
+                        onUpdateSpeedUnits = onUpdateSpeedUnits,
                     )
                 }
             } else {
@@ -799,46 +836,34 @@ fun CueBallSandboxPanel(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         Text(
-                            text = formatSandboxSpinSummary(activeTip),
+                            text = "Spin: $spinMixSummary",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.primary,
-                            maxLines = 1,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
+                        if (impactTransitionNote != null) {
                             Text(
-                                text = "Speed: $activeSpeedScale/10 (${sandboxSpeedLabel(activeSpeedScale)})",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                            Text(
-                                text = if (speedScaleOverride == null) "Auto" else "Manual",
+                                text = impactTransitionNote,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (speedScaleOverride == null) {
-                                    MaterialTheme.colorScheme.secondary
-                                } else {
-                                    RunoutColors.WarningAmber
-                                },
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        Slider(
-                            value = activeSpeedScale.toFloat(),
-                            onValueChange = { onUpdateSpeedScale(it.roundToInt().coerceIn(1, 10)) },
-                            valueRange = 1f..10f,
-                            steps = 8,
-                            modifier = Modifier.fillMaxWidth(),
+                        SpeedHalfStepControlBlock(
+                            snappedSpeed = snappedSpeed,
+                            formattedSpeed = formattedSpeed,
+                            speedWord = speedWord,
+                            isAuto = speedUnitsOverride == null,
+                            onUpdateSpeedUnits = onUpdateSpeedUnits,
                         )
                     }
                 }
             }
 
-            // Quick spin presets
+            // Quick spin presets (graded + mixed combinations)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -869,8 +894,8 @@ fun CueBallSandboxPanel(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 FilterChip(
-                    selected = speedScaleOverride == null,
-                    onClick = { onUpdateSpeedScale(null) },
+                    selected = speedUnitsOverride == null,
+                    onClick = { onUpdateSpeedUnits(null) },
                     modifier = Modifier.defaultMinSize(minHeight = if (compactVertical) 38.dp else 44.dp),
                     label = { Text("Auto Speed", style = MaterialTheme.typography.labelSmall) },
                 )
@@ -894,25 +919,90 @@ fun CueBallSandboxPanel(
     }
 }
 
-private fun sandboxSpeedLabel(scale: Int): String = when {
-    scale <= 3 -> "Gentle"
-    scale <= 6 -> "Medium"
-    scale <= 8 -> "Firm"
-    else -> "Hard"
+@Composable
+private fun SpeedHalfStepControlBlock(
+    snappedSpeed: Double,
+    formattedSpeed: String,
+    speedWord: String,
+    isAuto: Boolean,
+    onUpdateSpeedUnits: (Double?) -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Speed: $formattedSpeed/10 ($speedWord)",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = RunoutColors.SurfaceLow,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.surfaceVariant),
+                    modifier = Modifier.clickable(enabled = snappedSpeed > PlayerProfile.MIN_SPEED_UNITS + 0.01) {
+                        onUpdateSpeedUnits(PlayerProfile.snapSpeedUnits(snappedSpeed - 0.5))
+                    },
+                ) {
+                    Text(
+                        text = "−.5",
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = RunoutColors.SurfaceLow,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.surfaceVariant),
+                    modifier = Modifier.clickable(enabled = snappedSpeed < PlayerProfile.MAX_SPEED_UNITS - 0.01) {
+                        onUpdateSpeedUnits(PlayerProfile.snapSpeedUnits(snappedSpeed + 0.5))
+                    },
+                ) {
+                    Text(
+                        text = "+.5",
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                Text(
+                    text = if (isAuto) "Auto" else "Manual",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (isAuto) MaterialTheme.colorScheme.secondary else RunoutColors.WarningAmber,
+                )
+            }
+        }
+        Slider(
+            value = snappedSpeed.toFloat(),
+            onValueChange = { raw ->
+                onUpdateSpeedUnits(PlayerProfile.snapSpeedUnits(raw.toDouble()))
+            },
+            valueRange = 0.5f..10.0f,
+            steps = 18,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
-private fun formatSandboxSpinSummary(tip: TipOffset): String {
-    val vert = when {
-        tip.clampedVerticalRatio > 0.12 -> "Follow"
-        tip.clampedVerticalRatio < -0.12 -> "Draw"
-        else -> "Stun"
-    }
-    val side = when {
-        tip.clampedSideRatio > 0.08 -> "Right"
-        tip.clampedSideRatio < -0.08 -> "Left"
-        else -> "Center"
-    }
-    return if (side == "Center") "Spin: $vert" else "Spin: $vert + $side"
+private fun sandboxSpeedLabel(units: Double): String = when {
+    units <= 1.5 -> "Touch / Lag"
+    units <= 3.0 -> "Gentle"
+    units <= 5.5 -> "Medium"
+    units <= 7.5 -> "Firm"
+    else -> "Power"
 }
 
 @Composable

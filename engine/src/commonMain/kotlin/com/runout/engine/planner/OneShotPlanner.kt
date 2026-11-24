@@ -5,6 +5,7 @@ import com.runout.engine.model.Ball
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
+import com.runout.engine.model.PocketId
 import com.runout.engine.model.PocketSpec
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
@@ -12,10 +13,13 @@ import com.runout.engine.physics.AimGeometry
 import com.runout.engine.physics.CueBallPath
 import com.runout.engine.physics.CueBallSpinPreset
 import com.runout.engine.physics.GhostBallAiming
+import com.runout.engine.physics.SpinPhysics
+import com.runout.engine.physics.TipOffset
 import com.runout.engine.physics.TrajectoryPath
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 /**
  * Shot planner that enumerates legal target-ball and pocket combinations, filters blocked or
@@ -30,7 +34,7 @@ object OneShotPlanner {
         CueBallSpinPreset.DRAW,
     )
 
-    private val CANDIDATE_SPEED_SCALES: List<Int> = listOf(3, 5, 7)
+    private val CANDIDATE_SPEED_UNITS: List<Double> = listOf(2.5, 3.5, 4.5, 5.5, 7.0)
 
     private const val DEFAULT_CUE_SPEED_MPS: Double = 2.0
     private const val CUE_DISTANCE_WEIGHT: Double = 0.45
@@ -42,7 +46,7 @@ object OneShotPlanner {
     private const val FINAL_BALL_POSITION_BONUS_WEIGHT: Double = 0.42
     private const val LOW_DRAW_RATIO_THRESHOLD: Double = 0.8
     private const val LOW_DRAW_SCORE_PENALTY: Double = 0.15
-    private const val PREFERRED_DEFAULT_SPEED_SCALE: Int = 5
+    private const val PREFERRED_DEFAULT_SPEED_UNITS: Double = 4.5
 
     fun rankShots(
         layout: TableLayout,
@@ -50,6 +54,7 @@ object OneShotPlanner {
         defaultCueSpeedMps: Double = DEFAULT_CUE_SPEED_MPS,
         playerProfile: PlayerProfile = PlayerProfile(),
         cueSpeedScaleOverride: Int? = null,
+        cueSpeedUnitsOverride: Double? = null,
     ): List<ShotRecommendation> {
         val cueBall = layout.cueBall() ?: return emptyList()
         val legalTargets = rulesState.legalTargetBalls(layout)
@@ -62,6 +67,7 @@ object OneShotPlanner {
             defaultCueSpeedMps = defaultCueSpeedMps,
             playerProfile = playerProfile,
             cueSpeedScaleOverride = cueSpeedScaleOverride,
+            cueSpeedUnitsOverride = cueSpeedUnitsOverride,
         )
 
         val recommendations = mutableListOf<ShotRecommendation>()
@@ -117,6 +123,7 @@ object OneShotPlanner {
                     recommendedCueSpeedMps = bestCandidate.speedMps,
                     score = bestCandidate.score,
                     recommendedSpeedScale = bestCandidate.speedScale,
+                    recommendedSpeedUnits = bestCandidate.speedUnits,
                     nextTargetBallNumber = bestCandidate.nextTargetBallNumber,
                     nextTargetPositionLine = bestCandidate.nextTargetPositionLine,
                 )
@@ -134,19 +141,24 @@ object OneShotPlanner {
         defaultCueSpeedMps: Double,
         playerProfile: PlayerProfile,
         cueSpeedScaleOverride: Int?,
-    ): List<Pair<Int, Double>> = when {
+        cueSpeedUnitsOverride: Double?,
+    ): List<Pair<Double, Double>> = when {
+        cueSpeedUnitsOverride != null -> {
+            val snapped = PlayerProfile.snapSpeedUnits(cueSpeedUnitsOverride)
+            listOf(snapped to playerProfile.speedForUnits(snapped))
+        }
         cueSpeedScaleOverride != null -> {
             val clampedScale = cueSpeedScaleOverride.coerceIn(
                 PlayerProfile.MIN_SPEED_SCALE,
                 PlayerProfile.MAX_SPEED_SCALE,
             )
-            listOf(clampedScale to playerProfile.speedForScale(clampedScale))
+            listOf(clampedScale.toDouble() to playerProfile.speedForScale(clampedScale))
         }
         defaultCueSpeedMps != DEFAULT_CUE_SPEED_MPS -> {
-            listOf(playerProfile.scaleForSpeed(defaultCueSpeedMps) to defaultCueSpeedMps)
+            listOf(playerProfile.scaleForSpeed(defaultCueSpeedMps).toDouble() to defaultCueSpeedMps)
         }
-        else -> CANDIDATE_SPEED_SCALES.map { scale ->
-            scale to playerProfile.speedForScale(scale)
+        else -> CANDIDATE_SPEED_UNITS.map { units ->
+            units to playerProfile.speedForUnits(units)
         }
     }
 
@@ -166,7 +178,14 @@ object OneShotPlanner {
                 effectiveObjectWeight * aim.objectToPocketDistanceMeters
             )
         val pocketWidthBonus = pocket.mouthWidthMeters / (table.ballRadiusMeters * 4.0)
-        val normalizedPocketFactor = (pocketWidthBonus / POCKET_WIDTH_NORMALIZATION).coerceIn(0.5, 1.0)
+        val sideApproachPenalty = if (pocket.id == PocketId.SIDE_LEFT || pocket.id == PocketId.SIDE_RIGHT) {
+            val ny = abs(aim.objectBallDirection.y)
+            if (ny < 0.58) (ny * ny * 1.48).coerceIn(0.25, 0.85) else 1.0
+        } else {
+            1.0
+        }
+        val normalizedPocketFactor = ((pocketWidthBonus / POCKET_WIDTH_NORMALIZATION) * sideApproachPenalty)
+            .coerceIn(0.25, 1.0)
         return (cutFactor * distanceFactor * normalizedPocketFactor).coerceIn(1e-6, 1.0)
     }
 
@@ -241,12 +260,16 @@ object OneShotPlanner {
         nextTargets: List<Ball>,
         isSettingUpFinalBall: Boolean,
         playerProfile: PlayerProfile,
-        candidateScalesAndSpeeds: List<Pair<Int, Double>>,
+        candidateScalesAndSpeeds: List<Pair<Double, Double>>,
     ): CandidateEvaluation? {
         var best: CandidateEvaluation? = null
         val positionWeight = if (isSettingUpFinalBall) FINAL_BALL_POSITION_BONUS_WEIGHT else POSITION_BONUS_WEIGHT
 
-        for ((scale, speedMps) in candidateScalesAndSpeeds) {
+        for ((speedUnits, speedMps) in candidateScalesAndSpeeds) {
+            val scaleInt = speedUnits.roundToInt().coerceIn(
+                PlayerProfile.MIN_SPEED_SCALE,
+                PlayerProfile.MAX_SPEED_SCALE,
+            )
             val paths = CueBallPath.computePostImpactPaths(
                 aim = aim,
                 table = table,
@@ -259,6 +282,12 @@ object OneShotPlanner {
                 val cueStop = chosenPath.points.lastOrNull() ?: aim.ghostBallCenter
                 val centerCloseness = 1.0 - (cueStop.distanceTo(tableCenter) / halfDiagonal).coerceIn(0.0, 1.0)
                 val centerDistance = cueStop.distanceTo(tableCenter)
+                val preImpact = SpinPhysics.computePreImpactCueState(
+                    cueSpeedMps = speedMps,
+                    tip = TipOffset.fromPreset(spin),
+                    cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+                    table = table,
+                )
 
                 val bestNext = if (!scratches) {
                     evaluateBestNextShot(
@@ -276,7 +305,7 @@ object OneShotPlanner {
                 val baseWithCenter = if (nextTargets.isEmpty()) {
                     val terminalEase = (
                         1.0 -
-                            0.015 * abs(scale - 4) -
+                            0.015 * abs(speedUnits - 4.0) -
                             (if (spin == CueBallSpinPreset.DRAW) 0.02 else 0.0)
                         ).coerceIn(0.85, 1.0)
                     baseWithCenterRaw * terminalEase
@@ -300,12 +329,17 @@ object OneShotPlanner {
                         val ease = (
                             1.0 -
                                 0.05 * ((chosenPath.points.size - 2).coerceAtLeast(0) - 1).coerceAtLeast(0) -
-                                0.02 * abs(scale - 4) -
+                                0.02 * abs(speedUnits - 4.0) -
                                 (if (spin == CueBallSpinPreset.DRAW) 0.04 else 0.0)
                             ).coerceIn(0.70, 1.0)
                         positionWeight * bestNext.score * comfort * ease
                     } else {
-                        positionWeight * bestNext.score
+                        val controlEase = (
+                            1.0 -
+                                0.04 * ((chosenPath.points.size - 2).coerceAtLeast(0) - 1).coerceAtLeast(0) -
+                                (if (spin == CueBallSpinPreset.DRAW) 0.025 else 0.0)
+                            ).coerceIn(0.78, 1.0)
+                        positionWeight * bestNext.score * controlEase
                     }
                 } else {
                     0.0
@@ -319,12 +353,19 @@ object OneShotPlanner {
                 } else {
                     0.0
                 }
-                val candidateScore = ((baseWithCenter + positionBonus) * scratchFactor - drawPenalty)
+                val distanceSpinPenalty = when {
+                    preImpact.state == SpinPhysics.ImpactSpinState.STOPPED_SHORT -> 0.35
+                    spin == CueBallSpinPreset.DRAW && preImpact.impactSpinFactorK >= 0.0 -> 0.14
+                    spin == CueBallSpinPreset.STUN && preImpact.impactSpinFactorK >= 0.70 -> 0.05
+                    else -> 0.0
+                }
+                val candidateScore = ((baseWithCenter + positionBonus) * scratchFactor - drawPenalty - distanceSpinPenalty)
                     .coerceIn(1e-6, 1.0)
 
                 val candidate = CandidateEvaluation(
                     spin = spin,
-                    speedScale = scale,
+                    speedScale = scaleInt,
+                    speedUnits = speedUnits,
                     speedMps = speedMps,
                     pathsAtSpeed = paths,
                     score = candidateScore,
@@ -352,8 +393,8 @@ object OneShotPlanner {
         if (abs(candidate.centerDistance - currentBest.centerDistance) > 1e-9) {
             return candidate.centerDistance < currentBest.centerDistance
         }
-        return abs(candidate.speedScale - PREFERRED_DEFAULT_SPEED_SCALE) <
-            abs(currentBest.speedScale - PREFERRED_DEFAULT_SPEED_SCALE)
+        return abs(candidate.speedUnits - PREFERRED_DEFAULT_SPEED_UNITS) <
+            abs(currentBest.speedUnits - PREFERRED_DEFAULT_SPEED_UNITS)
     }
 
     private data class NextShotEvaluation(
@@ -365,6 +406,7 @@ object OneShotPlanner {
     private data class CandidateEvaluation(
         val spin: CueBallSpinPreset,
         val speedScale: Int,
+        val speedUnits: Double,
         val speedMps: Double,
         val pathsAtSpeed: Map<CueBallSpinPreset, TrajectoryPath>,
         val score: Double,
@@ -381,10 +423,12 @@ fun rankShots(
     defaultCueSpeedMps: Double = 2.0,
     playerProfile: PlayerProfile = PlayerProfile(),
     cueSpeedScaleOverride: Int? = null,
+    cueSpeedUnitsOverride: Double? = null,
 ): List<ShotRecommendation> = OneShotPlanner.rankShots(
     layout = layout,
     rulesState = rulesState,
     defaultCueSpeedMps = defaultCueSpeedMps,
     playerProfile = playerProfile,
     cueSpeedScaleOverride = cueSpeedScaleOverride,
+    cueSpeedUnitsOverride = cueSpeedUnitsOverride,
 )

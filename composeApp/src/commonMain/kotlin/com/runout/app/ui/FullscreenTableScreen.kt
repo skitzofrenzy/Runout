@@ -49,6 +49,7 @@ import com.runout.engine.math.Vec2
 import com.runout.engine.model.BallSetProfile
 import com.runout.engine.model.GameRulesState
 import com.runout.engine.model.GameType
+import com.runout.engine.model.PlayerProfile
 import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
 import com.runout.engine.physics.CueBallSpinPreset
@@ -121,15 +122,16 @@ fun FullscreenTableScreen(
     onOpenPhotoScan: () -> Unit,
     customTipOffset: TipOffset? = null,
     defaultTipForShot: TipOffset? = null,
-    speedScaleOverride: Int? = null,
-    defaultSpeedScaleForShot: Int? = null,
+    speedUnitsOverride: Double? = null,
+    defaultSpeedUnitsForShot: Double? = null,
+    playerProfile: PlayerProfile = PlayerProfile(),
     sandboxTargetBallNumber: Int? = null,
     showCueSandboxPanel: Boolean = false,
     hasSandboxOverrides: Boolean = false,
     onToggleCueSandbox: () -> Unit = onOpenQuickSpinSheet,
     onCloseCueSandbox: () -> Unit = {},
     onUpdateCustomTip: (TipOffset?) -> Unit = {},
-    onSelectSpeedScale: (Int?) -> Unit = {},
+    onSelectSpeedUnits: (Double?) -> Unit = {},
     onResetSandboxDefaults: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -290,23 +292,28 @@ fun FullscreenTableScreen(
                         ?: activeStep?.recommendedTip
                         ?: defaultTipForShot
                         ?: TipOffset()
-                    val resolvedSpeed = speedScaleOverride
-                        ?: activeStep?.recommendedSpeedScale
-                        ?: defaultSpeedScaleForShot
-                        ?: 5
+                    val resolvedSpeed = speedUnitsOverride
+                        ?: activeStep?.recommendedSpeedUnits
+                        ?: defaultSpeedUnitsForShot
+                        ?: 4.5
+                    val cueToGhostMeters = activeStep?.compensatedAim?.geometricAim?.cueToGhostDistanceMeters
+                        ?: selectedShot?.aim?.cueToGhostDistanceMeters
                     CueBallSandboxPanel(
                         activeTip = resolvedTip,
                         defaultTip = defaultTipForShot ?: activeStep?.recommendedTip,
                         customTipOffset = customTipOffset,
-                        activeSpeedScale = resolvedSpeed,
-                        speedScaleOverride = speedScaleOverride,
+                        activeSpeedUnits = resolvedSpeed,
+                        speedUnitsOverride = speedUnitsOverride,
                         lockedTargetBallNumber = sandboxTargetBallNumber,
                         hasOverrides = hasSandboxOverrides,
                         onUpdateTip = onUpdateCustomTip,
-                        onUpdateSpeedScale = onSelectSpeedScale,
+                        onUpdateSpeedUnits = onSelectSpeedUnits,
                         onResetDefaults = onResetSandboxDefaults,
                         onClose = onCloseCueSandbox,
                         compactVertical = true,
+                        cueToObjectDistanceMeters = cueToGhostMeters,
+                        playerProfile = playerProfile,
+                        tableSpec = displayedLayout.table,
                     )
                 }
             }

@@ -56,6 +56,64 @@ data class TipOffset(
         else -> CueBallSpinPreset.STUN
     }
 
+    /**
+     * Multi-level human-readable description of vertical spin, side english, and mixed combinations
+     * (e.g. `"Center Ball (Stun)"`, `"Drag Stun + Touch of Left"`, `"Controlled Follow + Half-Tip Right"`,
+     * `"Max Power Draw"`).
+     */
+    fun describeSpinLabel(short: Boolean = false): String {
+        val side = clampedSideRatio
+        val vert = clampedVerticalRatio
+        val absSide = abs(side)
+        val absVert = abs(vert)
+        if (hypot(side, vert) < 0.06) {
+            return if (short) "Center Stun" else "Center Ball (Stun)"
+        }
+
+        val vertText = when {
+            absVert < 0.06 -> null
+            absVert < 0.16 -> if (vert > 0.0) {
+                if (short) "Touch Follow" else "Touch of Follow"
+            } else {
+                if (short) "Drag Stun" else "Touch of Low (Drag Stun)"
+            }
+            absVert < 0.28 -> if (vert > 0.0) {
+                if (short) "Ctrl Follow" else "Controlled Follow"
+            } else {
+                if (short) "Ctrl Draw" else "Controlled Draw"
+            }
+            absVert < 0.40 -> if (vert > 0.0) "Firm Follow" else "Firm Draw"
+            else -> if (vert > 0.0) {
+                if (short) "Max Follow" else "Max Top Follow"
+            } else {
+                if (short) "Max Draw" else "Max Power Draw"
+            }
+        }
+
+        val sideDir = if (side < 0.0) "Left" else "Right"
+        val sideText = when {
+            absSide < 0.06 -> null
+            absSide < 0.16 -> if (short) "Touch $sideDir" else "Touch of $sideDir"
+            absSide < 0.28 -> "1/2-Tip $sideDir"
+            absSide < 0.40 -> if (short) "Firm $sideDir" else "Firm $sideDir English"
+            else -> if (short) "Max $sideDir" else "Max $sideDir English"
+        }
+
+        return when {
+            vertText != null && sideText != null -> {
+                val compactVert = when {
+                    absVert in 0.06..<0.16 && vert < 0.0 -> "Drag Stun"
+                    else -> vertText
+                }
+                val compactSide = sideText.removeSuffix(" English")
+                "$compactVert + $compactSide"
+            }
+            vertText != null -> vertText
+            sideText != null -> if (short) "Stun + $sideText" else "Center + $sideText"
+            else -> if (short) "Center Stun" else "Center Ball (Stun)"
+        }
+    }
+
     companion object {
         const val MAX_SAFE_OFFSET_RATIO: Double = 0.50
 
@@ -82,6 +140,29 @@ data class TipOffset(
             }
             return candidates
         }
+
+        /**
+         * Graded tip candidates for realistic run-out planning, favoring center, drag-stun,
+         * controlled follow/draw, and mild half-tip english mixes before resorting to firm english.
+         */
+        fun gradedPlannerCandidates(): List<TipOffset> = listOf(
+            TipOffset(sideRatio = 0.0, verticalRatio = 0.0),
+            TipOffset(sideRatio = 0.0, verticalRatio = 0.18),
+            TipOffset(sideRatio = 0.0, verticalRatio = 0.35),
+            TipOffset(sideRatio = 0.0, verticalRatio = -0.14),
+            TipOffset(sideRatio = 0.0, verticalRatio = -0.26),
+            TipOffset(sideRatio = 0.0, verticalRatio = -0.40),
+            TipOffset(sideRatio = -0.16, verticalRatio = 0.0),
+            TipOffset(sideRatio = 0.16, verticalRatio = 0.0),
+            TipOffset(sideRatio = -0.16, verticalRatio = 0.20),
+            TipOffset(sideRatio = 0.16, verticalRatio = 0.20),
+            TipOffset(sideRatio = -0.16, verticalRatio = -0.22),
+            TipOffset(sideRatio = 0.16, verticalRatio = -0.22),
+            TipOffset(sideRatio = -0.30, verticalRatio = 0.28),
+            TipOffset(sideRatio = 0.30, verticalRatio = 0.28),
+            TipOffset(sideRatio = -0.28, verticalRatio = -0.34),
+            TipOffset(sideRatio = 0.28, verticalRatio = -0.34),
+        )
     }
 }
 
@@ -238,6 +319,193 @@ object SpinPhysics {
     }
 
     /**
+     * Vertical roll/spin regime of the cue ball at the moment it reaches the object ball after
+     * sliding/rolling across [AimGeometry.cueToGhostDistanceMeters] of cloth.
+     */
+    enum class ImpactSpinState {
+        BACKSPIN_DRAW,
+        STUN_SLIDE,
+        PARTIAL_FORWARD_ROLL,
+        NATURAL_FORWARD_ROLL,
+        STOPPED_SHORT,
+    }
+
+    /**
+     * Cue-ball translational speed and spin factor `k = (R * omega) / v` remaining upon contact
+     * with the object ball after cloth friction acts over `cueToGhostDistanceMeters`.
+     */
+    data class PreImpactCueState(
+        val impactSpeedMps: Double,
+        val impactSpinFactorK: Double,
+        val initialSpinFactorK: Double,
+        val state: ImpactSpinState,
+    )
+
+    private const val PRE_IMPACT_SKID_FRICTION_FACTOR: Double = 0.50
+
+    /**
+     * Maps normalized vertical tip offset to initial strike spin ratio `k0 = (R * omega0) / v0`.
+     */
+    fun initialSpinFactorForTip(tip: TipOffset): Double {
+        val vertical = tip.clampedVerticalRatio
+        return if (vertical >= 0.0) {
+            (vertical / 0.35).coerceIn(0.0, 1.30)
+        } else {
+            (vertical / 0.38 * 1.22).coerceIn(-1.38, 0.0)
+        }
+    }
+
+    /**
+     * Evolves initial cue-ball stroke speed [cueSpeedMps] and [tip] vertical spin over
+     * [cueToGhostDistanceMeters] of cloth (`muS`, `muR`), capturing how low-speed draw wears off
+     * into stun/sliding and then transitions into natural forward roll on longer shots.
+     */
+    fun computePreImpactCueState(
+        cueSpeedMps: Double,
+        tip: TipOffset,
+        cueToGhostDistanceMeters: Double,
+        table: TableSpec,
+    ): PreImpactCueState {
+        val k0 = initialSpinFactorForTip(tip)
+        if (cueSpeedMps <= 1e-6) {
+            return PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT)
+        }
+        val dist = cueToGhostDistanceMeters.coerceAtLeast(0.0)
+        if (dist <= 1e-6) {
+            val startState = when {
+                k0 < -0.08 -> ImpactSpinState.BACKSPIN_DRAW
+                k0 <= 0.15 -> ImpactSpinState.STUN_SLIDE
+                k0 < 0.92 -> ImpactSpinState.PARTIAL_FORWARD_ROLL
+                else -> ImpactSpinState.NATURAL_FORWARD_ROLL
+            }
+            return PreImpactCueState(cueSpeedMps, k0, k0, startState)
+        }
+
+        val g = MotionPhysics.GRAVITY_M_S2
+        val muPre = (table.cloth.slidingFrictionMuS * PRE_IMPACT_SKID_FRICTION_FACTOR).coerceAtLeast(0.05)
+        val muR = table.cloth.rollingResistanceMuR.coerceAtLeast(1e-4)
+        val v0 = cueSpeedMps
+        val vRoll = (((5.0 + 2.0 * k0) / 7.0) * v0).coerceAtLeast(0.0)
+
+        return when {
+            abs(k0 - 1.0) <= 1e-4 -> {
+                val vImpactSq = v0 * v0 - 2.0 * muR * g * dist
+                if (vImpactSq <= 1e-5) {
+                    PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT)
+                } else {
+                    PreImpactCueState(sqrt(vImpactSq), 1.0, k0, ImpactSpinState.NATURAL_FORWARD_ROLL)
+                }
+            }
+
+            abs(k0) <= 0.08 -> {
+                // Intentional Stun strike: holds pure 90-degree stun within its stroke-speed stun envelope,
+                // gradually picking up forward roll only when stroked too softly across long table distances.
+                val stunEnvelopeMeters = 0.68 * v0 * v0
+                val vImpactSq = v0 * v0 - 3.0 * muR * g * dist
+                if (vImpactSq <= 1e-5) {
+                    PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT)
+                } else {
+                    val vImpact = sqrt(vImpactSq)
+                    if (dist <= stunEnvelopeMeters) {
+                        PreImpactCueState(vImpact, 0.0, k0, ImpactSpinState.STUN_SLIDE)
+                    } else {
+                        val rollProgress = ((dist - stunEnvelopeMeters) / (0.65 * v0 * v0).coerceAtLeast(0.15))
+                            .coerceIn(0.0, 1.0)
+                        val state = if (rollProgress >= 0.92) {
+                            ImpactSpinState.NATURAL_FORWARD_ROLL
+                        } else {
+                            ImpactSpinState.PARTIAL_FORWARD_ROLL
+                        }
+                        PreImpactCueState(vImpact, rollProgress, k0, state)
+                    }
+                }
+            }
+
+            k0 < 1.0 -> {
+                val dRoll = ((v0 * v0 - vRoll * vRoll) / (2.0 * muPre * g)).coerceAtLeast(0.0)
+                if (dist < dRoll) {
+                    val vImpactSq = (v0 * v0 - 2.0 * muPre * g * dist).coerceAtLeast(1e-8)
+                    val vImpact = sqrt(vImpactSq)
+                    val rwImpact = k0 * v0 + 2.5 * (v0 - vImpact)
+                    val kImpact = (rwImpact / vImpact).coerceIn(-1.50, 1.0)
+                    val state = when {
+                        kImpact < -0.08 -> ImpactSpinState.BACKSPIN_DRAW
+                        kImpact <= 0.18 -> ImpactSpinState.STUN_SLIDE
+                        kImpact < 0.92 -> ImpactSpinState.PARTIAL_FORWARD_ROLL
+                        else -> ImpactSpinState.NATURAL_FORWARD_ROLL
+                    }
+                    PreImpactCueState(vImpact, kImpact, k0, state)
+                } else {
+                    val remDist = dist - dRoll
+                    val vImpactSq = vRoll * vRoll - 2.0 * muR * g * remDist
+                    if (vImpactSq <= 1e-5) {
+                        PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT)
+                    } else {
+                        PreImpactCueState(sqrt(vImpactSq), 1.0, k0, ImpactSpinState.NATURAL_FORWARD_ROLL)
+                    }
+                }
+            }
+
+            else -> {
+                // Overspin follow (k0 > 1.0): backward bottom slip accelerates CM forward until natural roll
+                val dRoll = ((vRoll * vRoll - v0 * v0) / (2.0 * muPre * g)).coerceAtLeast(0.0)
+                if (dist < dRoll) {
+                    val vImpact = sqrt(v0 * v0 + 2.0 * muPre * g * dist)
+                    val rwImpact = k0 * v0 - 2.5 * (vImpact - v0)
+                    val kImpact = (rwImpact / vImpact).coerceIn(1.0, 1.35)
+                    PreImpactCueState(vImpact, kImpact, k0, ImpactSpinState.NATURAL_FORWARD_ROLL)
+                } else {
+                    val remDist = dist - dRoll
+                    val vImpactSq = vRoll * vRoll - 2.0 * muR * g * remDist
+                    if (vImpactSq <= 1e-5) {
+                        PreImpactCueState(0.0, 0.0, k0, ImpactSpinState.STOPPED_SHORT)
+                    } else {
+                        PreImpactCueState(sqrt(vImpactSq), 1.0, k0, ImpactSpinState.NATURAL_FORWARD_ROLL)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Plain-English coaching summary of how the cue ball's vertical spin evolves across
+     * [cueToGhostDistanceMeters] before hitting the object ball.
+     */
+    fun describeImpactTransition(
+        tip: TipOffset,
+        cueSpeedMps: Double,
+        cueToGhostDistanceMeters: Double,
+        table: TableSpec,
+    ): String {
+        val pre = computePreImpactCueState(cueSpeedMps, tip, cueToGhostDistanceMeters, table)
+        val distTenths = ((cueToGhostDistanceMeters * 10.0).toInt() / 10.0)
+        return when (pre.state) {
+            ImpactSpinState.STOPPED_SHORT ->
+                "Too soft for ${distTenths}m — cue ball stops short before object ball"
+            ImpactSpinState.BACKSPIN_DRAW ->
+                "Holds backspin across ${distTenths}m → draws back off contact"
+            ImpactSpinState.STUN_SLIDE -> if (pre.initialSpinFactorK < -0.25) {
+                "Backspin delays into a 90° stun at ${distTenths}m contact"
+            } else {
+                "Arrives sliding → crisp 90° tangent stun at contact"
+            }
+            ImpactSpinState.PARTIAL_FORWARD_ROLL -> if (pre.initialSpinFactorK < -0.15) {
+                "Draw fades over ${distTenths}m → gentle stun-forward roll at contact"
+            } else {
+                "Picks up partial forward roll over ${distTenths}m"
+            }
+            ImpactSpinState.NATURAL_FORWARD_ROLL -> when {
+                pre.initialSpinFactorK < -0.20 ->
+                    "Draw wears off over ${distTenths}m → transitions to forward roll!"
+                abs(pre.initialSpinFactorK) <= 0.20 ->
+                    "Center strike transitions to natural forward roll over ${distTenths}m"
+                else ->
+                    "Arrives in smooth natural forward roll (~30° line)"
+            }
+        }
+    }
+
+    /**
      * Immediate post-impact cue-ball velocity (m/s) and initial deflection from the aim line (rad).
      */
     internal data class PostImpactCueState(
@@ -253,7 +521,14 @@ object SpinPhysics {
         tip: TipOffset,
         table: TableSpec,
     ): PostImpactCueState {
-        if (cueSpeedMps <= 1e-6) {
+        val preImpact = computePreImpactCueState(
+            cueSpeedMps = cueSpeedMps,
+            tip = tip,
+            cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+            table = table,
+        )
+        val impactSpeed = preImpact.impactSpeedMps
+        if (impactSpeed <= 1e-6) {
             return PostImpactCueState(Vec2.ZERO, 0.0, 0.0, 0.0)
         }
         val absPhi = abs(aim.cutAngleRadians)
@@ -264,26 +539,19 @@ object SpinPhysics {
         } else {
             aim.objectBallDirection.rotate(PI / 2.0)
         }
-        val vertical = tip.clampedVerticalRatio
-        // Map normalized vertical tip offset smoothly to dimensionless spin factor k in [-1.85, 1.35]:
-        // STUN (0.0) -> 0.0, FOLLOW (+0.35) -> +1.0, DRAW (-0.38) -> -1.5.
-        val spinFactorK = if (vertical >= 0.0) {
-            (vertical / 0.35).coerceIn(0.0, 1.35)
-        } else {
-            (vertical / 0.38 * 1.5).coerceIn(-1.85, 0.0)
-        }
+        val spinFactorK = preImpact.impactSpinFactorK
 
         val postSlideVelocity = if (absPhi <= STRAIGHT_IN_ANGLE_EPSILON_RAD) {
             if (abs(spinFactorK) <= 1e-4) {
                 Vec2.ZERO
             } else {
-                aim.objectBallDirection * ((2.0 / 7.0) * spinFactorK * cueSpeedMps)
+                aim.objectBallDirection * ((2.0 / 7.0) * spinFactorK * impactSpeed)
             }
         } else {
             (
                 aim.objectBallDirection * ((2.0 / 7.0) * spinFactorK * cosPhi) +
                     tangentDir * ((5.0 / 7.0 + (2.0 / 7.0) * spinFactorK) * sinPhi)
-                ) * cueSpeedMps
+                ) * impactSpeed
         }
 
         val baseSpeed = postSlideVelocity.length()
@@ -298,10 +566,10 @@ object SpinPhysics {
         val muS = table.cloth.slidingFrictionMuS.coerceAtLeast(1e-4)
         val g = MotionPhysics.GRAVITY_M_S2
 
-        // Blend in the exact pure-stun slide distance near verticalRatio == 0 so STUN distance matches MotionPhysics.
+        // Blend in the pure-stun post-impact slide distance when impact spin factor is near stun (0.0).
         val stunWeight = (1.0 - abs(spinFactorK)).coerceIn(0.0, 1.0)
         val extraSlideDist = if (absPhi > STRAIGHT_IN_ANGLE_EPSILON_RAD && stunWeight > 0.0) {
-            val vSlide0 = cueSpeedMps * sinPhi
+            val vSlide0 = impactSpeed * sinPhi
             val slideDist = (12.0 * vSlide0 * vSlide0) / (49.0 * muS * g)
             slideDist * stunWeight
         } else {

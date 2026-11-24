@@ -1,20 +1,39 @@
 package com.runout.app.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -31,13 +50,17 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.runout.engine.math.Vec2
@@ -170,9 +193,148 @@ fun ballBaseColor(
 ): Color = ballPaletteToComposeColor(ballSet.colorForBall(ballNumber))
 
 /**
+ * Computes the exact top-left `y` coordinate for [drawText] so uppercase digits (`0..9`) sit
+ * optically dead-center vertically around [centerY], independent of platform font padding or descent.
+ */
+internal fun centeredDigitTopY(
+    centerY: Float,
+    layout: TextLayoutResult,
+    fontSizePx: Float,
+): Float {
+    val capHeightPx = fontSizePx * 0.72f
+    return centerY - layout.firstBaseline + capHeightPx * 0.5f
+}
+
+/**
+ * Crisp Canvas-rendered pool ball swatch (`0..15`) with optically centered vertical numbering,
+ * shared across reassign lists, photo review cards, and ball selection grids.
+ */
+@Composable
+fun BallNumberBadge(
+    ballNumber: Int,
+    ballSet: BallSetProfile = BallSetProfile.standardPool(),
+    sizeDp: Dp = 28.dp,
+    modifier: Modifier = Modifier,
+) {
+    val textMeasurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    Canvas(modifier = modifier.size(sizeDp)) {
+        val center = Offset(size.width * 0.5f, size.height * 0.5f)
+        val radiusPx = (min(size.width, size.height) * 0.46f).coerceAtLeast(1f)
+        val ballColor = ballBaseColor(ballNumber, ballSet)
+        val whiteBase = Color(0xFFF8FAFC)
+        val isStripe = ballNumber in 9..15
+
+        drawCircle(
+            color = Color(0x40000000),
+            radius = radiusPx,
+            center = center + Offset(radiusPx * 0.06f, radiusPx * 0.10f),
+        )
+
+        if (ballNumber == 0) {
+            drawCircle(color = whiteBase, radius = radiusPx, center = center)
+            drawCircle(
+                color = Color(0xFFDC2626),
+                radius = max(1.4f, radiusPx * 0.19f),
+                center = center + Offset(radiusPx * 0.22f, -radiusPx * 0.18f),
+            )
+        } else if (isStripe) {
+            drawCircle(color = whiteBase, radius = radiusPx, center = center)
+            val clipCircle = Path().apply { addOval(Rect(center = center, radius = radiusPx)) }
+            clipPath(clipCircle) {
+                val bandHalf = radiusPx * 0.58f
+                drawRect(
+                    color = ballColor,
+                    topLeft = Offset(center.x - radiusPx, center.y - bandHalf),
+                    size = Size(radiusPx * 2f, bandHalf * 2f),
+                )
+            }
+        } else {
+            drawCircle(color = ballColor, radius = radiusPx, center = center)
+        }
+
+        if (ballNumber != 0) {
+            val plateRadius = radiusPx * 0.56f
+            drawCircle(color = whiteBase, radius = plateRadius, center = center)
+            val fontSizePx = (radiusPx * (if (ballNumber >= 10) 0.66f else 0.74f)).coerceAtLeast(6f)
+            val fontSizeSp = with(density) { fontSizePx.toSp() }
+            val labelLayout = textMeasurer.measure(
+                text = ballNumber.toString(),
+                style = TextStyle(
+                    color = Color(0xFF0F172A),
+                    fontSize = fontSizeSp,
+                    fontWeight = FontWeight.Bold,
+                ),
+            )
+            drawText(
+                textLayoutResult = labelLayout,
+                topLeft = Offset(
+                    x = center.x - labelLayout.size.width * 0.5f,
+                    y = centeredDigitTopY(center.y, labelLayout, fontSizePx),
+                ),
+            )
+        }
+
+        drawCircle(
+            color = Color(0xAA0F172A),
+            radius = radiusPx,
+            center = center,
+            style = Stroke(width = max(1f, radiusPx * 0.08f)),
+        )
+    }
+}
+
+internal const val MIN_TABLE_ZOOM: Float = 1.0f
+internal const val MAX_TABLE_ZOOM: Float = 3.5f
+
+internal fun clampTablePanOffset(
+    rawPan: Offset,
+    zoom: Float,
+    canvasWidth: Float,
+    canvasHeight: Float,
+): Offset {
+    if (zoom <= 1.001f) return Offset.Zero
+    val maxPanX = (canvasWidth * (zoom - 1f) * 0.5f).coerceAtLeast(0f)
+    val maxPanY = (canvasHeight * (zoom - 1f) * 0.5f).coerceAtLeast(0f)
+    return Offset(
+        x = rawPan.x.coerceIn(-maxPanX, maxPanX),
+        y = rawPan.y.coerceIn(-maxPanY, maxPanY),
+    )
+}
+
+internal fun screenToBaseCanvasOffset(
+    screenOffset: Offset,
+    canvasSize: Size,
+    zoom: Float,
+    panOffset: Offset,
+): Offset {
+    val cx = canvasSize.width * 0.5f
+    val cy = canvasSize.height * 0.5f
+    val safeZoom = zoom.coerceAtLeast(1f)
+    return Offset(
+        x = cx + (screenOffset.x - cx - panOffset.x) / safeZoom,
+        y = cy + (screenOffset.y - cy - panOffset.y) / safeZoom,
+    )
+}
+
+internal fun baseToScreenCanvasOffset(
+    baseOffset: Offset,
+    canvasSize: Size,
+    zoom: Float,
+    panOffset: Offset,
+): Offset {
+    val cx = canvasSize.width * 0.5f
+    val cy = canvasSize.height * 0.5f
+    return Offset(
+        x = cx + (baseOffset.x - cx) * zoom + panOffset.x,
+        y = cy + (baseOffset.y - cy) * zoom + panOffset.y,
+    )
+}
+
+/**
  * Renders a top-down pool or snooker table in accurate `length : width` proportions, mapping SI metres
  * from [layout], [selectedShot], and [activeRunoutPlan] to canvas pixels at the UI boundary and
- * supporting drag-and-drop ball placement when [onMoveBall] is provided.
+ * supporting pinch-to-zoom / pan (`1.0x..3.5x`), corner zoom controls, and precision loupe ball dragging.
  */
 @Composable
 fun PoolTableCanvas(
@@ -207,130 +369,177 @@ fun PoolTableCanvas(
     val latestOnSelectPocket by rememberUpdatedState(onSelectPocket)
     val latestOnTapCueBall by rememberUpdatedState(onTapCueBall)
 
+    var zoomScale by remember { mutableStateOf(1f) }
+    var panOffset by remember { mutableStateOf(Offset.Zero) }
+    var lastCanvasSize by remember { mutableStateOf(Size.Zero) }
     var activeDraggedBallNumber by remember { mutableStateOf<Int?>(null) }
     var activeDragCanvasPos by remember { mutableStateOf<Offset?>(null) }
 
-    val dragModifier = if (onMoveBall != null) {
-        Modifier.pointerInput(true) {
-            var draggedBallNumber: Int? = null
-            var dragPosPx = Offset.Zero
-            detectDragGestures(
-                onDragStart = { startOffset ->
-                    val activeLayout = latestLayout
-                    val geom = computeTableCanvasGeometry(
-                        canvasWidth = size.width.toFloat(),
-                        canvasHeight = size.height.toFloat(),
-                        table = activeLayout.table,
-                    )
-                    val hitRadiusPx = max(
-                        36f,
-                        (activeLayout.table.ballRadiusMeters * geom.pxPerMeter * 2.2).toFloat(),
-                    )
-                    val hitBall = activeLayout.balls
-                        .map { ball ->
-                            val center = geom.toCanvasOffset(ball.position)
-                            val dist = hypot(startOffset.x - center.x, startOffset.y - center.y)
-                            ball to dist
-                        }
-                        .filter { (_, dist) -> dist <= hitRadiusPx }
-                        .minByOrNull { (_, dist) -> dist }
-                        ?.first
-                    if (hitBall != null) {
-                        val startCanvas = geom.toCanvasOffset(hitBall.position)
-                        draggedBallNumber = hitBall.number
-                        dragPosPx = startCanvas
-                        activeDraggedBallNumber = hitBall.number
-                        activeDragCanvasPos = startCanvas
-                        latestOnDragStateChanged?.invoke(true)
-                    } else {
-                        draggedBallNumber = null
-                        activeDraggedBallNumber = null
-                        activeDragCanvasPos = null
-                    }
-                },
-                onDrag = { change, dragAmount ->
-                    val ballNumber = draggedBallNumber ?: return@detectDragGestures
-                    change.consume()
-                    dragPosPx += dragAmount
-                    activeDragCanvasPos = dragPosPx
-                    val activeLayout = latestLayout
-                    val geom = computeTableCanvasGeometry(
-                        canvasWidth = size.width.toFloat(),
-                        canvasHeight = size.height.toFloat(),
-                        table = activeLayout.table,
-                    )
-                    latestOnMoveBall?.invoke(ballNumber, geom.toTableMeters(dragPosPx))
-                },
-                onDragEnd = {
-                    if (draggedBallNumber != null) {
-                        draggedBallNumber = null
-                        activeDraggedBallNumber = null
-                        activeDragCanvasPos = null
-                        latestOnDragStateChanged?.invoke(false)
-                    }
-                },
-                onDragCancel = {
-                    if (draggedBallNumber != null) {
-                        draggedBallNumber = null
-                        activeDraggedBallNumber = null
-                        activeDragCanvasPos = null
-                        latestOnDragStateChanged?.invoke(false)
-                    }
-                },
-            )
+    fun applyStepZoom(targetZoom: Float) {
+        val clamped = targetZoom.coerceIn(MIN_TABLE_ZOOM, MAX_TABLE_ZOOM)
+        if (clamped <= 1.001f || lastCanvasSize.width <= 1f || lastCanvasSize.height <= 1f) {
+            zoomScale = 1f
+            panOffset = Offset.Zero
+            return
         }
-    } else {
-        Modifier
+        val oldZoom = zoomScale
+        val center = Offset(lastCanvasSize.width * 0.5f, lastCanvasSize.height * 0.5f)
+        val rawPan = panOffset * (clamped / oldZoom.coerceAtLeast(1f))
+        zoomScale = clamped
+        panOffset = clampTablePanOffset(rawPan, clamped, center.x * 2f, center.y * 2f)
     }
 
-    val tapModifier = if (onSelectPocket != null || onTapCueBall != null) {
-        Modifier.pointerInput(true) {
-            detectTapGestures { tapOffset ->
+    val interactiveGestureModifier = Modifier.pointerInput(Unit) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val cSize = Size(size.width.toFloat(), size.height.toFloat())
+            val startLayout = latestLayout
+            val startGeom = computeTableCanvasGeometry(cSize.width, cSize.height, startLayout.table)
+
+            val hitBall = if (latestOnMoveBall != null || latestOnTapCueBall != null) {
+                startLayout.balls
+                    .map { ball ->
+                        val screenPos = baseToScreenCanvasOffset(
+                            startGeom.toCanvasOffset(ball.position),
+                            cSize,
+                            zoomScale,
+                            panOffset,
+                        )
+                        val dist = hypot(down.position.x - screenPos.x, down.position.y - screenPos.y)
+                        val hitR = max(
+                            36f,
+                            (ball.radiusMeters * startGeom.pxPerMeter * zoomScale * 2.0).toFloat(),
+                        ).coerceAtMost(74f)
+                        Triple(ball, dist, hitR)
+                    }
+                    .filter { (_, dist, hitR) -> dist <= hitR }
+                    .minByOrNull { (_, dist, _) -> dist }
+                    ?.first
+            } else {
+                null
+            }
+            val initialBallPosMeters = hitBall?.position
+            var isBallDragging = false
+            var isPanning = false
+            var enteredPinch = false
+            var maxSingleMovePx = 0f
+            var lastSinglePos = down.position
+
+            while (true) {
+                val event = awaitPointerEvent()
+                val pressed = event.changes.filter { it.pressed }
+                if (pressed.isEmpty()) break
+
+                if (pressed.size >= 2) {
+                    if (isBallDragging && maxSingleMovePx < viewConfiguration.touchSlop * 2.5f) {
+                        if (hitBall != null && initialBallPosMeters != null) {
+                            latestOnMoveBall?.invoke(hitBall.number, initialBallPosMeters)
+                        }
+                        isBallDragging = false
+                        activeDraggedBallNumber = null
+                        activeDragCanvasPos = null
+                        latestOnDragStateChanged?.invoke(false)
+                    }
+                    enteredPinch = true
+                    if (!isBallDragging) {
+                        val zoomChange = event.calculateZoom()
+                        val panChange = event.calculatePan()
+                        val centroid = event.calculateCentroid(useCurrent = false)
+                        val oldZoom = zoomScale
+                        val newZoom = (oldZoom * zoomChange).coerceIn(MIN_TABLE_ZOOM, MAX_TABLE_ZOOM)
+                        val center = Offset(cSize.width * 0.5f, cSize.height * 0.5f)
+                        val focal = if (centroid != Offset.Unspecified) centroid else center
+                        val rel = focal - center
+                        val rawPan = rel + panChange - (rel - panOffset) * (newZoom / oldZoom.coerceAtLeast(1f))
+                        zoomScale = newZoom
+                        panOffset = clampTablePanOffset(rawPan, newZoom, cSize.width, cSize.height)
+                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                    }
+                } else if (!enteredPinch) {
+                    val change = pressed.first()
+                    lastSinglePos = change.position
+                    val totalMove = (change.position - down.position).getDistance()
+                    if (totalMove > maxSingleMovePx) maxSingleMovePx = totalMove
+
+                    if (hitBall != null && latestOnMoveBall != null) {
+                        if (maxSingleMovePx > viewConfiguration.touchSlop * 0.45f) {
+                            if (!isBallDragging) {
+                                isBallDragging = true
+                                activeDraggedBallNumber = hitBall.number
+                                latestOnDragStateChanged?.invoke(true)
+                            }
+                            change.consume()
+                            activeDragCanvasPos = change.position
+                            val curGeom = computeTableCanvasGeometry(cSize.width, cSize.height, latestLayout.table)
+                            val baseOffset = screenToBaseCanvasOffset(change.position, cSize, zoomScale, panOffset)
+                            latestOnMoveBall?.invoke(hitBall.number, curGeom.toTableMeters(baseOffset))
+                        }
+                    } else if (zoomScale > 1.01f) {
+                        if (maxSingleMovePx > viewConfiguration.touchSlop * 0.6f) {
+                            isPanning = true
+                            val delta = change.position - change.previousPosition
+                            change.consume()
+                            panOffset = clampTablePanOffset(panOffset + delta, zoomScale, cSize.width, cSize.height)
+                        }
+                    }
+                }
+            }
+
+            if (isBallDragging) {
+                activeDraggedBallNumber = null
+                activeDragCanvasPos = null
+                latestOnDragStateChanged?.invoke(false)
+            } else if (!enteredPinch && !isPanning && maxSingleMovePx <= viewConfiguration.touchSlop && !down.isConsumed) {
                 val activeLayout = latestLayout
-                val geom = computeTableCanvasGeometry(
-                    canvasWidth = size.width.toFloat(),
-                    canvasHeight = size.height.toFloat(),
-                    table = activeLayout.table,
-                )
+                val curGeom = computeTableCanvasGeometry(cSize.width, cSize.height, activeLayout.table)
+                var handledTap = false
                 if (latestOnTapCueBall != null) {
                     val cueBall = activeLayout.cueBall()
                     if (cueBall != null) {
-                        val cueCenter = geom.toCanvasOffset(cueBall.position)
-                        val cueDist = hypot(tapOffset.x - cueCenter.x, tapOffset.y - cueCenter.y)
-                        val cueHitRadius = max(
-                            40f,
-                            (cueBall.radiusMeters * geom.pxPerMeter * 2.3).toFloat(),
+                        val cueScreen = baseToScreenCanvasOffset(
+                            curGeom.toCanvasOffset(cueBall.position),
+                            cSize,
+                            zoomScale,
+                            panOffset,
                         )
-                        if (cueDist <= cueHitRadius) {
+                        val cueDist = hypot(lastSinglePos.x - cueScreen.x, lastSinglePos.y - cueScreen.y)
+                        val cueHitR = max(
+                            40f,
+                            (cueBall.radiusMeters * curGeom.pxPerMeter * zoomScale * 2.3).toFloat(),
+                        ).coerceAtMost(80f)
+                        if (cueDist <= cueHitR) {
                             latestOnTapCueBall?.invoke()
-                            return@detectTapGestures
+                            handledTap = true
                         }
                     }
                 }
-                val validPockets = latestAvailablePockets
-                if (validPockets.isEmpty() || latestOnSelectPocket == null) return@detectTapGestures
-                val validSet = validPockets.toSet()
-                val tappedPocket = activeLayout.table.pockets
-                    .filter { it.id in validSet }
-                    .map { pocket ->
-                        val center = geom.toCanvasOffset(pocket.center)
-                        val dist = hypot(tapOffset.x - center.x, tapOffset.y - center.y)
-                        val hitRadius = max(
-                            44f,
-                            (pocket.acceptanceRadiusMeters * geom.pxPerMeter * 1.9).toFloat(),
-                        )
-                        Triple(pocket, dist, hitRadius)
+                if (!handledTap && latestOnSelectPocket != null && latestAvailablePockets.isNotEmpty()) {
+                    val validSet = latestAvailablePockets.toSet()
+                    val tappedPocket = activeLayout.table.pockets
+                        .filter { it.id in validSet }
+                        .map { pocket ->
+                            val screenPocket = baseToScreenCanvasOffset(
+                                curGeom.toCanvasOffset(pocket.center),
+                                cSize,
+                                zoomScale,
+                                panOffset,
+                            )
+                            val dist = hypot(lastSinglePos.x - screenPocket.x, lastSinglePos.y - screenPocket.y)
+                            val hitR = max(
+                                44f,
+                                (pocket.acceptanceRadiusMeters * curGeom.pxPerMeter * zoomScale * 1.9).toFloat(),
+                            ).coerceAtMost(84f)
+                            Triple(pocket, dist, hitR)
+                        }
+                        .filter { (_, dist, hitR) -> dist <= hitR }
+                        .minByOrNull { (_, dist, _) -> dist }
+                        ?.first
+                    if (tappedPocket != null) {
+                        latestOnSelectPocket?.invoke(tappedPocket.id)
                     }
-                    .filter { (_, dist, hitRadius) -> dist <= hitRadius }
-                    .minByOrNull { (_, dist, _) -> dist }
-                    ?.first
-                if (tappedPocket != null) {
-                    latestOnSelectPocket?.invoke(tappedPocket.id)
                 }
             }
         }
-    } else {
-        Modifier
     }
 
     val sizeModifier = if (fitContainer) {
@@ -341,28 +550,32 @@ fun PoolTableCanvas(
             .aspectRatio(tableAspectRatio)
     }
 
-    Canvas(
-        modifier = sizeModifier
-            .then(dragModifier)
-            .then(tapModifier),
+    Box(
+        modifier = sizeModifier.clipToBounds(),
     ) {
-        val geom = computeTableCanvasGeometry(
-            canvasWidth = size.width,
-            canvasHeight = size.height,
-            table = table,
-        )
-        val railPaddingPx = geom.railPaddingPx
-        val pxPerMeter = geom.pxPerMeter
-        val playLeft = geom.playLeft
-        val playTop = geom.playTop
-        val playWidth = geom.playWidth
-        val playHeight = geom.playHeight
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(interactiveGestureModifier),
+        ) {
+            lastCanvasSize = size
+            val geom = computeTableCanvasGeometry(
+                canvasWidth = size.width,
+                canvasHeight = size.height,
+                table = table,
+            )
+            val railPaddingPx = geom.railPaddingPx
+            val pxPerMeter = geom.pxPerMeter
+            val playLeft = geom.playLeft
+            val playTop = geom.playTop
+            val playWidth = geom.playWidth
+            val playHeight = geom.playHeight
 
-        fun toCanvasOffset(siPos: Vec2): Offset = geom.toCanvasOffset(siPos)
+            fun toCanvasOffset(siPos: Vec2): Offset = geom.toCanvasOffset(siPos)
 
-        fun DrawScope.renderTableLayer() {
-            // 1. Wooden rails and cushion border
-            val railOuterLeft = playLeft - railPaddingPx
+            fun DrawScope.renderTableLayer() {
+                // 1. Wooden rails and cushion border
+                val railOuterLeft = playLeft - railPaddingPx
         val railOuterTop = playTop - railPaddingPx
         val railOuterWidth = playWidth + 2f * railPaddingPx
         val railOuterHeight = playHeight + 2f * railPaddingPx
@@ -511,6 +724,7 @@ fun PoolTableCanvas(
                 drawRunoutPlanOverlay(
                     layout = layout,
                     plan = activeRunoutPlan,
+                    ballSet = ballSet,
                     focusedStepIndex = clampedStepIdx,
                     nextVisibility = activeVisibility,
                     showLandingCloud = showLandingCloud,
@@ -526,6 +740,7 @@ fun PoolTableCanvas(
             } else if (selectedShot != null) {
                 drawSelectedShotOverlay(
                     shot = selectedShot,
+                    ballSet = ballSet,
                     visibleSpins = visibleSpins,
                     ballRadiusMeters = table.ballRadiusMeters,
                     pxPerMeter = pxPerMeter,
@@ -535,7 +750,8 @@ fun PoolTableCanvas(
         }
 
         // 7. Balls on the playing surface
-        val fontSizeSp = with(density) { (ballRadiusPx * 0.82f).toSp() }
+        val fontSizePx = (ballRadiusPx * 0.80f).coerceAtLeast(6f)
+        val fontSizeSp = with(density) { fontSizePx.toSp() }
         val targetBallNumber = if (!isDraggingBall) {
             focusedStep?.targetBall?.number ?: selectedShot?.targetBall?.number
         } else {
@@ -553,6 +769,7 @@ fun PoolTableCanvas(
                 isCueSelected = isCueSelected,
                 textMeasurer = textMeasurer,
                 fontSizeSp = fontSizeSp,
+                fontSizePx = fontSizePx,
             )
         }
 
@@ -569,92 +786,320 @@ fun PoolTableCanvas(
                 toCanvasOffset = ::toCanvasOffset,
             )
         }
+            }
+
+            fun DrawScope.renderZoomedTableScene() {
+                if (zoomScale > 1.001f || panOffset != Offset.Zero) {
+                    val pivotCenter = Offset(size.width * 0.5f, size.height * 0.5f)
+                    withTransform({
+                        translate(left = panOffset.x, top = panOffset.y)
+                        scale(scaleX = zoomScale, scaleY = zoomScale, pivot = pivotCenter)
+                    }) {
+                        renderTableLayer()
+                    }
+                } else {
+                    renderTableLayer()
+                }
+            }
+
+            renderZoomedTableScene()
+
+            // 9. Floating precision magnifying glass loupe while dragging a ball on the table
+            val dragNum = activeDraggedBallNumber
+            if (dragNum != null) {
+                val draggedBall = layout.balls.firstOrNull { it.number == dragNum }
+                val focusPos = draggedBall?.let {
+                    baseToScreenCanvasOffset(toCanvasOffset(it.position), size, zoomScale, panOffset)
+                } ?: activeDragCanvasPos
+                if (focusPos != null) {
+                    val loupeR = minOf(with(density) { 56.dp.toPx() }, size.minDimension * 0.24f)
+                    val clearance = with(density) { 42.dp.toPx() }
+                    val loupeCenter = computeLoupeCenter(
+                        targetCanvasPos = focusPos,
+                        canvasSize = size,
+                        loupeRadiusPx = loupeR,
+                        fingerClearancePx = clearance,
+                    )
+                    val badge = if (dragNum == 0) "Cue Ball" else "Ball #$dragNum"
+                    val badgeFontSp = with(density) { 10.dp.toSp() }
+                    drawPrecisionLoupe(
+                        focusCanvasPos = focusPos,
+                        loupeCenter = loupeCenter,
+                        loupeRadiusPx = loupeR,
+                        zoom = 2.4f,
+                        accentColor = RunoutColors.PrimaryCyan,
+                        badgeLabel = badge,
+                        showCenterRedDot = true,
+                        showCrosshair = true,
+                        textMeasurer = textMeasurer,
+                        labelFontSp = badgeFontSp,
+                        drawZoomedScene = { renderZoomedTableScene() },
+                    )
+                }
+            }
         }
 
-        renderTableLayer()
+        // Pocket-free wood-rail zoom controls (aligned at the 25% head-string rail between pockets)
+        TableZoomControlsPill(
+            zoomScale = zoomScale,
+            onZoomOut = { applyStepZoom((zoomScale - 0.5f).coerceAtLeast(MIN_TABLE_ZOOM)) },
+            onResetZoom = { applyStepZoom(1.0f) },
+            onZoomIn = { applyStepZoom((zoomScale + 0.5f).coerceAtMost(MAX_TABLE_ZOOM)) },
+            modifier = Modifier
+                .align(BiasAlignment(horizontalBias = -0.50f, verticalBias = 0.98f))
+                .padding(bottom = 2.dp),
+        )
+    }
+}
 
-        // 9. Floating precision magnifying glass loupe while dragging a ball on the table
-        val dragNum = activeDraggedBallNumber
-        if (dragNum != null) {
-            val draggedBall = layout.balls.firstOrNull { it.number == dragNum }
-            val focusPos = draggedBall?.let { toCanvasOffset(it.position) } ?: activeDragCanvasPos
-            if (focusPos != null) {
-                val loupeR = minOf(with(density) { 56.dp.toPx() }, size.minDimension * 0.24f)
-                val clearance = with(density) { 42.dp.toPx() }
-                val loupeCenter = computeLoupeCenter(
-                    targetCanvasPos = focusPos,
-                    canvasSize = size,
-                    loupeRadiusPx = loupeR,
-                    fingerClearancePx = clearance,
+@Composable
+private fun TableZoomControlsPill(
+    zoomScale: Float,
+    onZoomOut: () -> Unit,
+    onResetZoom: () -> Unit,
+    onZoomIn: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val isZoomed = zoomScale > 1.02f
+    val zoomTenths = (zoomScale * 10f).toInt()
+    val zoomLabel = "${zoomTenths / 10}.${zoomTenths % 10}x"
+
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(999.dp),
+        color = Color(0xCC0B1120),
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (isZoomed) RunoutColors.PrimaryCyan.copy(alpha = 0.65f) else Color(0x66475569),
+        ),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 28.dp, minHeight = 24.dp)
+                    .clickable(enabled = isZoomed, onClick = onZoomOut),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "−",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isZoomed) RunoutColors.TextPrimary else RunoutColors.TextSecondary.copy(alpha = 0.45f),
                 )
-                val badge = if (dragNum == 0) "Cue Ball" else "Ball #$dragNum"
-                val badgeFontSp = with(density) { 10.dp.toSp() }
-                drawPrecisionLoupe(
-                    focusCanvasPos = focusPos,
-                    loupeCenter = loupeCenter,
-                    loupeRadiusPx = loupeR,
-                    zoom = 2.4f,
-                    accentColor = RunoutColors.PrimaryCyan,
-                    badgeLabel = badge,
-                    showCenterRedDot = true,
-                    showCrosshair = true,
-                    textMeasurer = textMeasurer,
-                    labelFontSp = badgeFontSp,
-                    drawZoomedScene = { renderTableLayer() },
+            }
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 36.dp, minHeight = 24.dp)
+                    .background(
+                        color = if (isZoomed) RunoutColors.PrimaryCyan.copy(alpha = 0.20f) else Color.Transparent,
+                        shape = RoundedCornerShape(999.dp),
+                    )
+                    .clickable(enabled = isZoomed, onClick = onResetZoom)
+                    .padding(horizontal = 5.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = zoomLabel,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isZoomed) RunoutColors.PrimaryCyan else RunoutColors.TextSecondary,
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 28.dp, minHeight = 24.dp)
+                    .clickable(enabled = zoomScale < MAX_TABLE_ZOOM - 0.02f, onClick = onZoomIn),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "+",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (zoomScale < MAX_TABLE_ZOOM - 0.02f) {
+                        RunoutColors.TextPrimary
+                    } else {
+                        RunoutColors.TextSecondary.copy(alpha = 0.45f)
+                    },
                 )
             }
         }
     }
 }
 
+/**
+ * Draws a crisp solid trajectory polyline in the moving ball's own solid base colour
+ * (`#0` cue ball = bright white, `#1..#15` solids and stripes = `ballBaseColor`), backed by
+ * a thin contrasting casing so green (`#6`), black (`#8`), and white (`#0`) paths stay clear on felt.
+ */
+private fun DrawScope.drawBallSolidTrajectory(
+    points: List<Vec2>,
+    ballNumber: Int,
+    ballSet: BallSetProfile,
+    strokeWidth: Float,
+    ballRadiusPx: Float,
+    pxPerMeter: Float,
+    showEndStopRing: Boolean,
+    hitsScratch: Boolean = false,
+    alpha: Float = 1.0f,
+    toCanvasOffset: (Vec2) -> Offset,
+) {
+    if (points.isEmpty()) return
+    val rawColor = if (ballNumber == 0) {
+        Color(0xFFF8FAFC)
+    } else {
+        ballBaseColor(ballNumber, ballSet)
+    }
+    val lineColor = rawColor.copy(alpha = alpha)
+    val isBlackBall = ballSet.colorForBall(ballNumber) == BallPaletteColor.BLACK && ballNumber != 0
+    val casingColor = if (isBlackBall) {
+        Color(0xCCE2E8F0).copy(alpha = alpha * 0.85f)
+    } else {
+        Color(0xA8090D12).copy(alpha = alpha * 0.80f)
+    }
+
+    if (points.size >= 2) {
+        val path = Path().apply {
+            val first = toCanvasOffset(points.first())
+            moveTo(first.x, first.y)
+            for (idx in 1 until points.size) {
+                val pt = toCanvasOffset(points[idx])
+                lineTo(pt.x, pt.y)
+            }
+        }
+        drawPath(
+            path = path,
+            color = casingColor,
+            style = Stroke(
+                width = strokeWidth + max(1.6f, pxPerMeter * 0.0045f),
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round,
+            ),
+        )
+        drawPath(
+            path = path,
+            color = lineColor,
+            style = Stroke(
+                width = strokeWidth,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round,
+            ),
+        )
+    }
+
+    val endPoint = toCanvasOffset(points.last())
+    if (hitsScratch) {
+        val crossRadius = ballRadiusPx * 0.65f
+        drawCircle(
+            color = ScratchWarningColor.copy(alpha = 0.30f * alpha),
+            radius = crossRadius * 1.25f,
+            center = endPoint,
+        )
+        drawLine(
+            color = ScratchWarningColor.copy(alpha = alpha),
+            start = endPoint + Offset(-crossRadius, -crossRadius),
+            end = endPoint + Offset(crossRadius, crossRadius),
+            strokeWidth = max(2.2f, strokeWidth * 0.85f),
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = ScratchWarningColor.copy(alpha = alpha),
+            start = endPoint + Offset(-crossRadius, crossRadius),
+            end = endPoint + Offset(crossRadius, -crossRadius),
+            strokeWidth = max(2.2f, strokeWidth * 0.85f),
+            cap = StrokeCap.Round,
+        )
+    } else if (showEndStopRing) {
+        drawCircle(
+            color = casingColor,
+            radius = ballRadiusPx * 0.85f,
+            center = endPoint,
+            style = Stroke(width = max(2.8f, pxPerMeter * 0.0085f)),
+        )
+        drawCircle(
+            color = rawColor.copy(alpha = 0.24f * alpha),
+            radius = ballRadiusPx * 0.85f,
+            center = endPoint,
+        )
+        drawCircle(
+            color = lineColor,
+            radius = ballRadiusPx * 0.85f,
+            center = endPoint,
+            style = Stroke(width = max(1.9f, pxPerMeter * 0.0058f)),
+        )
+        drawCircle(
+            color = lineColor,
+            radius = max(2.8f, ballRadiusPx * 0.32f),
+            center = endPoint,
+        )
+    }
+}
+
 private fun DrawScope.drawSelectedShotOverlay(
     shot: ShotRecommendation,
+    ballSet: BallSetProfile,
     visibleSpins: Set<CueBallSpinPreset>,
     ballRadiusMeters: Double,
     pxPerMeter: Float,
     toCanvasOffset: (Vec2) -> Offset,
 ) {
     val aim = shot.aim
-    val cueStart = toCanvasOffset(aim.cueBallPos)
     val ghostCenter = toCanvasOffset(aim.ghostBallCenter)
-    val objectPos = toCanvasOffset(aim.objectBallPos)
-    val pocketPos = toCanvasOffset(aim.pocketAimPos)
     val ballRadiusPx = (ballRadiusMeters * pxPerMeter).toFloat()
 
-    // Object-ball pot line (objectBallPos -> pocketAimPos) in bright yellow/gold
-    drawLine(
-        color = PotLineColor,
-        start = objectPos,
-        end = pocketPos,
-        strokeWidth = max(2.5f, pxPerMeter * 0.008f),
-        cap = StrokeCap.Round,
+    // Target object ball pot line in its own solid ball colour
+    drawBallSolidTrajectory(
+        points = listOf(aim.objectBallPos, aim.pocketAimPos),
+        ballNumber = shot.targetBall.number,
+        ballSet = ballSet,
+        strokeWidth = max(2.8f, pxPerMeter * 0.0088f),
+        ballRadiusPx = ballRadiusPx,
+        pxPerMeter = pxPerMeter,
+        showEndStopRing = false,
+        toCanvasOffset = toCanvasOffset,
     )
 
-    // Aim direction line (cueBallPos -> ghostBallCenter) in white/cyan dashed style
-    val dashLen = max(6f, pxPerMeter * 0.028f)
-    val gapLen = max(4f, pxPerMeter * 0.018f)
-    drawLine(
-        color = AimLineColor,
-        start = cueStart,
-        end = ghostCenter,
-        strokeWidth = max(2.2f, pxPerMeter * 0.007f),
-        cap = StrokeCap.Round,
-        pathEffect = PathEffect.dashPathEffect(floatArrayOf(dashLen, gapLen), 0f),
+    // Pre-contact cue-ball path in solid white
+    drawBallSolidTrajectory(
+        points = listOf(aim.cueBallPos, aim.ghostBallCenter),
+        ballNumber = 0,
+        ballSet = ballSet,
+        strokeWidth = max(2.4f, pxPerMeter * 0.0076f),
+        ballRadiusPx = ballRadiusPx,
+        pxPerMeter = pxPerMeter,
+        showEndStopRing = false,
+        toCanvasOffset = toCanvasOffset,
     )
 
-    // Post-impact cue-ball trajectory polylines for visible spins.
-    // Draw non-recommended spins first so the recommended spin renders cleanly on top.
+    // Post-impact cue-ball trajectory polylines: recommended path uses solid white; optional reference presets stay subtle
     val orderedSpins = visibleSpins.sortedBy { it == shot.recommendedSpin }
     for (spin in orderedSpins) {
         val trajectory = shot.cueBallPaths[spin] ?: continue
         val isRecommended = spin == shot.recommendedSpin
-        drawSpinTrajectory(
-            trajectory = trajectory,
-            isRecommended = isRecommended,
-            ballRadiusPx = ballRadiusPx,
-            pxPerMeter = pxPerMeter,
-            toCanvasOffset = toCanvasOffset,
-        )
+        if (isRecommended) {
+            drawBallSolidTrajectory(
+                points = trajectory.points,
+                ballNumber = 0,
+                ballSet = ballSet,
+                strokeWidth = max(3.0f, pxPerMeter * 0.0095f),
+                ballRadiusPx = ballRadiusPx,
+                pxPerMeter = pxPerMeter,
+                showEndStopRing = true,
+                hitsScratch = trajectory.hitsScratchPocket != null,
+                toCanvasOffset = toCanvasOffset,
+            )
+        } else {
+            drawSpinTrajectory(
+                trajectory = trajectory,
+                isRecommended = false,
+                ballRadiusPx = ballRadiusPx,
+                pxPerMeter = pxPerMeter,
+                toCanvasOffset = toCanvasOffset,
+            )
+        }
     }
 
     // 2-ball position-play line from cue-ball stopping point to next target ghost ball
@@ -699,11 +1144,11 @@ private fun DrawScope.drawSpinTrajectory(
     if (points.isEmpty()) return
 
     val baseColor = spinColor(trajectory.spin)
-    val lineColor = if (isRecommended) baseColor else baseColor.copy(alpha = 0.72f)
+    val lineColor = if (isRecommended) baseColor else baseColor.copy(alpha = 0.62f)
     val strokeWidth = if (isRecommended) {
         max(3.2f, pxPerMeter * 0.010f)
     } else {
-        max(1.8f, pxPerMeter * 0.0055f)
+        max(1.7f, pxPerMeter * 0.0052f)
     }
 
     if (points.size >= 2) {
@@ -783,6 +1228,7 @@ private fun DrawScope.drawPoolBall(
     isCueSelected: Boolean = false,
     textMeasurer: TextMeasurer,
     fontSizeSp: androidx.compose.ui.unit.TextUnit,
+    fontSizePx: Float = radiusPx * 0.80f,
 ) {
     if (isCueSelected) {
         drawCircle(
@@ -857,9 +1303,9 @@ private fun DrawScope.drawPoolBall(
         )
     }
 
-    // Number circle and label for object balls (1..15)
+    // Number circle and optically centered label for object balls (1..15)
     if (!ball.isCueBall) {
-        val numberPlateRadius = radiusPx * 0.50f
+        val numberPlateRadius = radiusPx * 0.52f
         drawCircle(
             color = whiteBase,
             radius = numberPlateRadius,
@@ -879,7 +1325,7 @@ private fun DrawScope.drawPoolBall(
             textLayoutResult = textLayout,
             topLeft = Offset(
                 x = center.x - textLayout.size.width * 0.5f,
-                y = center.y - textLayout.size.height * 0.5f,
+                y = centeredDigitTopY(center.y, textLayout, fontSizePx),
             ),
         )
     }
@@ -1076,6 +1522,7 @@ private fun DrawScope.drawHeatZoneOverlay(
 private fun DrawScope.drawRunoutPlanOverlay(
     layout: TableLayout,
     plan: RunoutPlan,
+    ballSet: BallSetProfile,
     focusedStepIndex: Int? = null,
     nextVisibility: PocketVisibilityRegion? = null,
     showLandingCloud: Boolean,
@@ -1097,30 +1544,32 @@ private fun DrawScope.drawRunoutPlanOverlay(
     val shotTightness = computeShotTightness(primaryStep, nextStep)
 
     val cuePos = layout.cueBall()?.position
-    val firstGhostCenter = toCanvasOffset(primaryStep.compensatedAim.compensatedGhostBallCenter)
-    val firstObjectPos = toCanvasOffset(primaryStep.targetBall.position)
-    val firstPocketPos = toCanvasOffset(primaryStep.pocketCenter)
-    val dashLen = max(6f, pxPerMeter * 0.028f)
-    val gapLen = max(4f, pxPerMeter * 0.018f)
+    val ghostMeters = primaryStep.compensatedAim.compensatedGhostBallCenter
+    val firstGhostCenter = toCanvasOffset(ghostMeters)
 
-    // Active step object-ball pot line
-    drawLine(
-        color = PotLineColor,
-        start = firstObjectPos,
-        end = firstPocketPos,
-        strokeWidth = max(2.5f, pxPerMeter * 0.008f),
-        cap = StrokeCap.Round,
+    // 1. Active step target object-ball pot line in its own solid ball colour
+    drawBallSolidTrajectory(
+        points = listOf(primaryStep.targetBall.position, primaryStep.pocketCenter),
+        ballNumber = primaryStep.targetBall.number,
+        ballSet = ballSet,
+        strokeWidth = max(2.9f, pxPerMeter * 0.0090f),
+        ballRadiusPx = ballRadiusPx,
+        pxPerMeter = pxPerMeter,
+        showEndStopRing = false,
+        toCanvasOffset = toCanvasOffset,
     )
 
-    // Active step spin-compensated aim line
+    // 2. Active step cue-ball pre-contact path in solid white
     if (cuePos != null) {
-        drawLine(
-            color = AimLineColor,
-            start = toCanvasOffset(cuePos),
-            end = firstGhostCenter,
-            strokeWidth = max(2.2f, pxPerMeter * 0.007f),
-            cap = StrokeCap.Round,
-            pathEffect = PathEffect.dashPathEffect(floatArrayOf(dashLen, gapLen), 0f),
+        drawBallSolidTrajectory(
+            points = listOf(cuePos, ghostMeters),
+            ballNumber = 0,
+            ballSet = ballSet,
+            strokeWidth = max(2.4f, pxPerMeter * 0.0076f),
+            ballRadiusPx = ballRadiusPx,
+            pxPerMeter = pxPerMeter,
+            showEndStopRing = false,
+            toCanvasOffset = toCanvasOffset,
         )
     }
 
@@ -1131,16 +1580,21 @@ private fun DrawScope.drawRunoutPlanOverlay(
         pxPerMeter = pxPerMeter,
     )
 
-    // Active step nominal post-impact cue-ball trajectory
-    drawSpinTrajectory(
-        trajectory = primaryStep.uncertainty.nominalTrajectory,
-        isRecommended = true,
+    // 3. Active step post-impact cue-ball trajectory in solid white
+    val nomCueTraj = primaryStep.uncertainty.nominalTrajectory
+    drawBallSolidTrajectory(
+        points = nomCueTraj.points,
+        ballNumber = 0,
+        ballSet = ballSet,
+        strokeWidth = max(3.1f, pxPerMeter * 0.0096f),
         ballRadiusPx = ballRadiusPx,
         pxPerMeter = pxPerMeter,
+        showEndStopRing = true,
+        hitsScratch = nomCueTraj.hitsScratchPocket != null,
         toCanvasOffset = toCanvasOffset,
     )
 
-    // Active step 3-level position heat zone & landing cloud (strictly clipped inside playable felt and carved by blocking balls)
+    // 4. Active step 3-level position heat zone & landing cloud (strictly clipped inside playable felt and carved by blocking balls)
     if (showLandingCloud) {
         drawLandingCloudOverlay(
             uncertainty = primaryStep.uncertainty,
@@ -1157,17 +1611,18 @@ private fun DrawScope.drawRunoutPlanOverlay(
         )
     }
 
-    // Scatter paths for any cluster balls bumped during this shot
+    // 5. Solid per-ball same-coloured trajectory lines for any secondary balls moved in this shot
     if (primaryStep.disturbedBalls.isNotEmpty()) {
         drawDisturbedBallsOverlay(
             disturbedBalls = primaryStep.disturbedBalls,
+            ballSet = ballSet,
             ballRadiusPx = ballRadiusPx,
             pxPerMeter = pxPerMeter,
             playLeft = playLeft,
             playTop = playTop,
             playWidth = playWidth,
             playHeight = playHeight,
-            alpha = 0.92f,
+            alpha = 0.96f,
             toCanvasOffset = toCanvasOffset,
         )
     }
@@ -1219,6 +1674,7 @@ private fun DrawScope.drawRunoutPlanOverlay(
         if (step.disturbedBalls.isNotEmpty()) {
             drawDisturbedBallsOverlay(
                 disturbedBalls = step.disturbedBalls,
+                ballSet = ballSet,
                 ballRadiusPx = ballRadiusPx * 0.9f,
                 pxPerMeter = pxPerMeter,
                 playLeft = playLeft,
@@ -1243,6 +1699,7 @@ private fun DrawScope.drawRunoutPlanOverlay(
 
 private fun DrawScope.drawDisturbedBallsOverlay(
     disturbedBalls: List<DisplacedBallPath>,
+    ballSet: BallSetProfile,
     ballRadiusPx: Float,
     pxPerMeter: Float,
     playLeft: Float,
@@ -1252,11 +1709,7 @@ private fun DrawScope.drawDisturbedBallsOverlay(
     alpha: Float,
     toCanvasOffset: (Vec2) -> Offset,
 ) {
-    val dash = max(5f, pxPerMeter * 0.018f)
-    val gap = max(4f, pxPerMeter * 0.014f)
-    val scatterEffect = PathEffect.dashPathEffect(floatArrayOf(dash, gap), 0f)
-    val strokeW = max(1.8f, pxPerMeter * 0.0052f)
-    val color = DisturbedScatterColor.copy(alpha = alpha)
+    val strokeW = max(2.5f, pxPerMeter * 0.0078f)
 
     clipRect(
         left = playLeft,
@@ -1266,30 +1719,17 @@ private fun DrawScope.drawDisturbedBallsOverlay(
     ) {
         for (path in disturbedBalls) {
             if (path.points.size < 2) continue
-            val pathObj = Path().apply {
-                val first = toCanvasOffset(path.points.first())
-                moveTo(first.x, first.y)
-                for (i in 1 until path.points.size) {
-                    val pt = toCanvasOffset(path.points[i])
-                    lineTo(pt.x, pt.y)
-                }
-            }
-            drawPath(
-                path = pathObj,
-                color = color,
-                style = Stroke(width = strokeW, cap = StrokeCap.Round, pathEffect = scatterEffect),
-            )
-            val endOffset = toCanvasOffset(path.points.last())
-            drawCircle(
-                color = color.copy(alpha = alpha * 0.20f),
-                radius = ballRadiusPx * 0.85f,
-                center = endOffset,
-            )
-            drawCircle(
-                color = color,
-                radius = ballRadiusPx * 0.85f,
-                center = endOffset,
-                style = Stroke(width = max(1.4f, strokeW * 0.85f)),
+            drawBallSolidTrajectory(
+                points = path.points,
+                ballNumber = path.ballNumber,
+                ballSet = ballSet,
+                strokeWidth = strokeW,
+                ballRadiusPx = ballRadiusPx,
+                pxPerMeter = pxPerMeter,
+                showEndStopRing = path.pocketedIn == null,
+                hitsScratch = false,
+                alpha = alpha,
+                toCanvasOffset = toCanvasOffset,
             )
         }
     }
@@ -1344,11 +1784,12 @@ private fun DrawScope.drawStepNumberBadge(
         radius = badgeRadius,
         center = badgeCenter,
     )
+    val badgeFontSp = 9.sp
     val labelLayout = textMeasurer.measure(
         text = step.stepNumber.toString(),
         style = TextStyle(
             color = Color(0xFF082F49),
-            fontSize = 9.sp,
+            fontSize = badgeFontSp,
             fontWeight = FontWeight.ExtraBold,
         ),
     )
@@ -1356,7 +1797,7 @@ private fun DrawScope.drawStepNumberBadge(
         textLayoutResult = labelLayout,
         topLeft = Offset(
             x = badgeCenter.x - labelLayout.size.width * 0.5f,
-            y = badgeCenter.y - labelLayout.size.height * 0.5f,
+            y = centeredDigitTopY(badgeCenter.y, labelLayout, badgeFontSp.toPx()),
         ),
     )
 }

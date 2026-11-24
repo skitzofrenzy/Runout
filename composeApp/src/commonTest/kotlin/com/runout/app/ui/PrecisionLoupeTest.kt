@@ -2,8 +2,10 @@ package com.runout.app.ui
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class PrecisionLoupeTest {
@@ -75,5 +77,25 @@ class PrecisionLoupeTest {
         assertTrue(center.x <= canvas.width - radius, "center.x=${center.x} > maxX=${canvas.width - radius}")
         assertTrue(center.y >= radius, "center.y=${center.y} < radius=$radius")
         assertTrue(center.y <= canvas.height - radius, "center.y=${center.y} > maxY=${canvas.height - radius}")
+    }
+
+    @Test
+    fun tableZoomCoordinateTransformsRoundTripAndClampPanCleanly() {
+        val canvas = Size(800f, 400f)
+        assertEquals(Offset.Zero, clampTablePanOffset(Offset(150f, -90f), zoom = 1.0f, canvas.width, canvas.height))
+
+        val zoom = 2.5f
+        val clampedPan = clampTablePanOffset(Offset(900f, -900f), zoom = zoom, canvas.width, canvas.height)
+        // maxPanX = 800 * 1.5 * 0.5 = 600, maxPanY = 400 * 1.5 * 0.5 = 300
+        assertEquals(600f, clampedPan.x, 1e-4f)
+        assertEquals(-300f, clampedPan.y, 1e-4f)
+
+        val activePan = Offset(-120f, 85f)
+        for (pt in listOf(Offset(120f, 95f), Offset(400f, 200f), Offset(710f, 340f))) {
+            val screen = baseToScreenCanvasOffset(pt, canvas, zoom, activePan)
+            val recovered = screenToBaseCanvasOffset(screen, canvas, zoom, activePan)
+            assertTrue(abs(pt.x - recovered.x) < 1e-3f, "Expected x=${pt.x}, got ${recovered.x}")
+            assertTrue(abs(pt.y - recovered.y) < 1e-3f, "Expected y=${pt.y}, got ${recovered.y}")
+        }
     }
 }

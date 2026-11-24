@@ -75,7 +75,14 @@ object ExecutionErrorModel {
         val approachFactor = when (pocket.id) {
             PocketId.SIDE_LEFT,
             PocketId.SIDE_RIGHT,
-            -> abs(toPocket.y).coerceIn(0.45, 1.0)
+            -> {
+                val ny = abs(toPocket.y)
+                if (ny < 0.58) {
+                    (ny * ny * 1.48).coerceIn(0.20, 0.58)
+                } else {
+                    ny.coerceIn(0.58, 1.0)
+                }
+            }
             else -> ((abs(toPocket.x) + abs(toPocket.y)) / SQRT_2).coerceIn(0.70, 1.0)
         }
         return atan2(clearance * speedFactor * approachFactor, d).coerceIn(0.008, 0.35)
@@ -218,9 +225,16 @@ object ExecutionErrorModel {
                 nonScratchY += point.weight * stopPos.y
             }
 
-            val vObjInitial = perturbedSpeed * cos(abs(perturbedCut)).coerceAtLeast(0.05) * 0.96
+            val preImpact = SpinPhysics.computePreImpactCueState(
+                cueSpeedMps = perturbedSpeed,
+                tip = perturbedTip,
+                cueToGhostDistanceMeters = perturbedAim.cueToGhostDistanceMeters,
+                table = table,
+            )
+            val vObjInitial = preImpact.impactSpeedMps * cos(abs(perturbedCut)).coerceAtLeast(0.05) * 0.96
             val objMaxDist = MotionPhysics.rollingStoppingDistanceMeters(vObjInitial, muR, g)
-            val reachesPocket = objMaxDist >= aim.objectToPocketDistanceMeters * 0.92
+            val reachesPocket = preImpact.impactSpeedMps > 0.03 &&
+                objMaxDist >= aim.objectToPocketDistanceMeters * 0.92
             if (reachesPocket) {
                 weightedReachFrac += point.weight
                 val arrivalSpeed = sqrt(
@@ -255,7 +269,13 @@ object ExecutionErrorModel {
         val rmsSq = if (spreadWeightSum > 1e-6) meanSqDist / spreadWeightSum else meanSqDist
         val spreadRadius = max(1.96 * sqrt(rmsSq), meanLanding.distanceTo(nominalStop))
 
-        val nomVObj = cueSpeedMps * cos(abs(aim.cutAngleRadians)).coerceAtLeast(0.05) * 0.96
+        val nomPreImpact = SpinPhysics.computePreImpactCueState(
+            cueSpeedMps = cueSpeedMps,
+            tip = tip,
+            cueToGhostDistanceMeters = aim.cueToGhostDistanceMeters,
+            table = table,
+        )
+        val nomVObj = nomPreImpact.impactSpeedMps * cos(abs(aim.cutAngleRadians)).coerceAtLeast(0.05) * 0.96
         val nomArrivalSpeed = sqrt(
             max(0.0, nomVObj * nomVObj - 2.0 * muR * g * aim.objectToPocketDistanceMeters),
         )

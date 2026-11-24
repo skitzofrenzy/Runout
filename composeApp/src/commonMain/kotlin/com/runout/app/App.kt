@@ -84,6 +84,7 @@ import com.runout.app.tools.EightBallWalkthrough
 import com.runout.app.tools.InteractiveTutorial
 import com.runout.app.ui.AppDisplayMode
 import com.runout.app.ui.AssumedSurfaceControlCard
+import com.runout.app.ui.BallNumberBadge
 import com.runout.app.ui.CalibrationScreen
 import com.runout.app.ui.CollapsibleSectionCard
 import com.runout.app.ui.CueBallHitGuide
@@ -140,6 +141,7 @@ import com.runout.engine.model.PocketId
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
 import com.runout.engine.physics.CueBallSpinPreset
+import com.runout.engine.physics.SpinPhysics
 import com.runout.engine.physics.TipOffset
 import com.runout.engine.planner.MultiShotPlanner
 import com.runout.engine.planner.OneShotPlanner
@@ -177,10 +179,17 @@ private data class TipQuickPreset(
 private val TIP_QUICK_PRESETS = listOf(
     TipQuickPreset("Auto Spin", null),
     TipQuickPreset("Center Stun", TipOffset(sideRatio = 0.0, verticalRatio = 0.0)),
-    TipQuickPreset("Top Follow", TipOffset.fromPreset(CueBallSpinPreset.FOLLOW)),
-    TipQuickPreset("Bottom Draw", TipOffset.fromPreset(CueBallSpinPreset.DRAW)),
-    TipQuickPreset("Left English", TipOffset(sideRatio = -0.30, verticalRatio = 0.0)),
-    TipQuickPreset("Right English", TipOffset(sideRatio = 0.30, verticalRatio = 0.0)),
+    TipQuickPreset("Drag Stun", TipOffset(sideRatio = 0.0, verticalRatio = -0.14)),
+    TipQuickPreset("Ctrl Follow", TipOffset(sideRatio = 0.0, verticalRatio = 0.20)),
+    TipQuickPreset("Firm Follow", TipOffset.fromPreset(CueBallSpinPreset.FOLLOW)),
+    TipQuickPreset("Ctrl Draw", TipOffset(sideRatio = 0.0, verticalRatio = -0.25)),
+    TipQuickPreset("Max Draw", TipOffset(sideRatio = 0.0, verticalRatio = -0.44)),
+    TipQuickPreset("1/2 Left", TipOffset(sideRatio = -0.18, verticalRatio = 0.0)),
+    TipQuickPreset("1/2 Right", TipOffset(sideRatio = 0.18, verticalRatio = 0.0)),
+    TipQuickPreset("Follow + Left", TipOffset(sideRatio = -0.18, verticalRatio = 0.22)),
+    TipQuickPreset("Follow + Right", TipOffset(sideRatio = 0.18, verticalRatio = 0.22)),
+    TipQuickPreset("Draw + Left", TipOffset(sideRatio = -0.18, verticalRatio = -0.24)),
+    TipQuickPreset("Draw + Right", TipOffset(sideRatio = 0.18, verticalRatio = -0.24)),
 )
 
 private enum class PrimaryTab(val label: String, val icon: RunoutIcon) {
@@ -245,7 +254,7 @@ fun App() {
     var savedTableProfiles by remember { mutableStateOf(SampleCalibrationSessions.defaultSavedProfiles()) }
     var activeTableProfileId by remember { mutableStateOf<String?>(null) }
 
-    var speedScaleOverride by remember { mutableStateOf<Int?>(null) }
+    var speedUnitsOverride by remember { mutableStateOf<Double?>(null) }
     var selectedHorizon by remember {
         mutableStateOf(initialSavedSetup?.toPlanningHorizon() ?: PlanningHorizonOption.THREE_BALL)
     }
@@ -279,7 +288,7 @@ fun App() {
     var showCueSandboxPanel by remember { mutableStateOf(false) }
     var sandboxTargetBallNumber by remember { mutableStateOf<Int?>(null) }
     var defaultTipForActiveShot by remember { mutableStateOf<TipOffset?>(null) }
-    var defaultSpeedForActiveShot by remember { mutableStateOf<Int?>(null) }
+    var defaultSpeedForActiveShot by remember { mutableStateOf<Double?>(null) }
     var focusedStepIndex by remember { mutableIntStateOf(0) }
     var showAllStepsOverlay by remember { mutableStateOf(false) }
     var isFullscreenTable by remember { mutableStateOf(false) }
@@ -288,7 +297,7 @@ fun App() {
     var rankedShots by remember { mutableStateOf<List<ShotRecommendation>>(emptyList()) }
 
     val hasSandboxOverrides = customTipOffset != null ||
-        speedScaleOverride != null ||
+        speedUnitsOverride != null ||
         customPocketOverride != null ||
         sandboxTargetBallNumber != null
 
@@ -324,7 +333,7 @@ fun App() {
         playerProfile,
         selectedHorizon,
         customTipOffset,
-        speedScaleOverride,
+        speedUnitsOverride,
         customPocketOverride,
         sandboxTargetBallNumber,
         planningReadiness.isReady,
@@ -347,7 +356,7 @@ fun App() {
         val profileSnapshot = playerProfile
         val horizonSnapshot = selectedHorizon
         val tipSnapshot = customTipOffset
-        val speedSnapshot = speedScaleOverride
+        val speedSnapshot = speedUnitsOverride
         val targetSnapshot = sandboxTargetBallNumber
         val pocketSnapshot = customPocketOverride
         val allowScratchSandbox = tipSnapshot != null || speedSnapshot != null
@@ -359,16 +368,16 @@ fun App() {
                 horizonShots = horizonSnapshot.horizonShots,
                 deepAnalysis = horizonSnapshot.deepAnalysis,
                 customFirstShotTip = tipSnapshot,
-                customFirstShotSpeedScale = speedSnapshot,
                 customFirstShotTargetBallNumber = targetSnapshot,
                 customFirstShotPocketId = pocketSnapshot,
                 allowHighScratchFirstShot = allowScratchSandbox,
+                customFirstShotSpeedUnits = speedSnapshot,
             )
             val computedShots = OneShotPlanner.rankShots(
                 layout = layoutSnapshot,
                 rulesState = rulesSnapshot,
                 playerProfile = profileSnapshot,
-                cueSpeedScaleOverride = speedSnapshot,
+                cueSpeedUnitsOverride = speedSnapshot,
             )
             computedPlans to computedShots
         }
@@ -377,7 +386,7 @@ fun App() {
         if (tipSnapshot == null && speedSnapshot == null && targetSnapshot == null && pocketSnapshot == null) {
             val defaultFirst = plans.firstOrNull()?.steps?.firstOrNull()
             defaultTipForActiveShot = defaultFirst?.recommendedTip
-            defaultSpeedForActiveShot = defaultFirst?.recommendedSpeedScale
+            defaultSpeedForActiveShot = defaultFirst?.recommendedSpeedUnits
         }
         isPlanning = false
     }
@@ -426,7 +435,7 @@ fun App() {
 
     fun resetSandboxToPlanDefaults() {
         customTipOffset = null
-        speedScaleOverride = null
+        speedUnitsOverride = null
         customPocketOverride = null
         sandboxTargetBallNumber = null
         focusedStepIndex = 0
@@ -439,19 +448,20 @@ fun App() {
             sandboxTargetBallNumber = activePlan?.steps?.firstOrNull()?.targetBall?.number
         }
         customTipOffset = nextTip
-        if (nextTip == null && speedScaleOverride == null && customPocketOverride == null) {
+        if (nextTip == null && speedUnitsOverride == null && customPocketOverride == null) {
             sandboxTargetBallNumber = null
         }
         focusedStepIndex = 0
         selectedPlanIndex = 0
     }
 
-    fun handleUpdateSandboxSpeed(nextScale: Int?) {
-        if (nextScale != null && sandboxTargetBallNumber == null) {
+    fun handleUpdateSandboxSpeed(nextUnits: Double?) {
+        val snapped = nextUnits?.let(PlayerProfile::snapSpeedUnits)
+        if (snapped != null && sandboxTargetBallNumber == null) {
             sandboxTargetBallNumber = activePlan?.steps?.firstOrNull()?.targetBall?.number
         }
-        speedScaleOverride = nextScale
-        if (nextScale == null && customTipOffset == null && customPocketOverride == null) {
+        speedUnitsOverride = snapped
+        if (snapped == null && customTipOffset == null && customPocketOverride == null) {
             sandboxTargetBallNumber = null
         }
         focusedStepIndex = 0
@@ -508,7 +518,7 @@ fun App() {
         rulesState = defaultScenario.rulesState
         selectedPresetIndex = 0
         customTipOffset = null
-        speedScaleOverride = null
+        speedUnitsOverride = null
         customPocketOverride = null
         sandboxTargetBallNumber = null
         defaultTipForActiveShot = null
@@ -679,15 +689,16 @@ fun App() {
                     onOpenPhotoScan = { navigateToSubRoute(ActiveRoute.PhotoScan) },
                     customTipOffset = customTipOffset,
                     defaultTipForShot = defaultTipForActiveShot,
-                    speedScaleOverride = speedScaleOverride,
-                    defaultSpeedScaleForShot = defaultSpeedForActiveShot,
+                    speedUnitsOverride = speedUnitsOverride,
+                    defaultSpeedUnitsForShot = defaultSpeedForActiveShot,
+                    playerProfile = playerProfile,
                     sandboxTargetBallNumber = sandboxTargetBallNumber,
                     showCueSandboxPanel = showCueSandboxPanel,
                     hasSandboxOverrides = hasSandboxOverrides,
                     onToggleCueSandbox = ::handleToggleCueSandbox,
                     onCloseCueSandbox = { showCueSandboxPanel = false },
                     onUpdateCustomTip = ::handleUpdateSandboxTip,
-                    onSelectSpeedScale = ::handleUpdateSandboxSpeed,
+                    onSelectSpeedUnits = ::handleUpdateSandboxSpeed,
                     onResetSandboxDefaults = ::resetSandboxToPlanDefaults,
                 )
 
@@ -1170,15 +1181,15 @@ fun App() {
                                     selectedShotIndex = 0
                                 },
                                 defaultTipForShot = defaultTipForActiveShot,
-                                defaultSpeedScaleForShot = defaultSpeedForActiveShot,
-                                speedScaleOverride = speedScaleOverride,
+                                defaultSpeedUnitsForShot = defaultSpeedForActiveShot,
+                                speedUnitsOverride = speedUnitsOverride,
                                 sandboxTargetBallNumber = sandboxTargetBallNumber,
                                 showCueSandboxPanel = showCueSandboxPanel,
                                 hasSandboxOverrides = hasSandboxOverrides,
                                 onToggleCueSandbox = ::handleToggleCueSandbox,
                                 onCloseCueSandbox = { showCueSandboxPanel = false },
                                 onUpdateSandboxTip = ::handleUpdateSandboxTip,
-                                onSelectSpeedScale = ::handleUpdateSandboxSpeed,
+                                onSelectSpeedUnits = ::handleUpdateSandboxSpeed,
                                 onResetSandboxDefaults = ::resetSandboxToPlanDefaults,
                                 onUpdateClothParams = { updatedCloth ->
                                     activeTableProfileId = null
@@ -1202,7 +1213,7 @@ fun App() {
                                     rulesState = rules
                                     selectedPresetIndex = -1
                                     customTipOffset = null
-                                    speedScaleOverride = null
+                                    speedUnitsOverride = null
                                     customPocketOverride = null
                                     sandboxTargetBallNumber = null
                                     focusedStepIndex = 0
@@ -1233,7 +1244,7 @@ fun App() {
                                 ballSetProfile = scannedBallSet
                                 selectedPresetIndex = -1
                                 customTipOffset = null
-                                speedScaleOverride = null
+                                speedUnitsOverride = null
                                 customPocketOverride = null
                                 sandboxTargetBallNumber = null
                                 focusedStepIndex = 0
@@ -1253,7 +1264,7 @@ fun App() {
                                 rulesState = rules
                                 selectedPresetIndex = -1
                                 customTipOffset = null
-                                speedScaleOverride = null
+                                speedUnitsOverride = null
                                 customPocketOverride = null
                                 sandboxTargetBallNumber = null
                                 hasActiveSession = true
@@ -1272,7 +1283,7 @@ fun App() {
                                 rulesState = rules
                                 selectedPresetIndex = -1
                                 customTipOffset = null
-                                speedScaleOverride = null
+                                speedUnitsOverride = null
                                 customPocketOverride = null
                                 sandboxTargetBallNumber = null
                                 hasActiveSession = true
@@ -1373,7 +1384,7 @@ fun App() {
                     }
                     rulesState = chosen.rulesState
                     customTipOffset = null
-                    speedScaleOverride = null
+                    speedUnitsOverride = null
                     customPocketOverride = null
                     sandboxTargetBallNumber = null
                     focusedStepIndex = 0
@@ -1393,7 +1404,7 @@ fun App() {
                     )
                     selectedPresetIndex = -1
                     customTipOffset = null
-                    speedScaleOverride = null
+                    speedUnitsOverride = null
                     customPocketOverride = null
                     sandboxTargetBallNumber = null
                     focusedStepIndex = 0
@@ -1455,8 +1466,8 @@ fun App() {
                     selectedHorizon = it
                     selectedPlanIndex = 0
                 },
-                speedScaleOverride = speedScaleOverride,
-                onSelectSpeedScale = ::handleUpdateSandboxSpeed,
+                speedUnitsOverride = speedUnitsOverride,
+                onSelectSpeedUnits = ::handleUpdateSandboxSpeed,
                 showHeatZone = showHeatZone,
                 onToggleHeatZone = { showHeatZone = !showHeatZone },
                 showLandingCloud = showLandingCloud,
@@ -1568,15 +1579,15 @@ fun RunoutPracticeScreen(
     customPocketOverride: PocketId?,
     onSelectPocketOverride: (PocketId?) -> Unit,
     defaultTipForShot: TipOffset? = null,
-    defaultSpeedScaleForShot: Int? = null,
-    speedScaleOverride: Int? = null,
+    defaultSpeedUnitsForShot: Double? = null,
+    speedUnitsOverride: Double? = null,
     sandboxTargetBallNumber: Int? = null,
     showCueSandboxPanel: Boolean = false,
     hasSandboxOverrides: Boolean = false,
     onToggleCueSandbox: () -> Unit = onOpenQuickSpinSheet,
     onCloseCueSandbox: () -> Unit = {},
     onUpdateSandboxTip: (TipOffset?) -> Unit = onUpdateCustomTip,
-    onSelectSpeedScale: (Int?) -> Unit = {},
+    onSelectSpeedUnits: (Double?) -> Unit = {},
     onResetSandboxDefaults: () -> Unit = {},
     onUpdateClothParams: (ClothParams) -> Unit,
     modifier: Modifier = Modifier,
@@ -1698,23 +1709,28 @@ fun RunoutPracticeScreen(
                                 ?: activeStep?.recommendedTip
                                 ?: defaultTipForShot
                                 ?: TipOffset()
-                            val resolvedSpeed = speedScaleOverride
-                                ?: activeStep?.recommendedSpeedScale
-                                ?: defaultSpeedScaleForShot
-                                ?: 5
+                            val resolvedSpeed = speedUnitsOverride
+                                ?: activeStep?.recommendedSpeedUnits
+                                ?: defaultSpeedUnitsForShot
+                                ?: 4.5
+                            val cueToGhostMeters = activeStep?.compensatedAim?.geometricAim?.cueToGhostDistanceMeters
+                                ?: selectedShot?.aim?.cueToGhostDistanceMeters
                             CueBallSandboxPanel(
                                 activeTip = resolvedTip,
                                 defaultTip = defaultTipForShot ?: activeStep?.recommendedTip,
                                 customTipOffset = customTipOffset,
-                                activeSpeedScale = resolvedSpeed,
-                                speedScaleOverride = speedScaleOverride,
+                                activeSpeedUnits = resolvedSpeed,
+                                speedUnitsOverride = speedUnitsOverride,
                                 lockedTargetBallNumber = sandboxTargetBallNumber,
                                 hasOverrides = hasSandboxOverrides,
                                 onUpdateTip = onUpdateSandboxTip,
-                                onUpdateSpeedScale = onSelectSpeedScale,
+                                onUpdateSpeedUnits = onSelectSpeedUnits,
                                 onResetDefaults = onResetSandboxDefaults,
                                 onClose = onCloseCueSandbox,
                                 compactVertical = false,
+                                cueToObjectDistanceMeters = cueToGhostMeters,
+                                playerProfile = playerProfile,
+                                tableSpec = currentLayout.table,
                             )
                         }
                     }
@@ -1850,7 +1866,8 @@ private fun SimpleModeShotSection(
         val activeStep = steps.getOrNull(safeStepIdx)
         val nextStep = steps.getOrNull(safeStepIdx + 1)
         if (activePlan != null && activeStep != null) {
-            val speedWord = plainSpeedLabel(activeStep.recommendedSpeedScale)
+            val speedWord = plainSpeedLabel(activeStep.recommendedSpeedUnits)
+            val speedText = PlayerProfile.formatSpeedUnits(activeStep.recommendedSpeedUnits)
             val tipWord = plainTipLabel(activeStep.recommendedTip)
             val tightness = computeShotTightness(activeStep, nextStep)
 
@@ -1871,11 +1888,10 @@ private fun SimpleModeShotSection(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(16.dp)
-                                .clip(CircleShape)
-                                .background(ballBaseColor(activeStep.targetBall.number, ballSet)),
+                        BallNumberBadge(
+                            ballNumber = activeStep.targetBall.number,
+                            ballSet = ballSet,
+                            sizeDp = 24.dp,
                         )
                         Text(
                             text = "Ball #${activeStep.targetBall.number} -> ${activeStep.pocketId.displayName}",
@@ -1907,19 +1923,19 @@ private fun SimpleModeShotSection(
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             Text(
-                                text = "Speed: $speedWord (${activeStep.recommendedSpeedScale}/10)",
+                                text = "Speed: $speedWord ($speedText/10)",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium,
                                 color = MaterialTheme.colorScheme.tertiary,
                             )
                             Text(
-                                text = "Hit: $tipWord",
+                                text = "Spin: $tipWord",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.primary,
                             )
                             Text(
-                                text = "Zone: ${shotTightnessLabel(tightness)} sweet spot (tap cue ball to test spin)",
+                                text = "Zone: ${shotTightnessLabel(tightness)} sweet spot (pinch table to zoom • tap white ball for spin)",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -2045,8 +2061,9 @@ private fun SimpleModeShotSection(
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface,
                         )
+                        val fallbackSpeedText = PlayerProfile.formatSpeedUnits(fallbackShot.recommendedSpeedUnits)
                         Text(
-                            text = "Speed: ${plainSpeedLabel(fallbackShot.recommendedSpeedScale)} (${fallbackShot.recommendedSpeedScale}/10) • Hit: ${plainTipLabel(fallbackTip)}",
+                            text = "Speed: ${plainSpeedLabel(fallbackShot.recommendedSpeedUnits)} ($fallbackSpeedText/10) • Spin: ${plainTipLabel(fallbackTip)}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -2426,7 +2443,7 @@ private fun SelectedShotReadoutBar(
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    text = "Cut $cutDeg° • Speed ${shot.recommendedSpeedScale}/10",
+                    text = "Cut $cutDeg° • Speed ${PlayerProfile.formatSpeedUnits(shot.recommendedSpeedUnits)}/10",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.tertiary,
                 )
@@ -2437,7 +2454,7 @@ private fun SelectedShotReadoutBar(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "Hit: ${plainTipLabel(recommendedTip)} • ${shotTightnessLabel(tightness)} sweet spot",
+                text = "Spin: ${plainTipLabel(recommendedTip)} • ${shotTightnessLabel(tightness)} sweet spot",
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.primary,
@@ -2552,11 +2569,10 @@ private fun ShotRecommendationCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(14.dp)
-                            .clip(CircleShape)
-                            .background(ballBaseColor(shot.targetBall.number, ballSet)),
+                    BallNumberBadge(
+                        ballNumber = shot.targetBall.number,
+                        ballSet = ballSet,
+                        sizeDp = 22.dp,
                     )
                     Text(
                         text = "#$rank: Ball ${shot.targetBall.number} -> ${shot.pocket.id.displayName}",
@@ -2573,7 +2589,7 @@ private fun ShotRecommendationCard(
                 )
             }
             Text(
-                text = "Cut: $cutAngleDeg°  •  Speed: ${shot.recommendedSpeedScale}/10  •  Spin: ${shot.recommendedSpin.name}",
+                text = "Cut: $cutAngleDeg°  •  Speed: ${PlayerProfile.formatSpeedUnits(shot.recommendedSpeedUnits)}/10  •  Spin: ${shot.recommendedSpin.name}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -2650,12 +2666,12 @@ private fun ActivePlanReadoutBar(
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    text = "Cut $cutDeg° • Speed ${activeStep.recommendedSpeedScale}/10 • ±$spreadCm cm",
+                    text = "Cut $cutDeg° • Speed ${PlayerProfile.formatSpeedUnits(activeStep.recommendedSpeedUnits)}/10 • ±$spreadCm cm",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    text = "Hit: ${plainTipLabel(activeStep.recommendedTip)} • ${shotTightnessLabel(tightness)} sweet spot",
+                    text = "Spin: ${plainTipLabel(activeStep.recommendedTip)} • ${shotTightnessLabel(tightness)} sweet spot",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.primary,
@@ -2716,11 +2732,30 @@ private fun CueTipEnglishCard(
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
+                    text = displayedTip.describeSpinLabel(short = false),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
                     text = "Offset: ${formatSignedTwoDecimals(displayedTip.clampedSideRatio)}R side, ${formatSignedTwoDecimals(displayedTip.clampedVerticalRatio)}R vert",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
+                if (recommendedStep != null) {
+                    val transitionText = SpinPhysics.describeImpactTransition(
+                        tip = displayedTip,
+                        cueSpeedMps = recommendedStep.cueSpeedMps,
+                        cueToGhostDistanceMeters = recommendedStep.compensatedAim.geometricAim.cueToGhostDistanceMeters,
+                        table = TableSpec.nineFootPool(),
+                    )
+                    Text(
+                        text = transitionText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 if (compAim != null) {
                     CompensationMetricRow("Squirt", "${formatSignedDegrees(compAim.squirtAngleRadians)}°")
                     CompensationMetricRow("Swerve", "${formatSignedDegrees(compAim.swerveAngleRadians)}°")
@@ -2905,14 +2940,13 @@ private fun RunoutPlanCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(ballBaseColor(step.targetBall.number, ballSet)),
+                    BallNumberBadge(
+                        ballNumber = step.targetBall.number,
+                        ballSet = ballSet,
+                        sizeDp = 18.dp,
                     )
                     Text(
-                        text = "${step.stepNumber}. #${step.targetBall.number} -> ${step.pocketId.displayName} • Make $makePct% • $posText • Speed ${step.recommendedSpeedScale}/10",
+                        text = "${step.stepNumber}. #${step.targetBall.number} -> ${step.pocketId.displayName} • Make $makePct% • $posText • Speed ${PlayerProfile.formatSpeedUnits(step.recommendedSpeedUnits)}/10",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
@@ -2922,18 +2956,15 @@ private fun RunoutPlanCard(
     }
 }
 
-private fun plainSpeedLabel(scale: Int): String = when {
-    scale <= 3 -> "Gentle"
-    scale <= 6 -> "Medium"
-    scale <= 8 -> "Firm"
-    else -> "Hard"
+private fun plainSpeedLabel(units: Double): String = when {
+    units <= 1.5 -> "Touch / Lag"
+    units <= 3.0 -> "Gentle"
+    units <= 5.5 -> "Medium"
+    units <= 7.5 -> "Firm"
+    else -> "Power"
 }
 
-private fun plainTipLabel(tip: TipOffset): String = when {
-    tip.clampedVerticalRatio > 0.12 -> "Soft Follow"
-    tip.clampedVerticalRatio < -0.12 -> "Bottom Draw"
-    else -> "Center Stun"
-}
+private fun plainTipLabel(tip: TipOffset): String = tip.describeSpinLabel(short = false)
 
 private fun radiansToDegrees(rad: Double): Double = rad * 180.0 / PI
 
@@ -2991,16 +3022,4 @@ private fun formatProblemReason(reason: ProblemBallReason): String = when (reaso
     ProblemBallReason.FROZEN_TO_RAIL -> "Frozen to rail"
 }
 
-private fun formatTipDescription(tip: TipOffset): String {
-    val vertLabel = when {
-        tip.clampedVerticalRatio > 0.12 -> "Follow"
-        tip.clampedVerticalRatio < -0.12 -> "Draw"
-        else -> "Stun"
-    }
-    val sideLabel = when {
-        tip.clampedSideRatio > 0.08 -> "Right"
-        tip.clampedSideRatio < -0.08 -> "Left"
-        else -> "Center"
-    }
-    return if (sideLabel == "Center") vertLabel else "$vertLabel + $sideLabel"
-}
+private fun formatTipDescription(tip: TipOffset): String = tip.describeSpinLabel(short = false)
