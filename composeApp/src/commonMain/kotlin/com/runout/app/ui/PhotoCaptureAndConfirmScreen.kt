@@ -1,11 +1,23 @@
 package com.runout.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -18,6 +30,7 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -39,6 +52,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,14 +75,18 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -152,6 +170,73 @@ private val ViewfinderBackdropColor = Color(0xFF070D17)
 private val GuideCyanColor = Color(0xFF38BDF8)
 
 private const val TARGET_RAW_PIXEL_MEDIAN_ERROR_MM: Double = 15.0
+internal const val BALL_REMOVAL_UNDO_TIMEOUT_MS: Long = 5_000L
+internal const val SWIPE_REMOVE_COMMIT_FRACTION: Float = 0.36f
+internal const val SWIPE_REMOVE_MIN_COMMIT_DP: Float = 96f
+internal const val SWIPE_REMOVE_MAX_COMMIT_DP: Float = 144f
+private const val BALL_REMOVAL_UNDO_MAX_ENTRIES: Int = 16
+
+internal fun computeSwipeRemoveCommitThresholdPx(
+    rowWidthPx: Float,
+    minThresholdPx: Float,
+    maxThresholdPx: Float,
+): Float {
+    if (rowWidthPx <= 0f) return minThresholdPx.coerceAtLeast(1f)
+    val clampedMax = maxThresholdPx.coerceAtLeast(minThresholdPx)
+    val desired = (rowWidthPx * SWIPE_REMOVE_COMMIT_FRACTION).coerceIn(minThresholdPx, clampedMax)
+    return desired.coerceAtMost((rowWidthPx * 0.60f).coerceAtLeast(1f))
+}
+
+internal fun isSwipeRemoveArmed(offsetX: Float, commitThresholdPx: Float): Boolean =
+    commitThresholdPx > 0f && -offsetX >= commitThresholdPx
+
+internal data class BallRemovalUndoSnapshot(
+    val eventId: Long,
+    val message: String,
+    val previousRawDetections: List<DetectedBallCandidate>,
+    val previousNumberOverrides: Map<Int, Int>,
+)
+
+internal data class BallRemovalUndoStack(
+    val entries: List<BallRemovalUndoSnapshot> = emptyList(),
+    val nextEventId: Long = 1L,
+) {
+    val current: BallRemovalUndoSnapshot?
+        get() = entries.lastOrNull()
+
+    fun push(
+        message: String,
+        rawDetections: List<DetectedBallCandidate>,
+        numberOverrides: Map<Int, Int>,
+    ): BallRemovalUndoStack {
+        val snapshot = BallRemovalUndoSnapshot(
+            eventId = nextEventId,
+            message = message,
+            previousRawDetections = rawDetections,
+            previousNumberOverrides = numberOverrides,
+        )
+        val trimmed = (entries + snapshot).takeLast(BALL_REMOVAL_UNDO_MAX_ENTRIES)
+        return BallRemovalUndoStack(entries = trimmed, nextEventId = nextEventId + 1L)
+    }
+
+    fun pop(): Pair<BallRemovalUndoSnapshot?, BallRemovalUndoStack> {
+        val top = entries.lastOrNull() ?: return null to this
+        val remaining = entries.dropLast(1)
+        val refreshed = if (remaining.isEmpty()) {
+            BallRemovalUndoStack(entries = emptyList(), nextEventId = nextEventId)
+        } else {
+            val exposed = remaining.last().copy(eventId = nextEventId)
+            BallRemovalUndoStack(
+                entries = remaining.dropLast(1) + exposed,
+                nextEventId = nextEventId + 1L,
+            )
+        }
+        return top to refreshed
+    }
+
+    fun clear(): BallRemovalUndoStack =
+        if (entries.isEmpty()) this else copy(entries = emptyList())
+}
 
 private enum class PhotoWizardStep(val stepNumber: Int, val headline: String) {
     SOURCE_PICKER(1, "Choose a Table Photo"),
@@ -278,6 +363,9 @@ fun PhotoCaptureAndConfirmScreen(
     var candidateNumberOverrides by remember(selectedPhoto.id) {
         mutableStateOf<Map<Int, Int>>(emptyMap())
     }
+    var ballRemovalUndoStack by remember(selectedPhoto.id) {
+        mutableStateOf(BallRemovalUndoStack())
+    }
     var activeReassignCandidateId by remember(selectedPhoto.id) {
         mutableStateOf<Int?>(null)
     }
@@ -294,6 +382,24 @@ fun PhotoCaptureAndConfirmScreen(
         mutableStateOf(false)
     }
     val coroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(ballRemovalUndoStack.current?.eventId) {
+        val activeEventId = ballRemovalUndoStack.current?.eventId ?: return@LaunchedEffect
+        delay(BALL_REMOVAL_UNDO_TIMEOUT_MS)
+        if (ballRemovalUndoStack.current?.eventId == activeEventId) {
+            ballRemovalUndoStack = ballRemovalUndoStack.clear()
+        }
+    }
+
+    LaunchedEffect(wizardStep) {
+        if (wizardStep != PhotoWizardStep.REVIEW_TABLE) {
+            ballRemovalUndoStack = ballRemovalUndoStack.clear()
+        }
+    }
+
+    LaunchedEffect(overriddenQuadCornersPx) {
+        ballRemovalUndoStack = ballRemovalUndoStack.clear()
+    }
     var selectedVariantOverride by remember(selectedPhoto.id) {
         mutableStateOf<DetectedGameVariant?>(null)
     }
@@ -353,6 +459,7 @@ fun PhotoCaptureAndConfirmScreen(
     }
 
     fun handleMoveBallCandidate(candidateId: Int, newImageCenterPx: Vec2) {
+        ballRemovalUndoStack = ballRemovalUndoStack.clear()
         val clamped = Vec2(
             x = newImageCenterPx.x.coerceIn(0.0, selectedPhoto.intrinsics.imageWidthPx.toDouble()),
             y = newImageCenterPx.y.coerceIn(0.0, selectedPhoto.intrinsics.imageHeightPx.toDouble()),
@@ -366,11 +473,28 @@ fun PhotoCaptureAndConfirmScreen(
 
     fun handleDeleteBallCandidate(candidateId: Int) {
         val visibleIds = displayedBallsWithIdentity.map { it.first.candidateId }.toSet()
+        val removedEntry = displayedBallsWithIdentity.firstOrNull { (item, _) ->
+            item.candidateId == candidateId
+        }
+        val removedLabel = when (val num = removedEntry?.second) {
+            null -> "ball"
+            0 -> "Cue Ball (0)"
+            else -> "Ball #$num"
+        }
+        val visibleDetectionsBefore = selectedPhoto.rawDetections.filter { it.id in visibleIds }
+        val pinnedOverridesBefore = displayedBallsWithIdentity.associate { (item, num) ->
+            item.candidateId to num
+        }
+        ballRemovalUndoStack = ballRemovalUndoStack.push(
+            message = "Removed $removedLabel",
+            rawDetections = visibleDetectionsBefore,
+            numberOverrides = pinnedOverridesBefore,
+        )
         val remainingPinned = displayedBallsWithIdentity
             .filter { (item, _) -> item.candidateId != candidateId }
             .associate { (item, num) -> item.candidateId to num }
         selectedPhoto = selectedPhoto.copy(
-            rawDetections = selectedPhoto.rawDetections.filter { it.id in visibleIds && it.id != candidateId },
+            rawDetections = visibleDetectionsBefore.filter { it.id != candidateId },
         )
         candidateNumberOverrides = remainingPinned
         if (activeReassignCandidateId == candidateId) activeReassignCandidateId = null
@@ -378,6 +502,20 @@ fun PhotoCaptureAndConfirmScreen(
     }
 
     fun handleClearAllBalls() {
+        val visibleCount = displayedBallsWithIdentity.size
+        if (visibleCount > 0) {
+            val visibleIds = displayedBallsWithIdentity.map { it.first.candidateId }.toSet()
+            val visibleDetectionsBefore = selectedPhoto.rawDetections.filter { it.id in visibleIds }
+            val pinnedOverridesBefore = displayedBallsWithIdentity.associate { (item, num) ->
+                item.candidateId to num
+            }
+            val label = if (visibleCount == 1) "Cleared 1 ball" else "Cleared $visibleCount balls"
+            ballRemovalUndoStack = ballRemovalUndoStack.push(
+                message = label,
+                rawDetections = visibleDetectionsBefore,
+                numberOverrides = pinnedOverridesBefore,
+            )
+        }
         selectedPhoto = selectedPhoto.copy(rawDetections = emptyList())
         candidateNumberOverrides = emptyMap()
         activeReassignCandidateId = null
@@ -385,8 +523,20 @@ fun PhotoCaptureAndConfirmScreen(
         rescanFeedbackMessage = "Cleared all balls — tap any ball on the photo to detect or add it."
     }
 
+    fun handleUndoBallRemoval() {
+        val (snapshot, nextStack) = ballRemovalUndoStack.pop()
+        if (snapshot == null) return
+        ballRemovalUndoStack = nextStack
+        selectedPhoto = selectedPhoto.copy(rawDetections = snapshot.previousRawDetections)
+        candidateNumberOverrides = snapshot.previousNumberOverrides
+        activeReassignCandidateId = null
+        draggedCandidateId = null
+        rescanFeedbackMessage = null
+    }
+
     fun handleReassignBallCandidateNumber(candidateId: Int, newNumber: Int) {
         val baseIdentified = activeRectification?.identifiedBalls ?: return
+        ballRemovalUndoStack = ballRemovalUndoStack.clear()
         candidateNumberOverrides = reassignWithUniqueSwap(
             identifiedBalls = baseIdentified,
             currentOverrides = candidateNumberOverrides,
@@ -398,6 +548,7 @@ fun PhotoCaptureAndConfirmScreen(
 
     fun handleTapEmptyPhotoArea(tapImagePx: Vec2) {
         if (isRescanningArea) return
+        ballRemovalUndoStack = ballRemovalUndoStack.clear()
         val pinnedMap = displayedBallsWithIdentity.associate { (item, num) ->
             item.candidateId to num
         }
@@ -541,13 +692,14 @@ fun PhotoCaptureAndConfirmScreen(
         )
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = RunoutSpacing.Margin, vertical = RunoutSpacing.Card),
-        verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Section),
-    ) {
+    Box(modifier = modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = RunoutSpacing.Margin, vertical = RunoutSpacing.Card),
+            verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Section),
+        ) {
         // Step Progress Header
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -862,6 +1014,7 @@ fun PhotoCaptureAndConfirmScreen(
                         onReassignBallNumber = ::handleReassignBallCandidateNumber,
                         onDeleteBallCandidate = ::handleDeleteBallCandidate,
                         onResetAllIdentities = {
+                            ballRemovalUndoStack = ballRemovalUndoStack.clear()
                             candidateNumberOverrides = emptyMap()
                             activeReassignCandidateId = null
                         },
@@ -961,6 +1114,114 @@ fun PhotoCaptureAndConfirmScreen(
                 ) {
                     Text("Back to Corners & Balls", fontWeight = FontWeight.SemiBold)
                 }
+            }
+        }
+        }
+
+        val activeUndo = ballRemovalUndoStack.current
+        AnimatedVisibility(
+            visible = wizardStep == PhotoWizardStep.REVIEW_TABLE && activeUndo != null,
+            enter = fadeIn(tween(180)) + slideInVertically(tween(220)) { it / 2 },
+            exit = fadeOut(tween(180)) + slideOutVertically(tween(220)) { it / 2 },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(horizontal = RunoutSpacing.Margin, vertical = RunoutSpacing.Card),
+        ) {
+            if (activeUndo != null) {
+                BallRemovalUndoBanner(
+                    snapshot = activeUndo,
+                    remainingUndoCount = ballRemovalUndoStack.entries.size,
+                    onUndo = ::handleUndoBallRemoval,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BallRemovalUndoBanner(
+    snapshot: BallRemovalUndoSnapshot,
+    remainingUndoCount: Int,
+    onUndo: () -> Unit,
+) {
+    val progress = remember(snapshot.eventId) { Animatable(1f) }
+    LaunchedEffect(snapshot.eventId) {
+        progress.snapTo(1f)
+        progress.animateTo(
+            targetValue = 0f,
+            animationSpec = tween(
+                durationMillis = BALL_REMOVAL_UNDO_TIMEOUT_MS.toInt(),
+                easing = LinearEasing,
+            ),
+        )
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = RunoutColors.SurfaceHigh,
+        border = BorderStroke(1.dp, RunoutColors.PrimaryCyan.copy(alpha = 0.55f)),
+        shadowElevation = 8.dp,
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 14.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RunoutVectorIcon(
+                        icon = RunoutIcon.TRASH,
+                        tint = ErrorRedColor,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = snapshot.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = RunoutColors.TextPrimary,
+                        )
+                        if (remainingUndoCount > 1) {
+                            Text(
+                                text = "$remainingUndoCount recent removals available to undo",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = RunoutColors.TextSecondary,
+                            )
+                        }
+                    }
+                }
+                TextButton(
+                    onClick = onUndo,
+                    modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
+                ) {
+                    Text(
+                        text = "Undo",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = RunoutColors.PrimaryCyan,
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .background(RunoutColors.SurfaceMid),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(progress.value.coerceIn(0f, 1f))
+                        .height(3.dp)
+                        .background(RunoutColors.PrimaryCyan),
+                )
             }
         }
     }
@@ -2829,151 +3090,331 @@ private fun RectificationAndIdentityCard(
             val reviewCount = sortedDisplayed.count { (item, _) -> item.needsUserReview }
             Text(
                 text = if (reviewCount > 0) {
-                    "Tap any highlighted ball to fix its number ($reviewCount flagged):"
+                    "Tap a highlighted ball to fix ($reviewCount flagged) • Swipe left to remove:"
                 } else {
-                    "Tap any ball below to reassign its number:"
+                    "Tap a ball to reassign • Swipe left to remove:"
                 },
                 style = MaterialTheme.typography.labelLarge,
                 color = if (reviewCount > 0) WarningAmberColor else MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             sortedDisplayed.forEach { (item, effectiveNumber) ->
-                val isOverridden = effectiveNumber != item.ball.number
-                val isExpanded = activeReassignCandidateId == item.candidateId
-                val confidencePct = (item.identificationConfidence * 100.0).roundToInt()
+                key(item.candidateId) {
+                    val isOverridden = effectiveNumber != item.ball.number
+                    val isExpanded = activeReassignCandidateId == item.candidateId
+                    val confidencePct = (item.identificationConfidence * 100.0).roundToInt()
 
-                val cardBorder = when {
-                    isExpanded -> MaterialTheme.colorScheme.primary
-                    item.needsUserReview -> WarningAmberColor
-                    isOverridden -> GuideCyanColor
-                    else -> MaterialTheme.colorScheme.surfaceVariant
-                }
-                val cardBg = when {
-                    item.needsUserReview -> WarningAmberColor.copy(alpha = 0.10f)
-                    isExpanded -> MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
-                    else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.40f)
-                }
+                    val cardBorder = when {
+                        isExpanded -> MaterialTheme.colorScheme.primary
+                        item.needsUserReview -> WarningAmberColor
+                        isOverridden -> GuideCyanColor
+                        else -> MaterialTheme.colorScheme.surfaceVariant
+                    }
+                    val cardBg = when {
+                        item.needsUserReview -> WarningAmberColor.copy(alpha = 0.10f)
+                        isExpanded -> MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.40f)
+                    }
 
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable { onToggleReassignCandidate(item.candidateId) },
-                    shape = RoundedCornerShape(10.dp),
-                    color = cardBg,
-                    border = BorderStroke(if (item.needsUserReview || isExpanded) 1.5.dp else 1.dp, cardBorder),
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
+                    SwipeToRemoveBallRow(
+                        candidateId = item.candidateId,
+                        onRemove = { onDeleteBallCandidate(item.candidateId) },
+                    ) { isSwipeActive ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(10.dp)),
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable(enabled = !isSwipeActive) {
+                                        onToggleReassignCandidate(item.candidateId)
+                                    },
+                                shape = RoundedCornerShape(10.dp),
+                                color = cardBg,
+                                border = BorderStroke(
+                                    if (item.needsUserReview || isExpanded) 1.5.dp else 1.dp,
+                                    cardBorder,
+                                ),
                             ) {
-                                MiniBallSwatch(
-                                    ballNumber = effectiveNumber,
-                                    ballSet = ballSet,
-                                )
-                                Column {
-                                    val title = if (effectiveNumber == 0) {
-                                        "Cue Ball (0)"
-                                    } else {
-                                        "Ball #$effectiveNumber"
-                                    }
-                                    val overrideNote = if (isOverridden) {
-                                        " (was #${item.ball.number})"
-                                    } else {
-                                        ""
-                                    }
-                                    Text(
-                                        text = "$title$overrideNote",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                    )
-                                    Text(
-                                        text = "Pos (${formatDecimal(item.ball.position.x, 2)} m, ${formatDecimal(item.ball.position.y, 2)} m)",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
-
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                if (item.needsUserReview) {
-                                    Surface(
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = WarningAmberColor.copy(alpha = 0.22f),
-                                    ) {
-                                        Text(
-                                            text = "Review",
-                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = WarningAmberColor,
-                                        )
-                                    }
-                                } else if (isOverridden) {
-                                    Surface(
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = GuideCyanColor.copy(alpha = 0.22f),
-                                    ) {
-                                        Text(
-                                            text = "Updated",
-                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = GuideCyanColor,
-                                        )
-                                    }
-                                }
-                                Text(
-                                    text = "$confidencePct%",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (item.needsUserReview) WarningAmberColor else SuccessGreenColor,
-                                )
-                            }
-                        }
-
-                        if (isExpanded) {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically,
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
-                                    Text(
-                                        text = "Assign number (Cue or 1–15; active numbers swap):",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    TextButton(onClick = { onDeleteBallCandidate(item.candidateId) }) {
-                                        Text("Remove", color = ErrorRedColor)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        ) {
+                                            MiniBallSwatch(
+                                                ballNumber = effectiveNumber,
+                                                ballSet = ballSet,
+                                            )
+                                            Column {
+                                                val title = if (effectiveNumber == 0) {
+                                                    "Cue Ball (0)"
+                                                } else {
+                                                    "Ball #$effectiveNumber"
+                                                }
+                                                val overrideNote = if (isOverridden) {
+                                                    " (was #${item.ball.number})"
+                                                } else {
+                                                    ""
+                                                }
+                                                Text(
+                                                    text = "$title$overrideNote",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.onSurface,
+                                                )
+                                                Text(
+                                                    text = "Pos (${formatDecimal(item.ball.position.x, 2)} m, ${formatDecimal(item.ball.position.y, 2)} m)",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                        }
+
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            if (item.needsUserReview) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = WarningAmberColor.copy(alpha = 0.22f),
+                                                ) {
+                                                    Text(
+                                                        text = "Review",
+                                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = WarningAmberColor,
+                                                    )
+                                                }
+                                            } else if (isOverridden) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = GuideCyanColor.copy(alpha = 0.22f),
+                                                ) {
+                                                    Text(
+                                                        text = "Updated",
+                                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = GuideCyanColor,
+                                                    )
+                                                }
+                                            }
+                                            Text(
+                                                text = "$confidencePct%",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (item.needsUserReview) WarningAmberColor else SuccessGreenColor,
+                                            )
+                                        }
+                                    }
+
+                                    if (isExpanded) {
+                                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                Text(
+                                                    text = "Assign number (Cue or 1–15; active numbers swap):",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.weight(1f),
+                                                )
+                                                TextButton(onClick = { onDeleteBallCandidate(item.candidateId) }) {
+                                                    Text("Remove", color = ErrorRedColor)
+                                                }
+                                            }
+                                            BallNumberSelectionGrid(
+                                                selectedNumber = effectiveNumber,
+                                                ballSet = ballSet,
+                                                onSelectNumber = { num -> onReassignBallNumber(item.candidateId, num) },
+                                            )
+                                        }
                                     }
                                 }
-                                BallNumberSelectionGrid(
-                                    selectedNumber = effectiveNumber,
-                                    ballSet = ballSet,
-                                    onSelectNumber = { num -> onReassignBallNumber(item.candidateId, num) },
-                                )
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SwipeToRemoveBallRow(
+    candidateId: Int,
+    onRemove: () -> Unit,
+    content: @Composable (isSwipeActive: Boolean) -> Unit,
+) {
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+    val coroutineScope = rememberCoroutineScope()
+    val latestOnRemove by rememberUpdatedState(onRemove)
+
+    val minCommitPx = with(density) { SWIPE_REMOVE_MIN_COMMIT_DP.dp.toPx() }
+    val maxCommitPx = with(density) { SWIPE_REMOVE_MAX_COMMIT_DP.dp.toPx() }
+    var rowWidthPx by remember(candidateId) { mutableStateOf(0f) }
+    val offsetX = remember(candidateId) { Animatable(0f) }
+    var isSwiping by remember(candidateId) { mutableStateOf(false) }
+    var isDismissing by remember(candidateId) { mutableStateOf(false) }
+
+    val commitThresholdPx = computeSwipeRemoveCommitThresholdPx(
+        rowWidthPx = rowWidthPx,
+        minThresholdPx = minCommitPx,
+        maxThresholdPx = maxCommitPx,
+    )
+    val latestRowWidthPx by rememberUpdatedState(rowWidthPx)
+    val latestCommitThresholdPx by rememberUpdatedState(commitThresholdPx)
+
+    val isArmed = isSwipeRemoveArmed(offsetX.value, commitThresholdPx)
+    val isSwipeActive = isSwiping || isDismissing || offsetX.value < -4f
+    val trackColor by animateColorAsState(
+        targetValue = if (isArmed) {
+            ErrorRedColor.copy(alpha = 0.90f)
+        } else {
+            ErrorRedColor.copy(alpha = 0.24f)
+        },
+        animationSpec = tween(140),
+    )
+    val trackContentColor by animateColorAsState(
+        targetValue = if (isArmed) {
+            Color(0xFF1F0909)
+        } else {
+            ErrorRedColor
+        },
+        animationSpec = tween(140),
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .onSizeChanged { rowWidthPx = it.width.toFloat() },
+    ) {
+        if (offsetX.value < -1f) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(trackColor, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 16.dp),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = if (isArmed) "Release to remove" else "Swipe to remove",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = trackContentColor,
+                    )
+                    RunoutVectorIcon(
+                        icon = RunoutIcon.TRASH,
+                        tint = trackContentColor,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .pointerInput(candidateId) {
+                    var dragOffset = 0f
+                    var wasArmed = false
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            if (isDismissing) return@detectHorizontalDragGestures
+                            isSwiping = true
+                            dragOffset = offsetX.value
+                            wasArmed = isSwipeRemoveArmed(dragOffset, latestCommitThresholdPx)
+                        },
+                        onHorizontalDrag = { change, dragAmount ->
+                            if (isDismissing) return@detectHorizontalDragGestures
+                            if (dragOffset >= 0f && dragAmount > 0f) return@detectHorizontalDragGestures
+                            val threshold = latestCommitThresholdPx
+                            val maxDrag = (latestRowWidthPx * 0.72f).coerceAtLeast(threshold * 1.45f)
+                            val dampedDelta = if (dragAmount < 0f && -dragOffset >= threshold) {
+                                dragAmount * 0.45f
+                            } else {
+                                dragAmount
+                            }
+                            dragOffset = (dragOffset + dampedDelta).coerceIn(-maxDrag, 0f)
+                            change.consume()
+                            val nowArmed = isSwipeRemoveArmed(dragOffset, threshold)
+                            if (nowArmed != wasArmed) {
+                                wasArmed = nowArmed
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                            coroutineScope.launch {
+                                offsetX.snapTo(dragOffset)
+                            }
+                        },
+                        onDragEnd = {
+                            isSwiping = false
+                            if (isDismissing) return@detectHorizontalDragGestures
+                            val threshold = latestCommitThresholdPx
+                            if (isSwipeRemoveArmed(dragOffset, threshold)) {
+                                isDismissing = true
+                                val exitTarget = -latestRowWidthPx.coerceAtLeast(threshold * 2f)
+                                coroutineScope.launch {
+                                    offsetX.animateTo(
+                                        targetValue = exitTarget,
+                                        animationSpec = tween(durationMillis = 160),
+                                    )
+                                    latestOnRemove()
+                                }
+                            } else {
+                                coroutineScope.launch {
+                                    offsetX.animateTo(
+                                        targetValue = 0f,
+                                        animationSpec = spring(
+                                            dampingRatio = 0.82f,
+                                            stiffness = Spring.StiffnessMedium,
+                                        ),
+                                    )
+                                }
+                            }
+                        },
+                        onDragCancel = {
+                            isSwiping = false
+                            if (!isDismissing) {
+                                coroutineScope.launch {
+                                    offsetX.animateTo(
+                                        targetValue = 0f,
+                                        animationSpec = spring(
+                                            dampingRatio = 0.82f,
+                                            stiffness = Spring.StiffnessMedium,
+                                        ),
+                                    )
+                                }
+                            }
+                        },
+                    )
+                },
+        ) {
+            content(isSwipeActive)
         }
     }
 }
