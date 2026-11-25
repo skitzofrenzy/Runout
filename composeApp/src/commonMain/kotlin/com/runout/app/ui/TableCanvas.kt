@@ -3424,9 +3424,9 @@ fun computeShotTightness(
 fun computeShotTightness(shot: ShotRecommendation): Float {
     val cutDeg = abs(shot.aim.cutAngleRadians) * (180.0 / PI)
     val cutTightness = (cutDeg / 65.0).coerceIn(0.0, 1.0)
-    val scoreTightness = ((0.90 - shot.score) / 0.65).coerceIn(0.0, 1.0)
+    val makeTightness = ((0.96 - shot.makeProbability) / 0.65).coerceIn(0.0, 1.0)
     val spinTightness = if (shot.recommendedSpin == CueBallSpinPreset.DRAW) 0.55 else 0.15
-    return (0.45 * cutTightness + 0.40 * scoreTightness + 0.15 * spinTightness)
+    return (0.45 * cutTightness + 0.40 * makeTightness + 0.15 * spinTightness)
         .toFloat()
         .coerceIn(0f, 1f)
 }

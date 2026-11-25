@@ -529,8 +529,7 @@ fun App() {
                 initialLevel = playerProfile.experienceLevel,
                 initialGame = rulesState.gameType,
                 initialUseUkBlackball = ballSetProfile.isUkBlackball,
-                // The screen finds the size to preselect by name, so it is given the standard table of the nearest size.
-                initialTableSpec = TableSizePreset.fromTableSpec(currentLayout.table).toTableSpec(),
+                initialTableSpec = currentLayout.table,
                 onComplete = { level, gameType, tableSpec, useUkBlackball, preferredMode ->
                     val nextProfile = PlayerProfile.fromQuestionnaire(
                         experience = level,
