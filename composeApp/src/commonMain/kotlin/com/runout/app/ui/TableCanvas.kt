@@ -58,6 +58,7 @@ import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -673,9 +674,11 @@ fun PoolTableCanvas(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
+                .onSizeChanged { measured ->
+                    lastCanvasSize = Size(measured.width.toFloat(), measured.height.toFloat())
+                }
                 .then(interactiveGestureModifier),
         ) {
-            lastCanvasSize = size
             val geom = computeTableCanvasGeometry(
                 canvasWidth = size.width,
                 canvasHeight = size.height,
@@ -1450,6 +1453,26 @@ private enum class CalloutSide { ABOVE, BELOW, LEFT, RIGHT }
  *
  * [measure] returns the card's size for a width and a maximum height (the card is laid out at exactly that width).
  */
+internal fun buildCalloutPlacement(
+    card: Rect,
+    anchor: Offset,
+    canvas: Size,
+    ringRadius: Float,
+): CalloutPlacement {
+    val a = Offset(anchor.x.coerceIn(0f, canvas.width), anchor.y.coerceIn(0f, canvas.height))
+    val start = Offset(a.x.coerceIn(card.left, card.right), a.y.coerceIn(card.top, card.bottom))
+    val dx = start.x - a.x
+    val dy = start.y - a.y
+    val dist = hypot(dx, dy)
+    val end = if (dist > 1e-3f) {
+        val reach = min(ringRadius, dist * 0.5f)
+        Offset(a.x + dx / dist * reach, a.y + dy / dist * reach)
+    } else {
+        a
+    }
+    return CalloutPlacement(card, start, end)
+}
+
 internal fun placeCallout(
     canvas: Size,
     anchor: Offset,
@@ -1489,19 +1512,7 @@ internal fun placeCallout(
         }
     }
 
-    fun finish(card: Rect): CalloutPlacement {
-        val start = Offset(a.x.coerceIn(card.left, card.right), a.y.coerceIn(card.top, card.bottom))
-        val dx = start.x - a.x
-        val dy = start.y - a.y
-        val dist = hypot(dx, dy)
-        val end = if (dist > 1e-3f) {
-            val reach = min(ringRadius, dist * 0.5f)
-            Offset(a.x + dx / dist * reach, a.y + dy / dist * reach)
-        } else {
-            a
-        }
-        return CalloutPlacement(card, start, end)
-    }
+    fun finish(card: Rect): CalloutPlacement = buildCalloutPlacement(card, anchor, canvas, ringRadius)
 
     val sides = CalloutSide.entries
 
@@ -1679,42 +1690,56 @@ private fun PathWaypointCallout(
     ) { measurables, constraints ->
         val fullW = constraints.maxWidth
         val fullH = constraints.maxHeight
+        val canvasSize = Size(fullW.toFloat(), fullH.toFloat())
+        val marginPx = RunoutSpacing.Element.toPx()
         val measurable = measurables.first()
-        val result = placeCallout(
-            canvas = Size(fullW.toFloat(), fullH.toFloat()),
+        val planned = placeCallout(
+            canvas = canvasSize,
             anchor = anchor,
             others = otherAnchors,
             ringRadius = ringRadiusPx,
             clearance = ringRadiusPx + CALLOUT_CLEARANCE_DP.dp.toPx(),
             gap = CALLOUT_GAP_DP.dp.toPx(),
-            margin = RunoutSpacing.Element.toPx(),
+            margin = marginPx,
             maxWidth = CALLOUT_MAX_WIDTH_DP.dp.toPx(),
             minWidth = CALLOUT_MIN_WIDTH_DP.dp.toPx(),
             minHeight = CALLOUT_MIN_HEIGHT_DP.dp.toPx(),
         ) { width, maxHeight ->
             val w = width.toInt().coerceAtLeast(1)
-            val p = measurable.measure(
-                Constraints(minWidth = w, maxWidth = w, minHeight = 0, maxHeight = maxHeight.toInt().coerceAtLeast(1)),
-            )
-            Size(p.width.toFloat(), p.height.toFloat())
+            val maxH = maxHeight.toInt().coerceAtLeast(1)
+            // Use intrinsic height during candidate probing so each Measurable is measured only once per pass.
+            val naturalH = measurable.maxIntrinsicHeight(w).coerceIn(1, maxH)
+            Size(w.toFloat(), naturalH.toFloat())
         }
-        // Measure once more at exactly the chosen size, so the placed card is the one the rectangle describes.
-        val chosenW = result.card.width.toInt().coerceAtLeast(1)
+        // Single Compose measure() call at the chosen width and maximum height.
+        val chosenW = planned.card.width.toInt().coerceAtLeast(1)
+        val chosenMaxH = planned.card.height.toInt().coerceAtLeast(1)
         val placeable = measurable.measure(
             Constraints(
                 minWidth = chosenW,
                 maxWidth = chosenW,
                 minHeight = 0,
-                maxHeight = result.card.height.toInt().coerceAtLeast(1),
+                maxHeight = chosenMaxH,
             ),
         )
+        val actualW = placeable.width.toFloat()
+        val actualH = placeable.height.toFloat()
+        val actualLeft = planned.card.left.coerceIn(0f, (canvasSize.width - actualW).coerceAtLeast(0f))
+        val rawTop = if (planned.card.bottom <= anchor.y) {
+            planned.card.bottom - actualH
+        } else {
+            planned.card.top
+        }
+        val actualTop = rawTop.coerceIn(0f, (canvasSize.height - actualH).coerceAtLeast(0f))
+        val actualCard = Rect(actualLeft, actualTop, actualLeft + actualW, actualTop + actualH)
+        val result = buildCalloutPlacement(actualCard, anchor, canvasSize, ringRadiusPx)
         if (lastPlacement[0] != result) {
             lastPlacement[0] = result
             latestOnCardPlaced(result.card)
             placement = result
         }
         layout(fullW, fullH) {
-            placeable.place(result.card.left.roundToInt(), result.card.top.roundToInt())
+            placeable.place(actualCard.left.roundToInt(), actualCard.top.roundToInt())
         }
     }
 }

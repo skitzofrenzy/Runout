@@ -2,6 +2,12 @@
 
 All notable user-facing changes to Runout are documented here and bundled into the in-app **What's New** screen.
 
+## [0.2.2] - 2026-11-25
+
+### Fixed
+- **Path Physics Callout Crash:** Fixed a Compose layout crash when opening the **Path physics** inspector (`measure()` was called more than once on the same callout node); the callout now probes sizes via intrinsic height and measures once cleanly across both standard and compact table sizes.
+- **Table Canvas Initial Sizing:** Moved canvas size tracking from draw phase to layout (`onSizeChanged`) so step-zoom controls and the Path physics callout are ready immediately on the first frame.
+
 ## [0.2.1] - 2026-11-25
 
 ### Added
