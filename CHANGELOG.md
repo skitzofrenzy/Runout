@@ -2,6 +2,16 @@
 
 All notable user-facing changes to Runout are documented here and bundled into the in-app **What's New** screen.
 
+## [0.2.1] - 2026-11-25
+
+### Added
+- **Swipe-to-Remove & Timed Undo:** Swipe left on any row in the photo-review ball list to remove it cleanly with a red trash reveal and haptic feedback, plus a 5-second floating **Undo** bar (supporting sequential undos and **Clear Balls** recovery).
+- **Clear Balls Button:** Quickly clear all detected balls on the photo review screen before adding balls manually.
+
+### Fixed
+- **Bright Cool-Grey Cloth & 4K Detection:** Widened bright grey cloth segmentation and removed the fixed ball-radius ceiling so silver-blue broadcast tables no longer produce ghost balls, and added pale-ivory cue-ball classification under tinted lighting.
+- **Tap-to-Rescan Accuracy:** Local tap rescans now reuse the detected cloth model, pick only the ball closest to your tap (or split a touching cluster), and prune hidden overflow candidates so deleted balls cannot reappear or block taps.
+
 ## [0.2.0] - 2026-11-25
 
 ### Added
