@@ -99,6 +99,7 @@ import com.runout.engine.vision.BallIdentificationAndAssignment
 import com.runout.engine.vision.CameraIntrinsicsSpec
 import com.runout.engine.vision.ClothHueCategory
 import com.runout.engine.vision.DetectedBallCandidate
+import com.runout.engine.vision.DetectedClothSurface
 import com.runout.engine.vision.DetectedGameVariant
 import com.runout.engine.vision.FrozenBallStatus
 import com.runout.engine.vision.GameTypeSuggester
@@ -194,6 +195,7 @@ fun PhotoCaptureAndConfirmScreen(
     var importedImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var importedRawFrame by remember { mutableStateOf<ArgbImageFrame?>(null) }
     var importedQuads by remember { mutableStateOf<TableQuadDetection?>(null) }
+    var importedClothSurface by remember { mutableStateOf<DetectedClothSurface?>(null) }
     var pendingImportedFrame by remember { mutableStateOf<ImportedPhotoFrame?>(null) }
     var importError by remember { mutableStateOf<String?>(null) }
     var activeBallSet by remember(ballSet) { mutableStateOf(ballSet) }
@@ -230,6 +232,7 @@ fun PhotoCaptureAndConfirmScreen(
             onSuccess = { (bundle, previewBitmap) ->
                 importedImageBitmap = previewBitmap
                 importedQuads = bundle.summary.toQuadDetection()
+                importedClothSurface = bundle.summary.clothSurface
                 importedRawFrame = imported.frame
                 selectedPhoto = bundle.photo
                 activeBallSet = bundle.inferredBallSet
@@ -266,6 +269,7 @@ fun PhotoCaptureAndConfirmScreen(
             }.getOrNull()
         } ?: return@LaunchedEffect
         selectedPhoto = selectedPhoto.copy(rawDetections = summary.detectedCandidates)
+        importedClothSurface = summary.clothSurface
         activeBallSet = BallSetProfile.inferFromDetectedColors(
             summary.detectedCandidates.map { it.dominantColor },
             ballSet,
@@ -361,15 +365,24 @@ fun PhotoCaptureAndConfirmScreen(
     }
 
     fun handleDeleteBallCandidate(candidateId: Int) {
+        val visibleIds = displayedBallsWithIdentity.map { it.first.candidateId }.toSet()
         val remainingPinned = displayedBallsWithIdentity
             .filter { (item, _) -> item.candidateId != candidateId }
             .associate { (item, num) -> item.candidateId to num }
         selectedPhoto = selectedPhoto.copy(
-            rawDetections = selectedPhoto.rawDetections.filterNot { it.id == candidateId },
+            rawDetections = selectedPhoto.rawDetections.filter { it.id in visibleIds && it.id != candidateId },
         )
         candidateNumberOverrides = remainingPinned
         if (activeReassignCandidateId == candidateId) activeReassignCandidateId = null
         if (draggedCandidateId == candidateId) draggedCandidateId = null
+    }
+
+    fun handleClearAllBalls() {
+        selectedPhoto = selectedPhoto.copy(rawDetections = emptyList())
+        candidateNumberOverrides = emptyMap()
+        activeReassignCandidateId = null
+        draggedCandidateId = null
+        rescanFeedbackMessage = "Cleared all balls — tap any ball on the photo to detect or add it."
     }
 
     fun handleReassignBallCandidateNumber(candidateId: Int, newNumber: Int) {
@@ -389,8 +402,10 @@ fun PhotoCaptureAndConfirmScreen(
             item.candidateId to num
         }
         val usedNumbers = pinnedMap.values.toMutableSet()
-        val existing = selectedPhoto.rawDetections
+        val visibleIds = pinnedMap.keys
+        val existingVisible = selectedPhoto.rawDetections.filter { it.id in visibleIds }
         val frame = importedRawFrame
+        val clothSnapshot = importedClothSurface
         val canonicalQuad = canonicalizeQuadTopLeftClockwise(overriddenQuadCornersPx)
         val snapshotPhotoId = selectedPhoto.id
 
@@ -403,11 +418,12 @@ fun PhotoCaptureAndConfirmScreen(
                             frame = frame,
                             tapCenterPx = tapImagePx,
                             quadCornersPx = canonicalQuad,
+                            existingCandidates = existingVisible,
+                            clothOverride = clothSnapshot,
                             endOnView = importedQuads?.endOnView,
-                            existingCandidates = existing,
                         )
                     } else {
-                        val nextId = (existing.maxOfOrNull { it.id } ?: 0) + 1
+                        val nextId = (existingVisible.maxOfOrNull { it.id } ?: 0) + 1
                         LocalTapRescanResult(
                             detectedCandidates = listOf(
                                 DetectedBallCandidate(
@@ -434,7 +450,7 @@ fun PhotoCaptureAndConfirmScreen(
                     usedNumbers += suggested
                 }
                 selectedPhoto = selectedPhoto.copy(
-                    rawDetections = existing + result.detectedCandidates,
+                    rawDetections = existingVisible + result.detectedCandidates,
                 )
                 candidateNumberOverrides = pinnedMap + newAssigned
                 val firstNew = result.detectedCandidates.firstOrNull()
@@ -721,6 +737,7 @@ fun PhotoCaptureAndConfirmScreen(
                             activeBallSet = ballSet
                             importedImageBitmap = null
                             importedQuads = null
+                            importedClothSurface = null
                             importedRawFrame = null
                             wizardStep = PhotoWizardStep.REVIEW_TABLE
                         },
@@ -784,6 +801,7 @@ fun PhotoCaptureAndConfirmScreen(
                                 )
                                 importedImageBitmap = decoded.frame.toComposeImageBitmap()
                                 importedQuads = decoded.summary.toQuadDetection()
+                                importedClothSurface = decoded.summary.clothSurface
                                 importedRawFrame = decoded.frame
                                 wizardStep = PhotoWizardStep.REVIEW_TABLE
                             },
@@ -816,6 +834,7 @@ fun PhotoCaptureAndConfirmScreen(
                     onTapEmptyPhotoArea = ::handleTapEmptyPhotoArea,
                     onReassignBallNumber = ::handleReassignBallCandidateNumber,
                     onDeleteBallCandidate = ::handleDeleteBallCandidate,
+                    onClearAllBalls = ::handleClearAllBalls,
                     onDismissFeedback = { rescanFeedbackMessage = null },
                     onResetCorners = {
                         overriddenQuadCornersPx = selectedPhoto.detectedQuadCornersPx
@@ -1550,6 +1569,7 @@ private fun InteractiveFramingGuideCard(
     onTapEmptyPhotoArea: (Vec2) -> Unit,
     onReassignBallNumber: (candidateId: Int, newNumber: Int) -> Unit,
     onDeleteBallCandidate: (candidateId: Int) -> Unit,
+    onClearAllBalls: () -> Unit,
     onDismissFeedback: () -> Unit,
     onResetCorners: () -> Unit,
     sourceImageBitmap: ImageBitmap? = null,
@@ -1568,8 +1588,17 @@ private fun InteractiveFramingGuideCard(
     val textMeasurer = rememberTextMeasurer()
     val density = LocalDensity.current
 
+    val candidateLookup = remember(displayedBalls) {
+        displayedBalls.associate { (result, effectiveNum) ->
+            result.candidateId to (result to effectiveNum)
+        }
+    }
+    val visibleRawCandidates = remember(photo.rawDetections, candidateLookup) {
+        photo.rawDetections.filter { it.id in candidateLookup }
+    }
+
     val latestCorners by rememberUpdatedState(quadCornersPx)
-    val latestCandidates by rememberUpdatedState(photo.rawDetections)
+    val latestCandidates by rememberUpdatedState(visibleRawCandidates)
     val latestFrameW by rememberUpdatedState(frameWidthPx)
     val latestFrameH by rememberUpdatedState(frameHeightPx)
     val latestOnCornersChanged by rememberUpdatedState(onCornersChanged)
@@ -1585,12 +1614,6 @@ private fun InteractiveFramingGuideCard(
         }.getOrNull()
     }
 
-    val candidateLookup = remember(displayedBalls) {
-        displayedBalls.associate { (result, effectiveNum) ->
-            result.candidateId to (result to effectiveNum)
-        }
-    }
-
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -1603,35 +1626,48 @@ private fun InteractiveFramingGuideCard(
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = "Match the box to the playing surface",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = TABLE_BOX_HINT,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "Drag corners or balls (magnifier) • Tap an empty spot to rescan or add a ball",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Match the box to the playing surface",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        text = TABLE_BOX_HINT,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        text = "Drag corners or balls (magnifier) • Tap an empty spot to rescan or add a ball",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                OutlinedButton(
+                    onClick = onClearAllBalls,
+                    enabled = displayedBalls.isNotEmpty(),
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
+                ) {
+                    Text("Clear Balls", maxLines = 1)
                 }
                 OutlinedButton(
                     onClick = onResetCorners,
                     enabled = hasCustomCorners,
-                    modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
                 ) {
-                    Text("Reset Corners")
+                    Text("Reset Corners", maxLines = 1)
                 }
             }
 

@@ -817,4 +817,122 @@ class RawImageTableDetectorTest {
         assertEquals(5, BallIdentificationAndAssignment.suggestBallNumberForCandidate(redCand, ballSet, excludedNumbers = setOf(3)))
         assertEquals(11, BallIdentificationAndAssignment.suggestBallNumberForCandidate(redCand, ballSet, excludedNumbers = setOf(3, 5, 7)))
     }
+
+    @Test
+    fun coolSilverGreyClothWithPaleIvoryCueBallProducesZeroGhostsAndCleanTapRescan() {
+        val w = 960
+        val h = 432
+        val rawQuad = listOf(
+            Vec2(320.0, 88.0),
+            Vec2(620.0, 88.0),
+            Vec2(705.0, 384.0),
+            Vec2(240.0, 384.0),
+        )
+        val broadcastBalls = listOf(
+            ball(0, 2.38, 0.36),
+            ball(2, 2.02, 0.25),
+            ball(3, 1.66, 0.14),
+            ball(4, 0.58, 1.06),
+            ball(5, 1.85, 0.45),
+            ball(6, 1.76, 0.85),
+            ball(7, 2.18, 0.28),
+            ball(8, 0.24, 0.84),
+            ball(9, 1.24, 0.96),
+        )
+        val layout = TableLayout(table, broadcastBalls)
+        val (orientedQuad, endCamera) = RawImageTableDetector.orientQuadForHomography(rawQuad, table)
+        val homography = PerspectiveHomography.fromTableQuad(orientedQuad, table)
+
+        // Bright cool-grey cloth (S ~ 0.14..0.17, V ~ 0.78..0.83, hue ~ 193 deg) with slight lighting variation
+        val pixels = IntArray(w * h) { idx ->
+            val x = idx % w
+            val y = idx / w
+            if (RawImageTableDetector.pointInQuad(x.toDouble(), y.toDouble(), rawQuad)) {
+                val grad = ((y - 88.0) / 296.0).coerceIn(0.0, 1.0)
+                val r = (172 + (grad * 8).toInt()).coerceIn(0, 255)
+                val g = (196 + (grad * 8).toInt()).coerceIn(0, 255)
+                val b = (205 + (grad * 8).toInt()).coerceIn(0, 255)
+                (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            } else {
+                0xFF425A52.toInt()
+            }
+        }
+
+        val ballSet = BallSetProfile.broadcastBlackPool()
+        val paletteArgb = mapOf(
+            com.runout.engine.model.BallPaletteColor.WHITE to 0xFFEBEFD0.toInt(), // Pale ivory-green tinted cue ball
+            com.runout.engine.model.BallPaletteColor.YELLOW to 0xFFF0C818.toInt(),
+            com.runout.engine.model.BallPaletteColor.BLUE to 0xFF1E5ED8.toInt(),
+            com.runout.engine.model.BallPaletteColor.RED to 0xFFD82828.toInt(),
+            com.runout.engine.model.BallPaletteColor.PINK to 0xFFF27698.toInt(),
+            com.runout.engine.model.BallPaletteColor.PURPLE to 0xFF8250A8.toInt(),
+            com.runout.engine.model.BallPaletteColor.GREEN to 0xFF1EA858.toInt(),
+            com.runout.engine.model.BallPaletteColor.BROWN to 0xFF8E4218.toInt(),
+            com.runout.engine.model.BallPaletteColor.BLACK to 0xFF141414.toInt(),
+        )
+        val renderedCenters = HashMap<Int, Vec2>()
+        for (b in layout.balls) {
+            val c = homography.ballCenterMetersToImage(b.position, b.radiusMeters, endCamera)
+            renderedCenters[b.number] = c
+            val r = 9.5
+            val color = paletteArgb.getValue(ballSet.colorForBall(b.number))
+            for (py in (c.y - r).toInt()..(c.y + r).toInt()) {
+                for (px in (c.x - r).toInt()..(c.x + r).toInt()) {
+                    if (px !in 0 until w || py !in 0 until h) continue
+                    val dx = px - c.x
+                    val dy = py - c.y
+                    val d2 = dx * dx + dy * dy
+                    if (d2 > r * r) continue
+                    pixels[py * w + px] = when {
+                        b.number == 0 -> if (dy > 0.35 * r) 0xFFCED6B4.toInt() else color
+                        b.number == 9 -> if (abs(dy) <= 0.35 * r) 0xFF1C1A18.toInt() else color
+                        else -> if (d2 <= 0.10 * r * r) 0xFFF8F8F8.toInt() else color
+                    }
+                }
+            }
+        }
+
+        val frame = ArgbImageFrame(w, h, pixels)
+        val summary = RawImageTableDetector.analyzeArgbFrame(frame)
+        assertEquals(ClothHueCategory.GREY, summary.clothSurface.category)
+        assertTrue(
+            summary.clothSurface.meanSaturation in 0.12..0.22,
+            "Test cloth should lie in cool silver-grey saturation band, got ${summary.clothSurface.meanSaturation}",
+        )
+        assertEquals(9, summary.detectedCandidates.size, "Must detect exactly 9 balls with zero ghost cloth blobs")
+
+        val (detOriented, detCamera) = RawImageTableDetector.orientQuadForHomography(summary.detectedQuadCornersPx, table)
+        val detHomography = PerspectiveHomography.fromTableQuad(detOriented, table)
+        val rectified = BallIdentificationAndAssignment.rectifyAndIdentifyBalls(
+            candidates = summary.detectedCandidates,
+            homography = detHomography,
+            table = table,
+            ballSet = ballSet,
+            cameraPositionMeters = detCamera,
+        )
+        assertEquals(broadcastBalls.map { it.number }.toSet(), rectified.layout.balls.map { it.number }.toSet())
+
+        // Tap-to-rescan on the same cool silver-grey cloth recovers the single tapped ball without spawning ghosts
+        val tapCue = RawImageTableDetector.rescanLocalRegion(
+            frame = frame,
+            tapCenterPx = renderedCenters.getValue(0),
+            quadCornersPx = summary.detectedQuadCornersPx,
+            existingCandidates = emptyList(),
+            clothOverride = summary.clothSurface,
+            endOnView = summary.endOnView,
+        )
+        assertEquals(1, tapCue.detectedCandidates.size, "Single tap on cue ball must return exactly 1 ball")
+        assertEquals(com.runout.engine.model.BallPaletteColor.WHITE, tapCue.detectedCandidates.single().dominantColor)
+
+        val tapRed = RawImageTableDetector.rescanLocalRegion(
+            frame = frame,
+            tapCenterPx = renderedCenters.getValue(3),
+            quadCornersPx = summary.detectedQuadCornersPx,
+            existingCandidates = tapCue.detectedCandidates,
+            clothOverride = summary.clothSurface,
+            endOnView = summary.endOnView,
+        )
+        assertEquals(1, tapRed.detectedCandidates.size, "Single tap on red ball must return exactly 1 ball")
+        assertEquals(com.runout.engine.model.BallPaletteColor.RED, tapRed.detectedCandidates.single().dominantColor)
+    }
 }
