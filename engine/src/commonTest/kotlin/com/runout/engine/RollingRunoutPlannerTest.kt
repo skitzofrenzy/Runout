@@ -1338,6 +1338,209 @@ class RollingRunoutPlannerTest {
         assertTrue("8-ball" in reason, reason)
     }
 
+    /**
+     * Straight-in pot on ball #1 into [PocketId.SIDE_LEFT] with [extraBall] in front of [PocketId.SIDE_RIGHT] behind
+     * the cue ball: medium draw drops #1 and [extraBall] without scratching; hard draw also scratches in
+     * [PocketId.SIDE_RIGHT].
+     */
+    private fun extraDropDrawLayout(extraBall: Int, otherA: Int, otherB: Int): TableLayout = layoutFrom(
+        listOf(0, 1, otherA, otherB, extraBall),
+        doubleArrayOf(1.27, 0.55, 1.27, 0.22, 0.65, 0.35, 2.05, 0.95, 1.27, 1.08),
+    )
+
+    /**
+     * Finds a draw override on ball #1 into [PocketId.SIDE_LEFT] that pots #1 as planned, drops [extraBall] in the
+     * nominal simulation, and matches [expectScratch].
+     */
+    private fun findExtraDropEdit(
+        state: RollingPlanState,
+        extraBall: Int,
+        expectScratch: Boolean,
+    ): RollingPlanState {
+        val speeds = if (expectScratch) {
+            listOf(10.0, 9.5, 9.0, 8.5, 8.0, 7.5, 7.0)
+        } else {
+            listOf(5.0, 5.5, 6.0, 4.5, 6.5, 4.0, 7.0)
+        }
+        val verticals = if (expectScratch) {
+            listOf(-0.50, -0.45, -0.40)
+        } else {
+            listOf(-0.45, -0.40, -0.35, -0.50, -0.30)
+        }
+        for (vertical in verticals) for (speed in speeds) {
+            val edited = RollingRunoutPlanner.setOverride(
+                state,
+                StepOverride(
+                    tip = TipOffset(sideRatio = 0.0, verticalRatio = vertical),
+                    speedUnits = speed,
+                    pocketId = PocketId.SIDE_LEFT,
+                    targetBallNumber = 1,
+                ),
+            )
+            val step = edited.focusStep ?: continue
+            val simulation = step.uncertainty.postShotSimulation ?: continue
+            val scratched = step.uncertainty.nominalTrajectory.hitsScratchPocket != null ||
+                simulation.cueBallTrajectory.hitsScratchPocket != null
+            if (step.targetBall.number == 1 &&
+                step.uncertainty.targetBallPotted &&
+                extraBall in droppedBalls(step) &&
+                scratched == expectScratch
+            ) {
+                return edited
+            }
+        }
+        fail("No draw override potted #1 and dropped #$extraBall (expectScratch=$expectScratch)")
+    }
+
+    @Test
+    fun nineBallEditedShotDroppingAnExtraNonMoneyBallIsAcceptedAndContinues() {
+        val layout = extraDropDrawLayout(extraBall = 4, otherA = 2, otherB = 9)
+        val start = RollingRunoutPlanner.start(layout, nineBallRules, profile, horizon = 3)
+        val edited = findExtraDropEdit(start, extraBall = 4, expectScratch = false)
+        val step = assertNotNull(edited.focusStep)
+        assertFalse(step.legalAsPlanned, "Precondition: the planner flags extra-drop steps as not legalAsPlanned")
+        assertTrue(step.uncertainty.targetBallPotted)
+        assertTrue(4 in droppedBalls(step))
+
+        assertNull(RollingRunoutPlanner.advanceRefusal(edited))
+        assertTrue(edited.canAdvance)
+
+        val accepted = RollingRunoutPlanner.acceptAndAdvance(edited)
+
+        assertNull(accepted.refusalReason)
+        assertFalse(accepted.isRackComplete)
+        assertEquals(listOf(1), accepted.acceptedSteps.map { it.targetBall.number })
+        assertNull(accepted.focusLayout.ballByNumber(1), "Target ball must be absent from the continuation table")
+        assertNull(accepted.focusLayout.ballByNumber(4), "Extra pocketed ball must be absent from the continuation table")
+        assertNotNull(accepted.focusLayout.ballByNumber(2))
+        assertNotNull(accepted.focusLayout.ballByNumber(9))
+        assertEquals(listOf(2, 9), targets(accepted.window))
+        assertEquals(listOf(2, 3), accepted.window?.steps?.map { it.stepNumber })
+        assertTrue(accepted.canAdvance)
+    }
+
+    @Test
+    fun nineBallEditedShotDroppingTheMoneyBallCompletesTheRack() {
+        val layout = extraDropDrawLayout(extraBall = 9, otherA = 2, otherB = 5)
+        val start = RollingRunoutPlanner.start(layout, nineBallRules, profile, horizon = 3)
+        val edited = findExtraDropEdit(start, extraBall = 9, expectScratch = false)
+        val step = assertNotNull(edited.focusStep)
+        assertFalse(step.legalAsPlanned, "Precondition: extra-drop step is not legalAsPlanned")
+        assertEquals(1, step.targetBall.number)
+        assertTrue(step.uncertainty.targetBallPotted)
+        assertTrue(9 in droppedBalls(step))
+
+        assertNull(RollingRunoutPlanner.advanceRefusal(edited))
+        assertTrue(edited.canAdvance)
+
+        val accepted = RollingRunoutPlanner.acceptAndAdvance(edited)
+
+        assertNull(accepted.refusalReason)
+        assertTrue(accepted.isRackComplete, "Pocketing the 9-ball on a legal hit ends the rack")
+        assertNull(accepted.window)
+        assertTrue(accepted.alternatives.isEmpty())
+        assertFalse(accepted.canAdvance)
+        assertTrue(accepted.canGoBack)
+        assertNull(accepted.focusLayout.ballByNumber(1))
+        assertNull(accepted.focusLayout.ballByNumber(9))
+        assertNotNull(accepted.focusLayout.ballByNumber(2), "Other object balls remain, confirming the 9-ball drop ended the rack")
+
+        val reopened = RollingRunoutPlanner.back(accepted)
+        assertFalse(reopened.isRackComplete)
+        assertTrue(reopened.canAdvance)
+    }
+
+    @Test
+    fun nineBallEditedShotScratchingWhileDroppingAnExtraBallIsStillRefused() {
+        val layout = extraDropDrawLayout(extraBall = 4, otherA = 2, otherB = 9)
+        val start = RollingRunoutPlanner.start(layout, nineBallRules, profile, horizon = 3)
+        val edited = findExtraDropEdit(start, extraBall = 4, expectScratch = true)
+        val step = assertNotNull(edited.focusStep)
+        assertFalse(step.legalAsPlanned)
+        assertTrue(step.uncertainty.targetBallPotted)
+        assertTrue(4 in droppedBalls(step))
+
+        assertFalse(edited.canAdvance)
+        val reason = assertNotNull(RollingRunoutPlanner.advanceRefusal(edited))
+        assertTrue("scratches" in reason, reason)
+
+        val refused = RollingRunoutPlanner.acceptAndAdvance(edited)
+        assertTrue(refused.acceptedSteps.isEmpty())
+        assertEquals(reason, refused.refusalReason)
+    }
+
+    @Test
+    fun eightBallEditedShotDroppingAnExtraBallRemainsRefused() {
+        val dropsEightStart = RollingRunoutPlanner.start(
+            extraDropDrawLayout(extraBall = 8, otherA = 2, otherB = 9),
+            solidsRules,
+            profile,
+            horizon = 3,
+        )
+        val dropsEight = findExtraDropEdit(dropsEightStart, extraBall = 8, expectScratch = false)
+        assertFalse(dropsEight.canAdvance)
+        val eightReason = assertNotNull(RollingRunoutPlanner.advanceRefusal(dropsEight))
+        assertTrue("8-ball" in eightReason, eightReason)
+        assertEquals(eightReason, RollingRunoutPlanner.acceptAndAdvance(dropsEight).refusalReason)
+
+        val dropsOpponentStart = RollingRunoutPlanner.start(
+            extraDropDrawLayout(extraBall = 9, otherA = 2, otherB = 8),
+            solidsRules,
+            profile,
+            horizon = 3,
+        )
+        val dropsOpponent = findExtraDropEdit(dropsOpponentStart, extraBall = 9, expectScratch = false)
+        assertFalse(dropsOpponent.canAdvance)
+        val opponentReason = assertNotNull(RollingRunoutPlanner.advanceRefusal(dropsOpponent))
+        assertTrue("#9" in opponentReason, opponentReason)
+        assertEquals(opponentReason, RollingRunoutPlanner.acceptAndAdvance(dropsOpponent).refusalReason)
+
+        val dropsOwnStart = RollingRunoutPlanner.start(
+            extraDropDrawLayout(extraBall = 2, otherA = 9, otherB = 8),
+            solidsRules,
+            profile,
+            horizon = 3,
+        )
+        val dropsOwn = findExtraDropEdit(dropsOwnStart, extraBall = 2, expectScratch = false)
+        assertFalse(assertNotNull(dropsOwn.focusStep).legalAsPlanned)
+        assertFalse(dropsOwn.canAdvance)
+        val ownReason = assertNotNull(RollingRunoutPlanner.advanceRefusal(dropsOwn))
+        assertEquals(ownReason, RollingRunoutPlanner.acceptAndAdvance(dropsOwn).refusalReason)
+    }
+
+    @Test
+    fun tenBallEditedShotDroppingAnExtraBallIsAcceptedUnderRotationRules() {
+        val tenBallRules = GameRulesState(GameType.TEN_BALL)
+
+        val nonMoneyLayout = extraDropDrawLayout(extraBall = 4, otherA = 2, otherB = 10)
+        val start = RollingRunoutPlanner.start(nonMoneyLayout, tenBallRules, profile, horizon = 3)
+        val edited = findExtraDropEdit(start, extraBall = 4, expectScratch = false)
+        val step = assertNotNull(edited.focusStep)
+        assertFalse(step.legalAsPlanned)
+        assertTrue(4 in droppedBalls(step))
+
+        assertNull(RollingRunoutPlanner.advanceRefusal(edited))
+        assertTrue(edited.canAdvance)
+        val accepted = RollingRunoutPlanner.acceptAndAdvance(edited)
+        assertNull(accepted.refusalReason)
+        assertFalse(accepted.isRackComplete)
+        assertNull(accepted.focusLayout.ballByNumber(1))
+        assertNull(accepted.focusLayout.ballByNumber(4))
+        assertEquals(listOf(2, 10), targets(accepted.window))
+
+        val moneyLayout = extraDropDrawLayout(extraBall = 10, otherA = 2, otherB = 5)
+        val moneyStart = RollingRunoutPlanner.start(moneyLayout, tenBallRules, profile, horizon = 3)
+        val editedMoney = findExtraDropEdit(moneyStart, extraBall = 10, expectScratch = false)
+        assertNull(RollingRunoutPlanner.advanceRefusal(editedMoney))
+        val completed = RollingRunoutPlanner.acceptAndAdvance(editedMoney)
+        assertNull(completed.refusalReason)
+        assertTrue(completed.isRackComplete, "Pocketing the 10-ball on a legal hit ends the rack")
+        assertNull(completed.window)
+        assertNull(completed.focusLayout.ballByNumber(1))
+        assertNull(completed.focusLayout.ballByNumber(10))
+        assertNotNull(completed.focusLayout.ballByNumber(2))
+    }
+
     // ---------------------------------------------------------------------------------------------
     // Stopping a search
     // ---------------------------------------------------------------------------------------------

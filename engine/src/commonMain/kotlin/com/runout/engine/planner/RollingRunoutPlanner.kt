@@ -188,12 +188,15 @@ data class RollingPlanState(
             MultiShotPlanner.rulesAfterPotting(rules, step.targetBall)
         }
 
-    /** True once the game ball (or the last legal ball) has been accepted. */
+    /** True once the game ball has been pocketed (as target or extra ball on a legal hit) or no legal ball remains. */
     val isRackComplete: Boolean
         get() {
             val last = acceptedSteps.lastOrNull() ?: return false
-            return last.targetBall.number == baseRules.gameType.requiredEndBallNumber ||
-                focusRules.legalTargetBalls(focusLayout).isEmpty()
+            val endBall = baseRules.gameType.requiredEndBallNumber
+            val endBallPocketed = last.targetBall.number == endBall ||
+                last.uncertainty.postShotSimulation?.disturbedBalls.orEmpty()
+                    .any { it.ballNumber == endBall && it.pocketedIn != null }
+            return endBallPocketed || focusRules.legalTargetBalls(focusLayout).isEmpty()
         }
 
     /** The step the user is looking at, or `null` when there is none. */
@@ -284,8 +287,9 @@ object RollingRunoutPlanner {
      * shot, the simulation does not pot the ball, the ball drops in a pocket other than the planned one, the cue
      * ball scratches, or another ball drops that makes the shot a foul or a loss.
      *
-     * A forced shot (an override the planner found no legal plan for) is shown so that the user can see what it
-     * does, but it is only accepted when the nominal simulation shows what the plan says it shows.
+     * A forced shot (an override the planner found no clean plan for) is shown so that the user can see what it
+     * does. It is accepted when the nominal simulation plays as planned, or in rotation games (9-ball and 10-ball)
+     * when it pots the legal target in the planned pocket without scratching and also drops another ball.
      */
     fun advanceRefusal(state: RollingPlanState): String? {
         if (state.isRackComplete) return "The rack is already complete."
@@ -307,9 +311,7 @@ object RollingRunoutPlanner {
 
     /**
      * Why [step], which pots its target ball and does not scratch, is still not a shot the plan can continue from, or
-     * `null`. Read from the nominal simulation of the step. The reasons below are specific; a step the planner flags as
-     * not [PlannedShotStep.legalAsPlanned] for any other reason (any extra ball dropping, in any game) is refused with
-     * a general one.
+     * `null`. Read from the nominal simulation of the step.
      *
      * - The target ball drops in a pocket other than the step's own: the plan (and the table it leaves) is for another
      *   pocket.
@@ -319,8 +321,10 @@ object RollingRunoutPlanner {
      *   group is the target's group, or, when the 8 is the target, the assigned group; when it cannot be told, any
      *   extra ball counts against the shot. Own-group balls dropping together are given no specific reason, but a
      *   step the planner flags as not legal as planned is still refused by the general one.
-     * - Nine-ball and ten-ball: no specific reason; only the general one for a step the planner flags as not legal as
-     *   planned.
+     * - Nine-ball and ten-ball (call-shot is not modelled): an extra ball dropping on a legal hit (target potted in
+     *   its planned pocket, no scratch) is legal, so the plan continues from the simulated table with every pocketed
+     *   ball removed, or ends the rack if the money ball dropped. Any other step flagged as not
+     *   [PlannedShotStep.legalAsPlanned] is still refused with the general message.
      */
     private fun forcedShotRefusal(step: PlannedShotStep, rules: GameRulesState): String? {
         val simulation = step.uncertainty.postShotSimulation
@@ -333,11 +337,28 @@ object RollingRunoutPlanner {
             }
             if (rules.gameType == GameType.EIGHT_BALL) eightBallExtraDropRefusal(simulation, target, rules)?.let { return it }
         }
-        return if (step.legalAsPlanned) {
+        return if (step.legalAsPlanned || isLegalRotationExtraDrop(simulation, step, rules)) {
             null
         } else {
             "This shot drops another ball or does not play as planned. Change the shot before moving on."
         }
+    }
+
+    /**
+     * True when [rules] is a rotation game (9-ball, or 10-ball since call-shot is not modelled) and [simulation] shows
+     * a legal hit that pots the target in its planned pocket without scratching while also dropping another ball.
+     */
+    private fun isLegalRotationExtraDrop(
+        simulation: PostShotTableSimulation?,
+        step: PlannedShotStep,
+        rules: GameRulesState,
+    ): Boolean {
+        if (rules.gameType != GameType.NINE_BALL && rules.gameType != GameType.TEN_BALL) return false
+        if (simulation == null || !simulation.targetBallPotted || simulation.cueBallStoppedBeforeImpact) return false
+        if (simulation.cueBallTrajectory.hitsScratchPocket != null) return false
+        val droppedIn = simulation.targetBallTrajectory?.pocketedIn
+        if (droppedIn != null && droppedIn != step.pocketId) return false
+        return simulation.disturbedBalls.any { it.pocketedIn != null }
     }
 
     private fun eightBallExtraDropRefusal(
