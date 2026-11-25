@@ -13,6 +13,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,9 +53,9 @@ actual fun rememberPlatformPhotoPicker(
 
     var pendingCameraPath by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Once per process, before any capture result can arrive, remove what an earlier interrupted capture left
+    // Once per process, after the first composition commits, remove what an earlier interrupted capture left
     // behind. A capture that is still pending after a restore is kept so its result can still be read.
-    remember(context) {
+    SideEffect {
         if (!cameraTempSweptInProcess) {
             cameraTempSweptInProcess = true
             sweepCameraTempDirectory(
