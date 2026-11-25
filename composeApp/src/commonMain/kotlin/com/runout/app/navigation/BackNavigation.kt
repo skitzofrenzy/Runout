@@ -61,6 +61,12 @@ internal fun backActionFor(context: BackContext): BackAction {
                 BackAction.Navigate(ActiveRoute.MainTab(PrimaryTab.HOME))
             }
         is ActiveRoute.LegalDocumentView -> BackAction.Navigate(ActiveRoute.AboutLegal)
+        is ActiveRoute.WhatsNew ->
+            if (route.fromAbout) {
+                BackAction.Navigate(ActiveRoute.AboutLegal)
+            } else {
+                BackAction.Navigate(ActiveRoute.MainTab(context.lastPrimaryTab))
+            }
         ActiveRoute.PhotoScan,
         is ActiveRoute.LearnWalkthroughPlayer,
         is ActiveRoute.LearnTutorialPlayer,

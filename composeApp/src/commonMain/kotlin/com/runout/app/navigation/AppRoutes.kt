@@ -26,4 +26,5 @@ internal sealed interface ActiveRoute {
     data object PlayerProfileAndBallSet : ActiveRoute
     data object AboutLegal : ActiveRoute
     data class LegalDocumentView(val document: LegalDocument) : ActiveRoute
+    data class WhatsNew(val fromAbout: Boolean = false) : ActiveRoute
 }

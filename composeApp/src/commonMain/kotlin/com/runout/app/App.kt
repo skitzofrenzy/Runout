@@ -143,6 +143,8 @@ import com.runout.app.ui.computeShotTightness
 import com.runout.app.ui.shotTightnessLabel
 import com.runout.app.ui.solvedTip
 import com.runout.app.ui.spinColor
+import com.runout.app.version.AppVersion
+import com.runout.app.version.WhatsNewScreen
 import com.runout.engine.math.Vec2
 import com.runout.engine.model.AssumedSurfacePreset
 import com.runout.engine.model.Ball
@@ -840,6 +842,15 @@ fun App() {
                             },
                         )
                         DrawerNavItem(
+                            label = "What's New",
+                            icon = RunoutIcon.INFO,
+                            selected = activeRoute is ActiveRoute.WhatsNew,
+                            onClick = {
+                                scope.launch { drawerState.close() }
+                                navigateToSubRoute(ActiveRoute.WhatsNew(fromAbout = false))
+                            },
+                        )
+                        DrawerNavItem(
                             label = "About & Legal",
                             icon = RunoutIcon.INFO,
                             selected = activeRoute == ActiveRoute.AboutLegal,
@@ -848,6 +859,28 @@ fun App() {
                                 navigateToSubRoute(ActiveRoute.AboutLegal)
                             },
                         )
+
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = RunoutSpacing.Element),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.50f),
+                        )
+                        TextButton(
+                            onClick = {
+                                scope.launch { drawerState.close() }
+                                navigateToSubRoute(ActiveRoute.WhatsNew(fromAbout = false))
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = RunoutSpacing.Element)
+                                .defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
+                        ) {
+                            Text(
+                                text = "Runout ${AppVersion.fullLabel} • View changelog",
+                                modifier = Modifier.fillMaxWidth(),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             },
@@ -875,6 +908,7 @@ fun App() {
                         ActiveRoute.PlayerProfileAndBallSet -> "Profile & Ball Set"
                         ActiveRoute.AboutLegal -> "About & Legal"
                         is ActiveRoute.LegalDocumentView -> r.document.title
+                        is ActiveRoute.WhatsNew -> "What's New"
                     }
                     TopAppBar(
                         colors = TopAppBarDefaults.topAppBarColors(
@@ -1306,12 +1340,15 @@ fun App() {
 
                         ActiveRoute.AboutLegal -> AboutLegalScreen(
                             onOpenDocument = { activeRoute = ActiveRoute.LegalDocumentView(it) },
+                            onOpenWhatsNew = { activeRoute = ActiveRoute.WhatsNew(fromAbout = true) },
                         )
 
                         is ActiveRoute.LegalDocumentView -> LegalDocumentScreen(
                             document = r.document,
                             onOpenDocument = { activeRoute = ActiveRoute.LegalDocumentView(it) },
                         )
+
+                        is ActiveRoute.WhatsNew -> WhatsNewScreen()
 
                         ActiveRoute.PlayerProfileAndBallSet -> PlayerProfileScreen(
                             profile = playerProfile,

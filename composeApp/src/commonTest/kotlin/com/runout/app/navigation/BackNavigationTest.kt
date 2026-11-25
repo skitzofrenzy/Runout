@@ -17,6 +17,7 @@ class BackNavigationTest {
         ActiveRoute.ScorekeeperAndClock,
         ActiveRoute.PlayerProfileAndBallSet,
         ActiveRoute.AboutLegal,
+        ActiveRoute.WhatsNew(fromAbout = false),
     )
 
     private fun back(
@@ -64,9 +65,25 @@ class BackNavigationTest {
 
     @Test
     fun noPushedRouteLetsBackLeaveTheApp() {
-        val everyRoute = pushedRoutes + LegalDocument.entries.map { ActiveRoute.LegalDocumentView(it) }
+        val everyRoute = pushedRoutes +
+            LegalDocument.entries.map { ActiveRoute.LegalDocumentView(it) } +
+            ActiveRoute.WhatsNew(fromAbout = true)
         for (route in everyRoute) for (opener in PrimaryTab.entries) {
             assertNotEquals(BackAction.LeaveApp, back(route, from = opener), "Back from $route opened from $opener")
+        }
+    }
+
+    @Test
+    fun whatsNewReturnsToAboutWhenOpenedFromAboutAndToTabFromDrawer() {
+        for (opener in PrimaryTab.entries) {
+            assertEquals(
+                BackAction.Navigate(ActiveRoute.AboutLegal),
+                back(ActiveRoute.WhatsNew(fromAbout = true), from = opener),
+            )
+            assertEquals(
+                BackAction.Navigate(ActiveRoute.MainTab(opener)),
+                back(ActiveRoute.WhatsNew(fromAbout = false), from = opener),
+            )
         }
     }
 
