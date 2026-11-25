@@ -41,7 +41,7 @@ Mapped directly to `ExperienceLevel` (`BEGINNER`, `INTERMEDIATE`, `ADVANCED`) in
 |---|---|---|---|
 | **Default UI Complexity** | **Simple Mode** (locked-clean unless user manually switches to `Pro`) | **Simple Mode** (1-tap `Simple \| Pro` switch in Top Bar) | **Pro Mode** unlocked immediately |
 | **Shot Label Language** | Plain English only: *"Aim here • Medium speed • Soft follow"* | Plain English + `Speed 5/10` + key `Make %` | Full readout: `Speed 5/10 (2.4 m/s)`, `Cut 28°`, `Tip (-0.2R, +0.3R)`, `Squirt/Throw` |
-| **Table Overlays Shown** | Primary aim line + ghost ball + cue-ball path; 1 step ahead | Primary shot + next-ball position zone (`2–3` shots ahead) | Full `2–5` / `Deep Run-Out` chain, **Heat Zone**, **Landing Cloud (95% ring)**, problem-ball halos |
+| **Table Overlays & Default Horizon** | Primary aim line + ghost ball + cue-ball path; defaults to `2-Ball` lookahead | Primary shot + next-ball position zone; defaults to `3-Ball` lookahead | Full aim chain + **Heat Zone**, **Landing Cloud (95% ring)**, problem-ball halos; defaults to `3-Ball` lookahead (`1-Shot`–`5-Ball` & `Deep Run-Out` in `Shot Options` for all levels) |
 | **Cue Spin Controls** | Hidden behind *"Add Basic Spin (Optional)"* pill (`Stun`, `Follow`, `Draw`) | Quick 4-preset spin chips (`Auto`, `Stun`, `Follow`, `Draw`) | Full interactive **2D `CueTipSelectorCanvas`** + squirt/swerve/throw breakdown |
 | **Home Quick-Start Card** | **"Start Here: 8-Ball Basics"** (2D/3D walkthrough) + **"Rules Lookup"** | **"Resume Last Table"** / **"Scan Photo"** + **"Weekly Practice Drill"** | **"Scan Photo"** + **"Saved Tables"** + **"Table Calibration & Drills"** |
 | **Learning Helpers** | `ⓘ` tap glossary chips visible on terms (`Ball in Hand`, `90° Stun`, `Kitchen`) | Contextual `ⓘ` tooltips on physics terms (`Heat Zone`, `Breakout`) | Quiet metrics; tooltips available on `ⓘ` icons when tapped |
@@ -66,7 +66,7 @@ Shown **once** on fresh install (persisted flag) and replayable anytime via **Si
 - **Headline:** *"Your offline pool coach & shot planner."*
 - **3 compact cards answering "What can I do here?":**
   1. **Snap or Build a Table** — Take a table photo, import from gallery, or drag balls manually.
-  2. **See Your Best Shot** — Get clear aim lines, speed guidance, and 2–5 shot position plans.
+  2. **See Your Best Shot** — Get clear aim lines, speed guidance, and multi-shot position plans (1–5 shots ahead or Deep Run-Out).
   3. **Learn Rules & Drills** — Search offline rules and scrub interactive 2D/3D shot breakdowns.
 - **Footer:** Filled CTA **`Get Started`**, Text CTA **`Skip & Explore`** (defaults to `Casual / League`, `8-Ball`, `9-ft Pool`).
 
@@ -75,7 +75,7 @@ Shown **once** on fresh install (persisted flag) and replayable anytime via **Si
 - **Subtext (explains why we ask):** *"This adjusts how much physics detail and coaching appears on your table."*
 - **3 tappable radio cards (48 dp+ height, clear 1-line summary):**
   - **`New to Pool`** — *"Clear aim lines, plain language, and step-by-step 8-Ball guides."*
-  - **`Casual / League`** — *"Run-out order (2–3 shots ahead), speed scale, and quick spin tips."* *(Recommended default)*
+  - **`Casual / League`** — *"3-ball shape plans, speed scale (1–10), and quick spin tips."* *(Recommended default)*
   - **`Advanced / Competitive`** — *"Full 2D English, heat zones, landing clouds, and cloth/rail tuning."*
 
 ### Step 3 — Default Game & Table Size
@@ -156,7 +156,7 @@ Replace the 6-tab top `ScrollableTabRow` with a **2-tier Material 3 navigation a
 ### Top App Bar Rules (`Scaffold` + `TopAppBar`)
 - Always pass `contentWindowInsets = WindowInsets.safeDrawing` to `Scaffold` so content **never collides with the phone status bar, camera cutout, or gesture pill**.
 - Top-level screens show **`☰`** on the left; dedicated sub-screens show **`← Back`** on the left and omit the Bottom Bar.
-- **System Back (Android).** One rule, most local first: an open bottom sheet closes; then the navigation drawer; then the fullscreen table is left (a path-inspector card on the table closes before any of these); a legal document returns to About & Legal; any other pushed route (Photo Scan, Calibration, a tool, a player) returns to the tab it was opened from; a tab other than Home goes to Home; on Home Back leaves the app. On the first-run "Before you start" notice Back never skips it: from a document it returns to the notice, and on the notice it leaves the app. The `← Back` button goes to the same place as the system button.
+- **System Back (Android).** One rule, most local first: an open bottom sheet closes; then the navigation drawer; then the fullscreen table is left (a path-inspector card on the table closes before any of these); a legal document returns to About & Legal; any other pushed route (Photo Scan, Calibration, a tool, a player) returns to the tab it was opened from; a tab other than Home goes to Home; on Home Back leaves the app. On the first-run "Before you start" notice Back never skips it: from a document it returns to the notice, and on the notice it leaves the app. On the welcome tour, Back on step 2 or 3 returns to the previous step, and on step 1 it leaves the app. The `← Back` button goes to the same place as the system button.
 - **Table state.** The balls, rules, table and active calibration profile are changed through one set of operations, so the same rules hold everywhere: the pocket size chosen for the session survives a calibration profile, a table-size change, a starting layout and a photo scan; a photo scan replaces only the balls and, when the surface setting on the scan screen was left alone, keeps the table's cloth, ball friction and calibration profile (another table size of the same kind is taken, which ends the profile); a cloth set on the scan screen is applied to the table and ends the active profile, like any cloth edit; applying a profile never changes the table's kind or ball size, and a profile for the other kind of table is refused with a message; a blank table and every starting layout use the table's own ball size (snooker balls on a snooker table); table kind and size, not the table's name, decide what is selected. Nothing of this is stored on the device.
 - Maximum **2 actions** on the right of `TopAppBar`.
 
@@ -215,7 +215,7 @@ Step 1: Choose Photo Source        Step 2: Frame & Fix Balls         Step 3: Con
 | **Why This Shot? / Next Shape Explanation** | **Collapsed accordion** (`Show why this shot ->`) | Expanded by default inside Plan card | Inline Accordion |
 | **Alternative Run-Out Plans (#2, #3...)** | **Collapsed accordion** (`See 2 other routes`) | Visible cards (`Plan 1`, `Plan 2`, `Plan 3`) | Inline Accordion |
 | **Spin / Cue-Tip Control** | Hidden behind **`Add Spin (Optional)`** pill -> 4 basic presets (`Auto`, `Stun`, `Follow`, `Draw`) | Full **2D `CueTipSelectorCanvas`** + Squirt/Swerve/Throw metrics | **`ModalBottomSheet`** (Simple) / Expandable Card (Pro) |
-| **Planning Horizon & Speed Override** | Auto (`1–2` shots Beginner, `3` shots Casual) | `1-Shot`..`Deep Run-Out` + `Speed 1..10` inside `Shot Options` sheet | **`ModalBottomSheet`** (`Shot Options`) |
+| **Planning Horizon & Speed Override** | Defaults to `2-Ball` (Beginner) or `3-Ball` (Casual); full `1-Shot`–`5-Ball` + `Deep Run-Out` & `Speed` override available in `Shot Options` sheet | Defaults to `3-Ball` (Advanced); `1-Shot`–`5-Ball` + `Deep Run-Out`, `Speed` override & surface card inside `Shot Options` sheet | **`ModalBottomSheet`** (`Shot Options`) |
 | **Cloth Roll (`μr`) & Rail Bounce (`ec`)** | Hidden unless user opens `Table Surface` from `⋮` or `Pro` | **Collapsed accordion** (`Surface: Standard -> Customize μr / ec`) | Inline Accordion (`Pro`) / Sheet |
 | **Problem Balls & Breakouts Card** | Plain 1-line warning pill (*"Ball 7 is blocked — plan breakout"*) | Full `ProblemBallsCard` with insurance ball & breakout trigger | Card (`Pro` only) |
 | **Ranked One-Shot Geometric Reference** | **Hidden** (redundant with Run-Out Plan for beginners) | **Collapsed accordion** (`All Legal Pots (6)`) | Inline Accordion (`Pro` only) |
@@ -401,23 +401,9 @@ SIMPLE MODE (Above the fold = Table + #1 Shot!)   PRO MODE (Same Hero Table + Ri
 
 ---
 
-## 10. Phased Implementation Roadmap & UX Acceptance Checklist
+## 10. UX Acceptance Checklist
 
-### Recommended Execution Order
-1. **Phase A — Core Shell, Edge-to-Edge & Real Photo Entry:**
-   - Wrap app in `Scaffold(contentWindowInsets = WindowInsets.safeDrawing)` + `TopAppBar` + 4-item Bottom `NavigationBar` + Side Menu `ModalNavigationDrawer`.
-   - Build `Home` landing screen with auto-saved `Continue Last Table` vs. `Reset` confirmation dialog.
-   - Implement real Android Camera (`TakePicture`) + Photo Picker (`PickVisualMedia`) in `PlatformCameraController.android.kt` (matching `commonMain` contract cleanly alongside iOS) and refactor `PhotoCaptureAndConfirmScreen.kt` into the 3-step Photo Wizard (`Try a Sample` moved to bottom link).
-2. **Phase B — Planner Declutter & Progressive Disclosure:**
-   - Split `Plan` into **`Simple`** and **`Pro`** modes wired to `PlayerProfile.experienceLevel`.
-   - Keep Hero Table + #1 Shot visible above the fold; move `Game & Table Setup`, `Object Ball Tray (0..15)`, `Shot & Overlay Options`, and `Quick Cue Spin` into `ModalBottomSheet`s.
-   - Add tap `ⓘ` glossary tooltips and convert secondary cards (`Alternative Plans`, `Surface μr/ec`, `Ranked Pots`, `Why This Shot?`) into collapsed accordions adhering to the 8 dp / 24 dp spatial grid and divider discipline.
-3. **Phase C — First-Run Onboarding & Secondary Screen Polish:**
-   - Build the 3-step First-Run Onboarding (welcome -> skill level -> default game/table).
-   - Extract 2D/3D Walkthroughs & Tutorials into dedicated full-screen players launched from `Learn`.
-   - Convert `Rules & FAQ` to default-collapsed accordion cards and route `Calibration`, `Snooker Coach`, `Break Meter`, `Scorekeeper/Clock`, and `Player Profile` cleanly from the Side Menu.
-
-### Mandatory 12-Point UX Acceptance Checklist (For Every Future UI PR)
+The core shell, edge-to-edge layout, real photo entry, `Simple` / `Pro` planner disclosure, welcome tour, and secondary screens described above are implemented in `composeApp/`. Every UI change must satisfy the 12 checks below:
 1. Content renders cleanly below status bar, camera cutouts, and above gesture bar (`WindowInsets.safeDrawing`).
 2. `Plan` shows both the Pool Table canvas and #1 Shot Recommendation without scrolling on `360 × 800 dp` phones.
 3. Every interactive control meets `>= 48 × 48 dp` touch target with `>= 8 dp` gap.
