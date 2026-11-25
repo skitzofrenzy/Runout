@@ -1,0 +1,77 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+.navigation/
+.externalNativeBuild/
+.cxx/
+
+# Local machine config and signing keys
+local.properties
+keystore.properties
+*.jks
+*.keystore
+*.p12
+*.pem
+*.p8
+*.mobileprovision
+.env*
+
+# Build outputs (Android and iOS)
+*.apk
+*.aab
+*.ap_
+*.dex
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Xcode / iOS / CocoaPods
+Config.local.xcconfig
+iosApp/Pods/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+
+# Kotlin / KMP
+.kotlin/
+kotlin-js-store/
+
+# Logs and crash dumps
+*.log
+hs_err_pid*
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python (ML training and data tools)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ML training data and outputs (large; datasets carry their own licences)
+ml/datasets/
+ml/runs/
+ml/checkpoints/
+*.ckpt
+
+# Code graph output
+graphify-out/
+
+# Local working folders
+.claude/
+.agents/
+.tasks/
