@@ -58,6 +58,7 @@ import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -673,9 +674,11 @@ fun PoolTableCanvas(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
+                .onSizeChanged { measured ->
+                    lastCanvasSize = Size(measured.width.toFloat(), measured.height.toFloat())
+                }
                 .then(interactiveGestureModifier),
         ) {
-            lastCanvasSize = size
             val geom = computeTableCanvasGeometry(
                 canvasWidth = size.width,
                 canvasHeight = size.height,
@@ -992,7 +995,7 @@ fun PoolTableCanvas(
                 panOffset,
             )
             PathWaypointCallout(
-                card = describePathWaypoint(wp, displayMode, pathWaypoints.firstOrNull()),
+                card = describePathWaypointAt(pathWaypoints, tooltipIdx, displayMode),
                 accent = pathWaypointColor(wp.kind),
                 index = tooltipIdx,
                 count = pathWaypoints.size,
@@ -1143,15 +1146,74 @@ private fun englishSide(sideRatio: Double): String = if (sideRatio < 0.0) "left"
 
 private const val NOTICEABLE_ENGLISH_RATIO = 0.03
 
+internal fun isContactWaypoint(kind: PathWaypointKind): Boolean =
+    kind == PathWaypointKind.OBJECT_CONTACT ||
+        kind == PathWaypointKind.CUSHION_CONTACT ||
+        kind == PathWaypointKind.BALL_CONTACT
+
+private fun contactSpeedLine(
+    speedInMps: Double,
+    speedOutMps: Double,
+    strokeMps: Double,
+    pro: Boolean,
+    showTravelBreakdown: Boolean,
+): String {
+    val arrivePct = pctOf(speedInMps, strokeMps).coerceIn(0, 100)
+    val remainPct = pctOf(speedOutMps, strokeMps).coerceIn(0, 100)
+    val travelLossPct = (100 - arrivePct).coerceAtLeast(0)
+    val contactLossPct = (arrivePct - remainPct).coerceAtLeast(0)
+    return if (pro) {
+        if (showTravelBreakdown) {
+            "$remainPct% left (${fmtMps(speedOutMps)} of ${fmtMps(strokeMps)}): " +
+                "$travelLossPct% lost in travel, $contactLossPct% from contact."
+        } else {
+            "$remainPct% left (${fmtMps(speedOutMps)} of ${fmtMps(strokeMps)}; $contactLossPct% lost from contact)."
+        }
+    } else {
+        if (showTravelBreakdown) {
+            "$remainPct% speed left ($travelLossPct% lost in travel, $contactLossPct% from contact)."
+        } else {
+            "$remainPct% speed left ($contactLossPct% lost from contact)."
+        }
+    }
+}
+
+/**
+ * Describes the waypoint at [index] in [waypoints], resolving the strike reference speed and whether this point
+ * is the first contact or first non-strike waypoint along the path.
+ */
+internal fun describePathWaypointAt(
+    waypoints: List<PathWaypoint>,
+    index: Int,
+    mode: AppDisplayMode,
+): PathWaypointCardText {
+    val wp = waypoints[index]
+    val start = waypoints.firstOrNull { it.kind == PathWaypointKind.CUE_START } ?: waypoints.firstOrNull()
+    val firstContactIdx = waypoints.indexOfFirst { isContactWaypoint(it.kind) }
+    val firstWaypointIdx = waypoints.indexOfFirst { it.kind != PathWaypointKind.CUE_START }
+    return describePathWaypoint(
+        wp = wp,
+        mode = mode,
+        start = start,
+        isFirstContact = index == firstContactIdx,
+        isFirstWaypoint = index == firstWaypointIdx,
+    )
+}
+
 /**
  * Words for one path waypoint. [PathWaypoint]s carry numbers only; this turns them into the card text for
- * [mode]: [AppDisplayMode.SIMPLE] is plain English without units, [AppDisplayMode.PRO] adds m/s, %, cm and degrees.
- * [start] is the strike waypoint of the same shot, used for the stroke speed and the starting spin.
+ * [mode]: [AppDisplayMode.SIMPLE] is plain English without units, [AppDisplayMode.PRO] adds m/s, cm and degrees.
+ * [start] is the strike waypoint of the same shot, used for the 100% starting stroke speed and starting spin.
+ * All remaining-speed percentages are relative to the starting stroke speed. On the first contact point
+ * ([isFirstContact] = true), the card breaks down total loss into travel loss and contact loss; on subsequent
+ * contact points it shows total remaining speed and contact loss only.
  */
 internal fun describePathWaypoint(
     wp: PathWaypoint,
     mode: AppDisplayMode,
     start: PathWaypoint?,
+    isFirstContact: Boolean = true,
+    isFirstWaypoint: Boolean = false,
 ): PathWaypointCardText {
     val pro = mode == AppDisplayMode.PRO
     val strokeMps = start?.speedOutMps ?: 0.0
@@ -1163,8 +1225,8 @@ internal fun describePathWaypoint(
             val hasEnglish = abs(side) >= NOTICEABLE_ENGLISH_RATIO
             val lines = if (pro) {
                 listOf(
-                    "Stroke ${fmtMps(wp.speedOutMps ?: 0.0)}" +
-                        (wp.speedUnits?.let { ", speed ${fmtSpeedUnits(it)}/10" } ?: "") + ".",
+                    "Starting speed 100% (${fmtMps(wp.speedOutMps ?: 0.0)}" +
+                        (wp.speedUnits?.let { ", ${fmtSpeedUnits(it)}/10" } ?: "") + ").",
                     "Spin at the tip: ${spinPercentText(tipK)}.",
                     if (hasEnglish) {
                         "English: ${englishPercent(side)}% of max, ${englishSide(side)}."
@@ -1174,6 +1236,8 @@ internal fun describePathWaypoint(
                 )
             } else {
                 listOfNotNull(
+                    wp.speedUnits?.let { "Starting speed: 100% (speed ${fmtSpeedUnits(it)}/10)." }
+                        ?: "Starting speed: 100%.",
                     when {
                         tipK < -0.08 -> "Low on the ball: backspin (draw)."
                         tipK <= 0.18 -> "Centre ball: no spin (stun)."
@@ -1181,15 +1245,28 @@ internal fun describePathWaypoint(
                         else -> "High on the ball: topspin (follow)."
                     },
                     if (hasEnglish) "Side english on the ${englishSide(side)}." else null,
-                    wp.speedUnits?.let { "Stroke speed ${fmtSpeedUnits(it)} out of 10." },
                 )
             }
             PathWaypointCardText("Strike", lines)
         }
 
         PathWaypointKind.SPIN_TRANSITION -> {
-            val atSpeed = wp.speedOutMps ?: 0.0
-            val speedLine = "Cue ball at ${fmtMps(atSpeed)} (${pctOf(atSpeed, strokeMps)}% of stroke speed)."
+            val atSpeed = wp.speedOutMps ?: wp.speedInMps ?: 0.0
+            val remainPct = pctOf(atSpeed, strokeMps).coerceIn(0, 100)
+            val travelLossPct = (100 - remainPct).coerceAtLeast(0)
+            val speedLine = if (pro) {
+                if (isFirstWaypoint) {
+                    "$remainPct% speed left (${fmtMps(atSpeed)} of ${fmtMps(strokeMps)}; $travelLossPct% lost in travel)."
+                } else {
+                    "$remainPct% speed left (${fmtMps(atSpeed)} of ${fmtMps(strokeMps)})."
+                }
+            } else {
+                if (isFirstWaypoint) {
+                    "$remainPct% speed left ($travelLossPct% lost in travel)."
+                } else {
+                    "$remainPct% speed left."
+                }
+            }
             val after = fmtCm(wp.distanceAlongPathMeters)
             when (wp.transition) {
                 SpinPhysics.SpinRegimeChange.DRAW_TO_STUN -> PathWaypointCardText(
@@ -1197,7 +1274,7 @@ internal fun describePathWaypoint(
                     if (pro) {
                         listOf("Draw turns to stun after $after.", speedLine, "Sliding with no spin; roll comes next.")
                     } else {
-                        listOf("Backspin has worn off here.", "From this point the ball only slides.")
+                        listOf(speedLine, "Backspin has worn off here.", "From this point the ball only slides.")
                     },
                 )
 
@@ -1210,7 +1287,7 @@ internal fun describePathWaypoint(
                             "Spin now ${spinPercentText(wp.verticalSpinAfter ?: 0.0)}, rising.",
                         )
                     } else {
-                        listOf("The sliding ball starts to roll forward.", "The cloth is now adding topspin.")
+                        listOf(speedLine, "The sliding ball starts to roll forward.", "The cloth is now adding topspin.")
                     },
                 )
 
@@ -1227,11 +1304,11 @@ internal fun describePathWaypoint(
                             },
                         )
                     } else if (k0 > 1.02) {
-                        listOf("Extra topspin has gripped the cloth.", "From here the ball rolls naturally.")
+                        listOf(speedLine, "Extra topspin has gripped the cloth.", "From here the ball rolls naturally.")
                     } else if (k0 < -0.08) {
-                        listOf("All the backspin is gone.", "From here the ball just rolls forward.")
+                        listOf(speedLine, "All the backspin is gone.", "From here the ball just rolls forward.")
                     } else {
-                        listOf("The ball now rolls without slipping.", "Spin no longer changes its line.")
+                        listOf(speedLine, "The ball now rolls without slipping.", "Spin no longer changes its line.")
                     },
                 )
             }
@@ -1240,39 +1317,42 @@ internal fun describePathWaypoint(
         PathWaypointKind.OBJECT_CONTACT -> {
             val ball = ballTag(wp.otherBallNumber)
             val arrive = wp.speedInMps ?: 0.0
+            val vout = wp.speedOutMps ?: 0.0
             val given = wp.objectBallSpeedMps ?: 0.0
-            val transfer = pctOf(given, arrive)
             val keptK = wp.verticalSpinAfter ?: 0.0
+            val speedLine = contactSpeedLine(
+                speedInMps = arrive,
+                speedOutMps = vout,
+                strokeMps = strokeMps,
+                pro = pro,
+                showTravelBreakdown = isFirstContact,
+            )
             if (pro) {
                 val cut = ((wp.cutAngleRadians ?: 0.0) * 180.0 / PI).roundToInt()
                 val deflect = ((wp.cueDeflectionRadians ?: 0.0) * 180.0 / PI).roundToInt()
                 PathWaypointCardText(
                     "Contact $ball",
                     listOf(
-                        "Arrives at ${fmtMps(arrive)}, ${spinPercentText(wp.verticalSpinBefore ?: 0.0)}.",
-                        "$cut° cut sends $ball off at ${fmtMps(given)} ($transfer%).",
-                        "Leaves at ${fmtMps(wp.speedOutMps ?: 0.0)}, $deflect° off line, spin kept.",
+                        speedLine,
+                        "$cut° cut sends $ball at ${fmtMps(given)}; cue leaves $deflect° off line.",
+                        "Arrives with ${spinPercentText(wp.verticalSpinBefore ?: 0.0)}, kept after contact.",
                     ),
                 )
             } else {
                 PathWaypointCardText(
                     "Contact $ball",
                     listOf(
+                        speedLine,
                         when (wp.regimeBefore) {
-                            SpinPhysics.ImpactSpinState.BACKSPIN_DRAW -> "Arrives with the backspin still on."
+                            SpinPhysics.ImpactSpinState.BACKSPIN_DRAW -> "Arrives with backspin still on."
                             SpinPhysics.ImpactSpinState.STUN_SLIDE -> "Arrives sliding with no spin."
                             SpinPhysics.ImpactSpinState.PARTIAL_FORWARD_ROLL -> "Arrives part-way to rolling."
                             else -> "Arrives rolling forward."
                         },
-                        when {
-                            transfer >= 80 -> "$ball gets most of the speed."
-                            transfer >= 40 -> "$ball gets about half the speed."
-                            else -> "$ball gets only a little speed."
-                        },
                         if (keptK < -0.08 || keptK > 0.18) {
-                            "The cue ball keeps its ${spinWords(keptK)} after contact."
+                            "Keeps its ${spinWords(keptK)} after hitting $ball."
                         } else {
-                            "The cue ball leaves without much spin."
+                            "Leaves $ball without much spin."
                         },
                     ),
                 )
@@ -1297,6 +1377,8 @@ internal fun describePathWaypoint(
 
         PathWaypointKind.POST_IMPACT_TRANSITION -> {
             val kAt = wp.verticalSpinBefore ?: 0.0
+            val vout = wp.speedOutMps ?: wp.speedInMps ?: 0.0
+            val remainPct = pctOf(vout, strokeMps).coerceIn(0, 100)
             PathWaypointCardText(
                 when {
                     kAt < -0.08 -> "Draw bites"
@@ -1306,11 +1388,12 @@ internal fun describePathWaypoint(
                 if (pro) {
                     listOf(
                         "The slide after contact is over.",
-                        "Cue ball now rolls at ${fmtMps(wp.speedOutMps ?: 0.0)}.",
+                        "$remainPct% speed left (${fmtMps(vout)} of ${fmtMps(strokeMps)}).",
                         "It had ${spinPercentText(kAt)} at contact.",
                     )
                 } else {
                     listOf(
+                        "$remainPct% speed left.",
                         when {
                             kAt < -0.08 -> "The backspin has pulled the cue ball back."
                             kAt > 0.18 -> "The topspin has carried the cue ball forward."
@@ -1325,7 +1408,13 @@ internal fun describePathWaypoint(
         PathWaypointKind.CUSHION_CONTACT -> {
             val vin = wp.speedInMps ?: 0.0
             val vout = wp.speedOutMps ?: 0.0
-            val keep = pctOf(vout, vin)
+            val speedLine = contactSpeedLine(
+                speedInMps = vin,
+                speedOutMps = vout,
+                strokeMps = strokeMps,
+                pro = pro,
+                showTravelBreakdown = isFirstContact,
+            )
             val before = wp.sideSpinBefore ?: 0.0
             val after = wp.sideSpinAfter ?: 0.0
             val hasEnglish = abs(before) >= NOTICEABLE_ENGLISH_RATIO
@@ -1335,7 +1424,7 @@ internal fun describePathWaypoint(
                 "Cushion ${wp.cushionIndex ?: 1}",
                 if (pro) {
                     listOf(
-                        "Speed ${fmtMps(vin)} → ${fmtMps(vout)} (−${100 - keep}%).",
+                        speedLine,
                         if (hasEnglish) {
                             "English ${englishPercent(before)}% ${englishSide(before)} → ${englishPercent(after)}% ${englishSide(after)} of max."
                         } else {
@@ -1346,7 +1435,7 @@ internal fun describePathWaypoint(
                     )
                 } else {
                     listOf(
-                        "The cue ball keeps about $keep% of its speed.",
+                        speedLine,
                         if (hasEnglish) {
                             "Side english bends the bounce, and the rail changes it."
                         } else {
@@ -1366,15 +1455,22 @@ internal fun describePathWaypoint(
             val ball = ballTag(wp.otherBallNumber)
             val vin = wp.speedInMps ?: 0.0
             val vout = wp.speedOutMps ?: 0.0
+            val speedLine = contactSpeedLine(
+                speedInMps = vin,
+                speedOutMps = vout,
+                strokeMps = strokeMps,
+                pro = pro,
+                showTravelBreakdown = isFirstContact,
+            )
             PathWaypointCardText(
                 "Hits $ball",
                 if (pro) {
                     listOf(
                         "Cue ball meets $ball.",
-                        "Speed ${fmtMps(vin)} → ${fmtMps(vout)} (−${100 - pctOf(vout, vin)}%).",
+                        speedLine,
                     )
                 } else {
-                    listOf("The cue ball bumps $ball on its way.", "It slows down and pushes that ball.")
+                    listOf(speedLine, "The cue ball bumps $ball and pushes it aside.")
                 },
             )
         }
@@ -1383,29 +1479,35 @@ internal fun describePathWaypoint(
             "Stops short",
             if (pro) {
                 listOf(
-                    "Cloth stops the cue ball after ${fmtCm(wp.travelMeters ?: 0.0)}.",
+                    "0% speed left after ${fmtCm(wp.travelMeters ?: 0.0)}.",
                     "${fmtCm(wp.shortfallMeters ?: 0.0)} before contact with ${ballTag(wp.otherBallNumber)}.",
                     "Add stroke speed.",
                 )
             } else {
                 listOf(
-                    "Not enough speed: the cue ball stops short of ${ballTag(wp.otherBallNumber)}.",
+                    "0% speed left: stops short of ${ballTag(wp.otherBallNumber)}.",
                     "Hit it harder.",
                 )
             },
         )
 
-        PathWaypointKind.SCRATCH -> PathWaypointCardText(
-            "Scratch!",
-            if (pro) {
-                listOf(
-                    "Cue ball drops in this pocket at ${fmtMps(wp.speedInMps ?: 0.0)}.",
-                    "Change the speed or spin.",
-                )
+        PathWaypointKind.SCRATCH -> {
+            val arrive = wp.speedInMps
+            val dropLine = if (arrive != null) {
+                val arrivePct = pctOf(arrive, strokeMps).coerceIn(0, 100)
+                if (pro) {
+                    "Drops in this pocket with $arrivePct% speed left (${fmtMps(arrive)} of ${fmtMps(strokeMps)})."
+                } else {
+                    "Drops in this pocket with $arrivePct% speed left."
+                }
             } else {
-                listOf("The cue ball still has enough speed to drop in this pocket.", "Change the speed or spin.")
-            },
-        )
+                "The cue ball still has enough speed to drop in this pocket."
+            }
+            PathWaypointCardText(
+                "Scratch!",
+                listOf(dropLine, "Change the speed or spin."),
+            )
+        }
 
         PathWaypointKind.CUE_REST -> {
             val cushions = wp.cushionCount ?: 0
@@ -1413,9 +1515,9 @@ internal fun describePathWaypoint(
             PathWaypointCardText(
                 "Cue ball rests",
                 if (pro) {
-                    listOf("Rolls ${fmtCm(wp.travelMeters ?: 0.0)} after contact$via.", "Stops here: your next position.")
+                    listOf("0% speed left after rolling ${fmtCm(wp.travelMeters ?: 0.0)}$via.", "Stops here: your next position.")
                 } else {
-                    listOf("The cue ball stops here$via.", "This is your position for the next shot.")
+                    listOf("0% speed left: stops here$via.", "This is your position for the next shot.")
                 },
             )
         }
@@ -1450,6 +1552,26 @@ private enum class CalloutSide { ABOVE, BELOW, LEFT, RIGHT }
  *
  * [measure] returns the card's size for a width and a maximum height (the card is laid out at exactly that width).
  */
+internal fun buildCalloutPlacement(
+    card: Rect,
+    anchor: Offset,
+    canvas: Size,
+    ringRadius: Float,
+): CalloutPlacement {
+    val a = Offset(anchor.x.coerceIn(0f, canvas.width), anchor.y.coerceIn(0f, canvas.height))
+    val start = Offset(a.x.coerceIn(card.left, card.right), a.y.coerceIn(card.top, card.bottom))
+    val dx = start.x - a.x
+    val dy = start.y - a.y
+    val dist = hypot(dx, dy)
+    val end = if (dist > 1e-3f) {
+        val reach = min(ringRadius, dist * 0.5f)
+        Offset(a.x + dx / dist * reach, a.y + dy / dist * reach)
+    } else {
+        a
+    }
+    return CalloutPlacement(card, start, end)
+}
+
 internal fun placeCallout(
     canvas: Size,
     anchor: Offset,
@@ -1489,19 +1611,7 @@ internal fun placeCallout(
         }
     }
 
-    fun finish(card: Rect): CalloutPlacement {
-        val start = Offset(a.x.coerceIn(card.left, card.right), a.y.coerceIn(card.top, card.bottom))
-        val dx = start.x - a.x
-        val dy = start.y - a.y
-        val dist = hypot(dx, dy)
-        val end = if (dist > 1e-3f) {
-            val reach = min(ringRadius, dist * 0.5f)
-            Offset(a.x + dx / dist * reach, a.y + dy / dist * reach)
-        } else {
-            a
-        }
-        return CalloutPlacement(card, start, end)
-    }
+    fun finish(card: Rect): CalloutPlacement = buildCalloutPlacement(card, anchor, canvas, ringRadius)
 
     val sides = CalloutSide.entries
 
@@ -1679,42 +1789,56 @@ private fun PathWaypointCallout(
     ) { measurables, constraints ->
         val fullW = constraints.maxWidth
         val fullH = constraints.maxHeight
+        val canvasSize = Size(fullW.toFloat(), fullH.toFloat())
+        val marginPx = RunoutSpacing.Element.toPx()
         val measurable = measurables.first()
-        val result = placeCallout(
-            canvas = Size(fullW.toFloat(), fullH.toFloat()),
+        val planned = placeCallout(
+            canvas = canvasSize,
             anchor = anchor,
             others = otherAnchors,
             ringRadius = ringRadiusPx,
             clearance = ringRadiusPx + CALLOUT_CLEARANCE_DP.dp.toPx(),
             gap = CALLOUT_GAP_DP.dp.toPx(),
-            margin = RunoutSpacing.Element.toPx(),
+            margin = marginPx,
             maxWidth = CALLOUT_MAX_WIDTH_DP.dp.toPx(),
             minWidth = CALLOUT_MIN_WIDTH_DP.dp.toPx(),
             minHeight = CALLOUT_MIN_HEIGHT_DP.dp.toPx(),
         ) { width, maxHeight ->
             val w = width.toInt().coerceAtLeast(1)
-            val p = measurable.measure(
-                Constraints(minWidth = w, maxWidth = w, minHeight = 0, maxHeight = maxHeight.toInt().coerceAtLeast(1)),
-            )
-            Size(p.width.toFloat(), p.height.toFloat())
+            val maxH = maxHeight.toInt().coerceAtLeast(1)
+            // Use intrinsic height during candidate probing so each Measurable is measured only once per pass.
+            val naturalH = measurable.maxIntrinsicHeight(w).coerceIn(1, maxH)
+            Size(w.toFloat(), naturalH.toFloat())
         }
-        // Measure once more at exactly the chosen size, so the placed card is the one the rectangle describes.
-        val chosenW = result.card.width.toInt().coerceAtLeast(1)
+        // Single Compose measure() call at the chosen width and maximum height.
+        val chosenW = planned.card.width.toInt().coerceAtLeast(1)
+        val chosenMaxH = planned.card.height.toInt().coerceAtLeast(1)
         val placeable = measurable.measure(
             Constraints(
                 minWidth = chosenW,
                 maxWidth = chosenW,
                 minHeight = 0,
-                maxHeight = result.card.height.toInt().coerceAtLeast(1),
+                maxHeight = chosenMaxH,
             ),
         )
+        val actualW = placeable.width.toFloat()
+        val actualH = placeable.height.toFloat()
+        val actualLeft = planned.card.left.coerceIn(0f, (canvasSize.width - actualW).coerceAtLeast(0f))
+        val rawTop = if (planned.card.bottom <= anchor.y) {
+            planned.card.bottom - actualH
+        } else {
+            planned.card.top
+        }
+        val actualTop = rawTop.coerceIn(0f, (canvasSize.height - actualH).coerceAtLeast(0f))
+        val actualCard = Rect(actualLeft, actualTop, actualLeft + actualW, actualTop + actualH)
+        val result = buildCalloutPlacement(actualCard, anchor, canvasSize, ringRadiusPx)
         if (lastPlacement[0] != result) {
             lastPlacement[0] = result
             latestOnCardPlaced(result.card)
             placement = result
         }
         layout(fullW, fullH) {
-            placeable.place(result.card.left.roundToInt(), result.card.top.roundToInt())
+            placeable.place(actualCard.left.roundToInt(), actualCard.top.roundToInt())
         }
     }
 }
@@ -3424,9 +3548,9 @@ fun computeShotTightness(
 fun computeShotTightness(shot: ShotRecommendation): Float {
     val cutDeg = abs(shot.aim.cutAngleRadians) * (180.0 / PI)
     val cutTightness = (cutDeg / 65.0).coerceIn(0.0, 1.0)
-    val scoreTightness = ((0.90 - shot.score) / 0.65).coerceIn(0.0, 1.0)
+    val makeTightness = ((0.96 - shot.makeProbability) / 0.65).coerceIn(0.0, 1.0)
     val spinTightness = if (shot.recommendedSpin == CueBallSpinPreset.DRAW) 0.55 else 0.15
-    return (0.45 * cutTightness + 0.40 * scoreTightness + 0.15 * spinTightness)
+    return (0.45 * cutTightness + 0.40 * makeTightness + 0.15 * spinTightness)
         .toFloat()
         .coerceIn(0f, 1f)
 }

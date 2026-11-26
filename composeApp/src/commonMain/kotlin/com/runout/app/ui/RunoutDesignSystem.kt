@@ -142,6 +142,7 @@ enum class RunoutIcon {
     EXIT_FULLSCREEN,
     PREV,
     NEXT,
+    TRASH,
 }
 
 @Composable
@@ -437,6 +438,23 @@ fun RunoutVectorIcon(
                     lineTo(w * 0.36f, h * 0.78f)
                 }
                 drawPath(chevron, color = tint, style = strokeStyle)
+            }
+
+            RunoutIcon.TRASH -> {
+                // Lid handle + top bar
+                drawLine(tint, Offset(w * 0.38f, h * 0.18f), Offset(w * 0.62f, h * 0.18f), strokeWidth = stroke, cap = StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.20f, h * 0.28f), Offset(w * 0.80f, h * 0.28f), strokeWidth = stroke, cap = StrokeCap.Round)
+                // Tapered bin body
+                val bin = Path().apply {
+                    moveTo(w * 0.27f, h * 0.28f)
+                    lineTo(w * 0.32f, h * 0.82f)
+                    lineTo(w * 0.68f, h * 0.82f)
+                    lineTo(w * 0.73f, h * 0.28f)
+                }
+                drawPath(bin, color = tint, style = strokeStyle)
+                // Inner vertical ribs
+                drawLine(tint, Offset(w * 0.43f, h * 0.44f), Offset(w * 0.44f, h * 0.68f), strokeWidth = stroke * 0.8f, cap = StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.57f, h * 0.44f), Offset(w * 0.56f, h * 0.68f), strokeWidth = stroke * 0.8f, cap = StrokeCap.Round)
             }
         }
     }

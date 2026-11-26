@@ -1,7 +1,7 @@
 # ADR 0001: Cross-platform architecture with Kotlin Multiplatform and Compose Multiplatform
 
-- **Status:** Accepted
-- **Date:** 2026-11-12
+- **Status:** Partially implemented — KMP, Compose Multiplatform, and pure `:engine` are **Accepted** (built); native camera/CV/ML/sensor/microphone layers and Room KMP storage remain **Proposed** target architecture (clarified 2026-11-25)
+- **Date:** 2026-11-12 (updated 2026-11-25)
 
 ## Context
 
@@ -70,60 +70,78 @@ Develop and maintain two independent codebases for Android and iOS.
 
 Adopt **Option 1: Kotlin Multiplatform (KMP) + Compose Multiplatform**.
 
+Because this ADR was drafted before code existed and now spans both implemented foundations and unbuilt native/storage layers, its parts carry distinct statuses:
+
+### Status split: Accepted (built) vs. Proposed (target)
+
+| Layer | Status | Current implementation vs. target |
+|---|---|---|
+| KMP multi-module split (`:engine`, `:composeApp`, `iosApp/` Swift sources) | **Accepted (built)** | `:engine` and `:composeApp` compile and pass JVM/Android unit tests; `iosApp/` holds Swift entry sources, `Info.plist`, and `Config.xcconfig` (`.xcodeproj` generation and iOS builds require macOS). |
+| Pure KMP `:engine` (`commonMain`, `commonTest`, `jvmTest`) | **Accepted (built)** | Zero UI/Android/iOS imports; SI units only; event-based physics, expectimax and rolling planners, calibration fitters, snooker strategy, break-speed estimator, and classical ARGB vision (`RawImageTableDetector`, `PerspectiveHomography`, `BallIdentificationAndAssignment`). |
+| Shared Compose Multiplatform UI & 2D `Canvas` (`:composeApp` `commonMain`) | **Accepted (built)** | Shared screens, interactive 2D table canvas, navigation (`AppRoutes.kt`, `BackNavigation.kt`), single table-state owner (`TableSession`), and command-driven planner session (`RollingPlanSession`). Hoisted Compose state replaces the `ViewModel` classes sketched in the original diagram (see [ADR-0005](0005-rolling-runout-plan-state-machine-and-command-queue.md) and [ADR-0007](0007-single-table-session-and-pure-back-navigation.md)). |
+| Setup & terms persistence (`SetupPreferencesStore`) and rules search (`RulesSearchEngine`) | **Accepted (built)** | Key-value storage (`SharedPreferences` on Android, `NSUserDefaults` on iOS) persists onboarding choices and accepted terms version; practice logs, saved table profiles, and rules search run in memory. |
+| Android photo capture & gallery import (`rememberPlatformPhotoPicker`) | **Accepted (built)** | Uses Android system camera (`ActivityResultContracts.TakePicture`) and photo picker (`PickVisualMedia`) into `:engine` `RawImageTableDetector`. iOS import (`PlatformPhotoPicker.ios.kt`) is not implemented yet. |
+| Room KMP + `BundledSQLiteDriver` (SQLite FTS4/FTS5) | **Proposed (target)** | Planned local database for persisted profiles, practice logs, and FTS rules search; no database dependency is in the build yet. |
+| Native camera & high-fps video (CameraX/Camera2, AVFoundation) | **Proposed (target)** | Planned `expect`/`actual` camera intrinsics (`LENS_INTRINSIC_CALIBRATION`, `AVCaptureCalibrationData`) and 60–240 fps calibration video. `PlatformCameraController` currently returns bundled sample photos. |
+| Native CV & on-device ML (OpenCV, LiteRT / CoreML Apache-2.0 detector) | **Proposed (target)** | Planned replacement/augmentation for pure-Kotlin classical vision; neither OpenCV nor an ML runtime/detector is bundled yet. |
+| Live tilt sensors & microphone capture (`SensorManager`/`CoreMotion`, `AudioRecord`/`AVAudioEngine`) | **Proposed (target)** | Planned live `actual`s behind `PlatformTiltSensorController` and `PlatformBreakAudioController`; both currently return bundled sample data. |
+| Device profiling & JMH / Kotlinx-benchmark suite | **Proposed (target)** | `PlannerBenchmarkTest` times the planner on the JVM; a dedicated `< 0.1 ms` microbenchmark suite and physical-device timings are not done. |
+
 ### Module boundaries
 
 The repository is structured into two primary Gradle modules plus the thin iOS host directory (`iosApp/`, containing Swift entry sources, `Info.plist`, and `Config.xcconfig`, with `.xcodeproj` generation pending macOS):
 
-#### 1. `:engine` (Pure Kotlin Multiplatform domain module)
+#### 1. `:engine` (Pure Kotlin Multiplatform domain module — Accepted, built)
 
 - **Source sets:**
-  - `commonMain`: Table and pocket geometry, ball state machine, event-based physics simulator (quartic solver, sliding/rolling/spinning transitions, cue strike squirt/swerve, ball–ball throw, the Han cushion impulse model), execution-error sampler, expectimax strategy planner, heat-zone evaluator, game rule state machines (8-ball, 9-ball, 10-ball, snooker), and calibration parameter fitting (nonlinear least squares).
+  - `commonMain`: Table and pocket geometry, ball state machine, event-based physics simulator (Bézier-hull contact solver, sliding/rolling/spinning transitions, cue strike squirt/swerve, ball–ball throw, the Han cushion impulse model), execution-error model, expectimax and rolling strategy planners, heat-zone evaluator, game rule state machines (8-ball, 9-ball, 10-ball, snooker), classical ARGB photo detection (`RawImageTableDetector`, `PerspectiveHomography`, `BallIdentificationAndAssignment`), break-speed estimation, and calibration parameter fitting.
   - `commonTest`: Platform-agnostic unit and property tests (analytic physics invariants such as the 5/7 stun rule and stopping distance $v^2 / (2 \mu_r g)$, and planner regression layouts; comparison against the pooltool reference simulator is planned and not done).
-  - `jvmTest`: Executes `commonTest` on the JVM via the `jvm()` target for fast desktop/CI feedback (`PlannerBenchmarkTest` times the planner and runs the self-play comparison with the greedy baseline). A JMH/Kotlinx-benchmark suite verifying the `< 0.1 ms` per-simulation budget, and timings on a phone, are not done.
+  - `jvmTest`: Executes `commonTest` on the JVM via the `jvm()` target for fast desktop/CI feedback (`PlannerBenchmarkTest` times the planner and runs the self-play comparison with the greedy baseline). A JMH/Kotlinx-benchmark suite verifying the `< 0.1 ms` per-simulation budget, and timings on a phone, remain **Proposed**.
 - **Constraints:**
-  - **Zero UI, Android, or iOS imports.** Depend only on the Kotlin standard library and pure multiplatform math/coroutines utilities (`kotlinx.coroutines` for parallel beam-search workers and cooperative cancellation).
+  - **Zero UI, Android, or iOS imports.** Depend only on the Kotlin standard library and pure multiplatform math/coroutines utilities (`kotlinx.coroutines`).
   - **SI units only:** All values inside `:engine` use metres, seconds, radians, and kilograms ([docs/README.md](../README.md#conventions)). Conversion to feet/inches, degrees, or player speed scales (1–10) happens exclusively at the `:composeApp` presentation boundary.
-  - **Performance discipline:** Hot simulation loops must avoid heap allocations (using value classes, primitive arrays, and pre-allocated event buffers per worker coroutine) so garbage collection / Kotlin/Native memory management never stalls a 12,000-simulation search level.
+  - **Performance discipline:** Hot simulation loops should avoid unnecessary heap allocations so garbage collection / Kotlin/Native memory management does not stall multi-shot searches.
 
-#### 2. `:composeApp` (Shared UI, data, and platform integration module)
+#### 2. `:composeApp` (Shared UI, state, and platform integration module — Accepted UI/state; Proposed native/Room layers)
 
 - **Source sets:**
-  - `commonMain`:
-    - **UI (Compose Multiplatform):** Interactive 2D table `Canvas` (layout editor, shot paths, ghost ball, landing clouds, heat-zone overlays), camera framing overlay UI, calibration drill screens, rules/FAQ reader, scorekeeper, and shot clock.
-    - **Presentation & state:** Compose state hoisted in `App.kt` (the table state is owned by `TableSession`), navigation in `navigation/`, and coroutine orchestration that dispatches `:engine` searches onto a background dispatcher (`Dispatchers.Default`, for example in `RollingPlanSession`) with a stop hook the UI uses when the person changes the layout. There are no ViewModel classes.
-    - **Storage:** Target design: Room KMP with its bundled SQLite driver (Apache-2.0) storing player, table, and ball-set profiles, practice logs, and FTS4/FTS5 full-text indexes for bundled Markdown rule summaries. Built so far: the setup choices and the accepted terms version go through `SetupPreferencesStore` (`SharedPreferences` on Android, `NSUserDefaults` on iOS); saved table profiles and practice logs are held in memory, and the rules are searched in memory by `RulesSearchEngine`. No database dependency is in the build yet.
-    - **Platform abstractions (`expect` classes):** Clean contracts for the camera (`PlatformCameraController`: still photo and camera intrinsics; `PlatformPhotoPicker`), `PlatformTiltSensorController` and `PlatformBreakAudioController`. Cloth segmentation, rail homography and ball detection run in pure Kotlin in `:engine` (`RawImageTableDetector`, `PerspectiveHomography`, `BallIdentificationAndAssignment`); the planned native vision wrapper (OpenCV and an Apache-2.0 detector) is not built, and neither is 60–240 fps video capture.
+  - `commonMain` (**Accepted, built** unless marked **Proposed**):
+    - **UI (Compose Multiplatform):** Interactive 2D table `Canvas` (layout editor, shot paths, ghost ball, landing clouds, heat-zone overlays), photo-scan confirm UI, calibration drill screens, rules/FAQ reader, scorekeeper, shot clock, and legal screens.
+    - **Presentation & state:** Compose state hoisted in `App.kt` with `TableSession` owning table state, `BackNavigation.kt` deciding Back, and `RollingPlanSession` running `:engine` searches sequentially on `Dispatchers.Default` with a cooperative stop hook. `ViewModel` classes from the initial sketch are **not used** (see [ADR-0005](0005-rolling-runout-plan-state-machine-and-command-queue.md) and [ADR-0007](0007-single-table-session-and-pure-back-navigation.md)).
+    - **Storage:** Built: setup choices and accepted terms version persist through `SetupPreferencesStore` (`SharedPreferences` on Android, `NSUserDefaults` on iOS); saved table profiles and practice logs live in memory, and rules search uses `RulesSearchEngine` in memory. **Proposed:** Room KMP with `BundledSQLiteDriver` (Apache-2.0) and SQLite FTS4/FTS5 for persisted profiles, practice logs, and full-text rules search.
+    - **Platform abstractions (`expect` declarations):** `PlatformCameraController`, `rememberPlatformPhotoPicker` (`PlatformPhotoPickerState`), `PlatformTiltSensorController`, `PlatformBreakAudioController`, `PlatformBackHandler`, and `rememberSetupPreferencesStore`.
   - `androidMain`:
-    - Android `Activity` host and permission handling.
-    - Target `actual` implementations (not built: `PlatformPhotoPicker` currently uses the system camera app through `ActivityResultContracts.TakePicture` and the system photo picker, and `PlatformCameraController` returns bundled sample photos) backed by **CameraX / Camera2** (`LENS_INTRINSIC_calibration` for ball-height ray-plane correction, high-speed session for overhead video), **OpenCV Android SDK** (Apache-2.0 / 3-clause BSD), and **LiteRT** (Apache-2.0) with GPU/NNAPI delegate for the Apache-2.0 object detector.
-    - Target: Android `SensorManager` (accelerometer/rotation vector) and `AudioRecord` implementations. The current tilt and break-audio actuals return bundled sample data and read no sensor and no microphone.
-  - `iosMain` (linked into the `iosApp/` host once the Xcode project is generated on macOS):
-    - `MainViewController` hosting the Compose Multiplatform UI inside `iosApp/`.
-    - Target `actual` implementations (the iOS sources exist but have not been built or run) backed by **AVFoundation** (`AVCaptureSession`, `AVCapturePhotoOutput` with `cameraCalibrationData.intrinsicMatrix` for ball-height correction, high-fps `AVCaptureVideoDataOutput`), **OpenCV iOS framework**, and **LiteRT for iOS / CoreML** running the same Apache-2.0 detector weights.
-    - Target: **CoreMotion** (`CMMotionManager`) for table tilt readings and **AVAudioEngine** for break-speed acoustic timing; the current iOS tilt and break-audio actuals return bundled sample data.
+    - **Built:** Android `Activity` host, `PlatformBackHandler`, `SetupPreferencesStore`, and `rememberPlatformPhotoPicker` using `ActivityResultContracts.TakePicture` and `PickVisualMedia` (passing decoded ARGB frames to `:engine`'s `RawImageTableDetector`).
+    - **Proposed:** Live `actual` implementations backed by **CameraX / Camera2** (`LENS_INTRINSIC_CALIBRATION` for ball-height ray-plane correction, high-speed session for 60–240 fps overhead video), **OpenCV Android SDK** (Apache-2.0 / 3-clause BSD), **LiteRT** (Apache-2.0) with GPU/NNAPI delegate for an Apache-2.0 object detector, Android `SensorManager` (accelerometer/rotation vector), and `AudioRecord`. The current `PlatformCameraController`, `PlatformTiltSensorController`, and `PlatformBreakAudioController` actuals return bundled sample data.
+  - `iosMain` (sources exist; not yet built or linked into `iosApp/` pending `.xcodeproj` generation on macOS):
+    - **Written (unbuilt):** `MainViewController`, `PlatformBackHandler` (no-op), `SetupPreferencesStore` (`NSUserDefaults`), and sample-backed `PlatformCameraController`, `PlatformTiltSensorController`, and `PlatformBreakAudioController`; `PlatformPhotoPicker.ios.kt` reports import unavailable.
+    - **Proposed:** Live `actual` implementations backed by **AVFoundation** (`AVCaptureSession`, `AVCapturePhotoOutput` with `cameraCalibrationData.intrinsicMatrix`, high-fps `AVCaptureVideoDataOutput`), **OpenCV iOS framework**, **LiteRT for iOS / CoreML**, **CoreMotion** (`CMMotionManager`), and **AVAudioEngine**.
 
 ```
-+-------------------------------------------------------------------+
-|                           :composeApp                             |
-|  commonMain: Compose 2D Table Canvas, Heat Zones, ViewModels,     |
-|              Navigation, Room KMP + SQLite FTS, expect APIs       |
-+---------------------------------+---------------------------------+
-|           androidMain           |             iosMain             |
-| CameraX/Camera2 + Intrinsics    | AVFoundation + Intrinsics       |
-| OpenCV Android + LiteRT (GPU)   | OpenCV iOS + LiteRT / CoreML    |
-| SensorManager + AudioRecord     | CoreMotion + AVAudioEngine      |
-+---------------------------------+---------------------------------+
-                                  |
-                                  v  (plain Kotlin data in SI units)
-+-------------------------------------------------------------------+
-|                             :engine                               |
-|  commonMain: Table/Ball Model, Event-Based Physics (< 0.1 ms),    |
-|              Expectimax Planner, Heat-Zone Grid, Calibration Fit  |
-|  commonTest (JVM/iOS): Unit Tests; planned jvmTest Benchmarks     |
-+-------------------------------------------------------------------+
++-----------------------------------------------------------------------+
+|                              :composeApp                              |
+|  commonMain (Built): Compose 2D Table Canvas, Heat Zones, Navigation, |
+|    TableSession, RollingPlanSession, SetupPreferencesStore,           |
+|    RulesSearchEngine, expect Platform APIs                            |
+|  commonMain (Proposed): Room KMP + SQLite FTS4/FTS5                   |
++-----------------------------------+-----------------------------------+
+|            androidMain            |              iosMain              |
+| Built: Activity, PhotoPicker,     | Written (unbuilt): MainViewCtrl,  |
+|   SharedPreferences, BackHandler  |   NSUserDefaults, BackHandler     |
+| Proposed: CameraX/Camera2 +       | Proposed: AVFoundation +          |
+|   Intrinsics, OpenCV + LiteRT,    |   Intrinsics, OpenCV + CoreML/    |
+|   SensorManager + AudioRecord     |   LiteRT, CoreMotion, AVAudioEng. |
++-----------------------------------+-----------------------------------+
+                                    |
+                                    v  (plain Kotlin data in SI units)
++-----------------------------------------------------------------------+
+|                           :engine (Built)                             |
+|  commonMain: Table/Pocket/Ball Model, Event-Based Physics,            |
+|    Expectimax & Rolling Planners, Heat Zones, Calibration Fitters,    |
+|    Snooker Strategy, Break-Speed Estimator, Classical ARGB Vision     |
+|  commonTest / jvmTest: Unit Tests; Proposed: JMH / Device Benchmarks  |
++-----------------------------------------------------------------------+
 ```
-
-The diagram shows the target architecture. The bullets above say, per layer, what exists today: the engine and the shared UI are built, while the native camera, vision, sensor, microphone and database layers are still target designs.
 
 ## Consequences
 

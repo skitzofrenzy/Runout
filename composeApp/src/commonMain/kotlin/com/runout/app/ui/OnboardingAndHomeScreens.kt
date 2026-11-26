@@ -40,6 +40,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.runout.app.navigation.PlatformBackHandler
 import com.runout.engine.model.BallSetProfile
 import com.runout.engine.model.ExperienceLevel
 import com.runout.engine.model.GameRulesState
@@ -47,11 +48,14 @@ import com.runout.engine.model.GameType
 import com.runout.engine.model.PlayerProfile
 import com.runout.engine.model.TableLayout
 import com.runout.engine.model.TableSpec
+import kotlin.math.abs
 
 private data class TablePresetChoice(
     val label: String,
     val createSpec: () -> TableSpec,
 )
+
+private const val DEFAULT_ONBOARDING_TABLE_INDEX = 2
 
 private val ONBOARDING_TABLE_CHOICES = listOf(
     TablePresetChoice("7-ft Bar Box") { TableSpec.sevenFootPool() },
@@ -59,6 +63,24 @@ private val ONBOARDING_TABLE_CHOICES = listOf(
     TablePresetChoice("9-ft Pro") { TableSpec.nineFootPool() },
     TablePresetChoice("12-ft Snooker") { TableSpec.fullSizeSnooker() },
 )
+
+/**
+ * Index in [ONBOARDING_TABLE_CHOICES] matching [spec] by [TableSpec.kind] and nearest [TableSpec.lengthMeters].
+ * A calibrated or renamed table is matched by kind and size, never by [TableSpec.name].
+ */
+internal fun onboardingTablePresetIndex(spec: TableSpec): Int =
+    ONBOARDING_TABLE_CHOICES.withIndex()
+        .filter { it.value.createSpec().kind == spec.kind }
+        .minByOrNull { abs(it.value.createSpec().lengthMeters - spec.lengthMeters) }
+        ?.index
+        ?: DEFAULT_ONBOARDING_TABLE_INDEX
+
+/**
+ * Step index to return to when system Back is pressed on the welcome tour, or `null` on the first step so the system
+ * handles Back (leaving the app on Android).
+ */
+internal fun onboardingBackStep(currentStep: Int): Int? =
+    if (currentStep > 0) currentStep - 1 else null
 
 private data class GameChoiceOption(
     val label: String,
@@ -102,10 +124,14 @@ fun OnboardingFlowScreen(
         mutableIntStateOf(initialIdx)
     }
     var selectedTableIndex by remember {
-        val initialIdx = ONBOARDING_TABLE_CHOICES.indexOfFirst {
-            it.createSpec().name == initialTableSpec.name
-        }.let { if (it >= 0) it else 2 }
-        mutableIntStateOf(initialIdx)
+        mutableIntStateOf(onboardingTablePresetIndex(initialTableSpec))
+    }
+
+    val previousStep = onboardingBackStep(step)
+    PlatformBackHandler(enabled = previousStep != null) {
+        if (previousStep != null) {
+            step = previousStep
+        }
     }
 
     Surface(
@@ -321,9 +347,9 @@ fun OnboardingFlowScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(RunoutSpacing.Card),
             ) {
-                if (step > 0) {
+                if (previousStep != null) {
                     OutlinedButton(
-                        onClick = { step-- },
+                        onClick = { step = previousStep },
                         modifier = Modifier
                             .weight(1f)
                             .height(52.dp),

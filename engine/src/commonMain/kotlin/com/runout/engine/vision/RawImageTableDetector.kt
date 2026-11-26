@@ -307,7 +307,7 @@ object RawImageTableDetector {
     }
 
     private fun isBrightNeutralGreyCloth(cloth: DetectedClothSurface): Boolean =
-        cloth.meanSaturation < 0.12 && cloth.meanValue >= 0.55
+        cloth.meanSaturation < GREY_MEDIAN_SATURATION && cloth.meanValue >= 0.55
 
     /** True when [argb] matches the measured [cloth] colour (cloth mask used by all detectors). */
     fun isClothPixel(argb: Int, cloth: DetectedClothSurface): Boolean {
@@ -325,16 +325,18 @@ object RawImageTableDetector {
     ): Boolean {
         if (value < CLOTH_MIN_VALUE || value > CLOTH_MAX_VALUE) return false
         if (isBrightNeutralGreyCloth(cloth)) {
-            val whiteCeiling = min(0.895, max(0.64, cloth.meanValue + 0.075))
+            val whiteCeiling = min(0.905, max(0.64, cloth.meanValue + 0.075))
             if (value >= whiteCeiling && sat <= 0.18) return false
             if (value < cloth.meanValue - 0.17 || value >= whiteCeiling) return false
-            val maxSat = min(GREY_PIXEL_MAX_SATURATION, cloth.meanSaturation + 0.042)
+            val satTol = if (cloth.meanSaturation < 0.12) 0.042 else 0.075
+            val maxSat = min(GREY_PIXEL_MAX_SATURATION, cloth.meanSaturation + satTol)
             if (sat > maxSat) return false
             val rf = ((argb ushr 16) and 0xFF) / 255.0
             val gf = ((argb ushr 8) and 0xFF) / 255.0
             val bf = (argb and 0xFF) / 255.0
-            return abs((rf - bf) - cloth.meanRedMinusBlue) <= 0.038 &&
-                abs((rf - gf) - cloth.meanRedMinusGreen) <= 0.038
+            val rgbTol = if (cloth.meanSaturation < 0.12) 0.038 else 0.055
+            return abs((rf - bf) - cloth.meanRedMinusBlue) <= rgbTol &&
+                abs((rf - gf) - cloth.meanRedMinusGreen) <= rgbTol
         }
         if ((value >= 0.84 && sat <= 0.18) || (value >= 0.64 && sat <= 0.15)) return false
         return if (cloth.meanSaturation < GREY_MEDIAN_SATURATION) {
@@ -1703,7 +1705,10 @@ object RawImageTableDetector {
                 if (isClothArgbHsv(argb, hue, sat, value, cloth) || isClothShadowHsv(hue, sat, value, cloth)) continue
                 val chroma = sat * value
                 val isBrightWhite = if (isBrightNeutralGreyCloth(cloth)) {
-                    value >= min(0.89, cloth.meanValue + 0.07) && sat <= 0.18
+                    val rf = ((argb ushr 16) and 0xFF) / 255.0
+                    val bf = (argb and 0xFF) / 255.0
+                    (value >= min(0.89, cloth.meanValue + 0.07) && sat <= 0.18) ||
+                        (cloth.meanSaturation >= 0.10 && value >= 0.68 && sat <= 0.24 && abs((rf - bf) - cloth.meanRedMinusBlue) > 0.055)
                 } else {
                     (value >= 0.82 && sat <= 0.18) || (value >= 0.64 && sat <= 0.15)
                 }
@@ -1734,6 +1739,16 @@ object RawImageTableDetector {
         ) {
             val area: Int get() = pixels.size
         }
+
+        val quadTopWidth = quad[0].distanceTo(quad[1])
+        val quadBotWidth = quad[3].distanceTo(quad[2])
+        val quadAvgWidth = 0.5 * (quadTopWidth + quadBotWidth)
+        val quadTopY = 0.5 * (quad[0].y + quad[1].y)
+        val quadBotY = 0.5 * (quad[3].y + quad[2].y)
+        val quadHeightY = max(1.0, quadBotY - quadTopY)
+        val quadShortSidePx = if (isEndOn) quadAvgWidth else min(quadAvgWidth, quadHeightY)
+        val geomExpectedBallRadius = (quadShortSidePx * 0.0225).coerceAtLeast(6.0)
+        val effectiveRadiusRange = max(radiusRange.start, geomExpectedBallRadius * 0.36)..max(radiusRange.endInclusive, geomExpectedBallRadius * 2.1)
 
         val visited = BooleanArray(total)
         val queue = IntArray(total)
@@ -1800,8 +1815,12 @@ object RawImageTableDetector {
 
             val area = tail
             val radiusPx = sqrt(area / PI)
-            val minAllowedRadius = if (startType == 1.toByte()) min(2.0, radiusRange.start) else radiusRange.start
-            if (radiusPx < minAllowedRadius || radiusPx > radiusRange.endInclusive * 2.5) continue
+            val minAllowedRadius = if (startType == 1.toByte() && geomExpectedBallRadius <= 12.0) {
+                min(2.0, effectiveRadiusRange.start)
+            } else {
+                effectiveRadiusRange.start
+            }
+            if (radiusPx < minAllowedRadius || radiusPx > effectiveRadiusRange.endInclusive * 2.5) continue
             val pixelsCopy = queue.copyOf(area)
             components.add(ForegroundComponent(pixelsCopy, startType, minX, maxX, minY, maxY, sumX, sumY))
 
@@ -1809,22 +1828,16 @@ object RawImageTableDetector {
             val boxH = maxY - minY + 1
             val aspect = boxW.toDouble() / boxH
             val fill = area.toDouble() / (boxW.toDouble() * boxH)
-            if (radiusPx in radiusRange && aspect in 0.65..1.55 && fill >= 0.56) {
+            if (radiusPx in effectiveRadiusRange && aspect in 0.65..1.55 && fill >= 0.56) {
                 singleRadii.add(radiusPx)
             }
         }
 
-        val quadTopWidth = quad[0].distanceTo(quad[1])
-        val quadBotWidth = quad[3].distanceTo(quad[2])
-        val quadAvgWidth = 0.5 * (quadTopWidth + quadBotWidth)
-        val quadTopY = 0.5 * (quad[0].y + quad[1].y)
-        val quadBotY = 0.5 * (quad[3].y + quad[2].y)
-        val quadHeightY = max(1.0, quadBotY - quadTopY)
         val estimatedBallRadius = if (singleRadii.size >= 2) {
             singleRadii.sort()
             singleRadii[singleRadii.size / 2]
         } else {
-            (quadAvgWidth * 0.022).coerceIn(6.0, 22.0)
+            geomExpectedBallRadius
         }
 
         fun localExpectedRadius(centerY: Double): Double {
@@ -1902,7 +1915,7 @@ object RawImageTableDetector {
                 }
             }
 
-            if (radiusPx > radiusRange.endInclusive) continue
+            if (radiusPx > effectiveRadiusRange.endInclusive) continue
             val minAspect = if (comp.startType == 1.toByte() && radiusPx < 4.5) 0.35 else 0.55
             val maxAspect = if (comp.startType == 1.toByte() && radiusPx < 4.5) 2.50 else 1.80
             val minFill = if (comp.startType == 1.toByte() && radiusPx < 4.5) 0.38 else 0.52
@@ -1923,13 +1936,13 @@ object RawImageTableDetector {
             ) {
                 continue
             }
-            if (radiusPx < radiusRange.start &&
+            if (radiusPx < effectiveRadiusRange.start &&
                 (cloth.meanSaturation >= 0.45 || !pointInQuad(centerX, centerY, quad, 5.0) || centerY > 0.50 * h)
             ) {
                 continue
             }
             val sampleRadius = max(radiusPx, 3.2)
-            val estimate = if (comp.startType == 1.toByte() && radiusPx < radiusRange.start) {
+            val estimate = if (comp.startType == 1.toByte() && radiusPx < effectiveRadiusRange.start) {
                 BallColorEstimate(
                     dominant = BallPaletteColor.WHITE,
                     secondary = null,
@@ -1939,7 +1952,7 @@ object RawImageTableDetector {
             } else {
                 estimateBallColors(frame, centerX, centerY, sampleRadius) ?: continue
             }
-            if (radiusPx < radiusRange.start &&
+            if (radiusPx < effectiveRadiusRange.start &&
                 !(estimate.dominant == BallPaletteColor.WHITE && estimate.whiteFraction >= 0.75)
             ) {
                 continue
@@ -2019,22 +2032,22 @@ object RawImageTableDetector {
             val topWidth = quadCornersPx[0].distanceTo(quadCornersPx[1])
             val botWidth = quadCornersPx[3].distanceTo(quadCornersPx[2])
             val avgWidth = 0.5 * (topWidth + botWidth)
-            val baseR = (avgWidth * 0.022).coerceIn(6.0, 22.0)
+            val topY = 0.5 * (quadCornersPx[0].y + quadCornersPx[1].y)
+            val botY = 0.5 * (quadCornersPx[3].y + quadCornersPx[2].y)
+            val spanY = max(1.0, botY - topY)
+            val baseR = (avgWidth * 0.022).coerceAtLeast(6.0)
             if (!isEndOn || avgWidth < 1e-6) {
                 baseR
             } else {
-                val topY = 0.5 * (quadCornersPx[0].y + quadCornersPx[1].y)
-                val botY = 0.5 * (quadCornersPx[3].y + quadCornersPx[2].y)
-                val spanY = max(1.0, botY - topY)
                 val ty = ((tapCenterPx.y - topY) / spanY).coerceIn(0.0, 1.0)
                 val localWidth = topWidth + ty * (botWidth - topWidth)
                 baseR * (localWidth / avgWidth).coerceIn(0.68, 1.32)
             }
         } else {
-            (min(w, h) * 0.024).coerceIn(7.0, 20.0)
+            (min(w, h) * 0.024).coerceAtLeast(7.0)
         }
 
-        val roiRadius = searchRadiusPx ?: (localR * 2.8).coerceIn(22.0, 56.0)
+        val roiRadius = searchRadiusPx ?: (localR * 2.6).coerceIn(22.0, max(56.0, localR * 2.7))
         val roiRadiusSq = roiRadius * roiRadius
         val tapClamped = Vec2(
             x = tapCenterPx.x.coerceIn(0.0, (w - 1).toDouble()),
@@ -2068,7 +2081,10 @@ object RawImageTableDetector {
                 if (isClothArgbHsv(argb, hue, sat, value, cloth) || isClothShadowHsv(hue, sat, value, cloth)) continue
                 val chroma = sat * value
                 val isBrightWhite = if (isBrightNeutralGreyCloth(cloth)) {
-                    value >= min(0.89, cloth.meanValue + 0.07) && sat <= 0.18
+                    val rf = ((argb ushr 16) and 0xFF) / 255.0
+                    val bf = (argb and 0xFF) / 255.0
+                    (value >= min(0.89, cloth.meanValue + 0.07) && sat <= 0.18) ||
+                        (cloth.meanSaturation >= 0.10 && value >= 0.68 && sat <= 0.24 && abs((rf - bf) - cloth.meanRedMinusBlue) > 0.055)
                 } else {
                     (value >= 0.82 && sat <= 0.18) || (value >= 0.64 && sat <= 0.15)
                 }
@@ -2087,6 +2103,7 @@ object RawImageTableDetector {
         val roiQueue = IntArray(roiTotal)
         val globalPixelsBuf = IntArray(roiTotal)
         val localBlobs = ArrayList<RawCandidateBlob>()
+        val clusterSplitCenters = HashSet<Vec2>()
         val minAllowedR = max(2.6, localR * 0.36)
         val maxAllowedR = localR * 3.2
         val expectedArea = PI * localR * localR
@@ -2176,6 +2193,7 @@ object RawImageTableDetector {
                         if (center.distanceTo(tapClamped) > roiRadius * 0.92) continue
                         if (existingCandidates.any { it.imageCenterPx.distanceTo(center) < existingDedupDist }) continue
                         val estimate = estimateBallColorsExcludingCloth(frame, center.x, center.y, estR, cloth) ?: continue
+                        clusterSplitCenters += center
                         localBlobs.add(RawCandidateBlob(center, (PI * estR * estR).toInt(), estR, estimate))
                     }
                     continue
@@ -2204,10 +2222,20 @@ object RawImageTableDetector {
             blobs = localBlobs,
             minCenterSeparation = { r -> max(11.0, 1.25 * r) },
         )
+        val tapMatchRadius = max(18.0, localR * 1.95)
+        val clusterBlobs = kept.filter { it.center in clusterSplitCenters }
+        val selectedBlobs = when {
+            clusterBlobs.size >= 2 && clusterBlobs.any { it.center.distanceTo(tapClamped) <= tapMatchRadius } ->
+                clusterBlobs.sortedBy { it.center.distanceTo(tapClamped) }
+            else ->
+                kept.filter { it.center.distanceTo(tapClamped) <= tapMatchRadius }
+                    .minByOrNull { it.center.distanceTo(tapClamped) }
+                    ?.let(::listOf)
+                    .orEmpty()
+        }
         val nextIdStart = (existingCandidates.maxOfOrNull { it.id } ?: 0) + 1
-        if (kept.isNotEmpty()) {
-            val found = kept
-                .sortedWith(compareBy<RawCandidateBlob> { it.center.y }.thenBy { it.center.x })
+        if (selectedBlobs.isNotEmpty()) {
+            val found = selectedBlobs
                 .mapIndexed { idx, blob ->
                     DetectedBallCandidate(
                         id = nextIdStart + idx,
@@ -2224,7 +2252,7 @@ object RawImageTableDetector {
             )
         }
 
-        val sampledEstimate = estimateBallColorsExcludingCloth(frame, tapClamped.x, tapClamped.y, localR, cloth)
+        val sampledEstimate = estimateBallColorsExcludingCloth(frame, tapClamped.x, tapClamped.y, localR * 0.82, cloth)
         val fallback = DetectedBallCandidate(
             id = nextIdStart,
             imageCenterPx = tapClamped,
@@ -2437,7 +2465,10 @@ object RawImageTableDetector {
                 valueSum += value
                 if (value >= 0.75 && sat <= 0.22) {
                     whitePixels++
-                } else if (value >= 0.72 && sat <= 0.42 && hue in 18.0..54.0) {
+                } else if (
+                    (value >= 0.72 && sat <= 0.42 && hue in 18.0..54.0) ||
+                    (value >= 0.78 && sat <= 0.34 && hue in 54.0..95.0)
+                ) {
                     warmIvoryPixels++
                 } else if (value <= 0.24 || (value <= 0.35 && sat * value <= 0.16)) {
                     blackPixels++
@@ -2479,11 +2510,15 @@ object RawImageTableDetector {
 
         val yellowVotes = votes[BallPaletteColor.YELLOW.ordinal]
         val isBroadcastNineBallStripe = yellowVotes >= 3 && blackRatio >= 0.08 && combinedWhiteRatio < 0.65
-        val isStripedWithChromatic = excludeCloth != null && chromaticRatio >= 0.18 && whiteRatio in 0.18..0.84
+        val isStripedWithChromatic = excludeCloth != null && chromaticRatio >= 0.18 && strongChromaticRatio >= 0.06 && whiteRatio in 0.18..0.84
 
         return when {
             !isStripedWithChromatic &&
-                (whiteRatio >= 0.75 || (combinedWhiteRatio >= 0.68 && strongChromaticRatio < 0.15)) -> BallColorEstimate(
+                (
+                    whiteRatio >= 0.75 ||
+                        (combinedWhiteRatio >= 0.68 && strongChromaticRatio < 0.15) ||
+                        (combinedWhiteRatio >= 0.45 && strongChromaticRatio < 0.06 && meanVal >= 0.68 && blackRatio < 0.25)
+                    ) -> BallColorEstimate(
                 dominant = BallPaletteColor.WHITE,
                 secondary = secondaryFromTop(topIdx, top, totalPixels),
                 whiteFraction = max(whiteRatio, combinedWhiteRatio).coerceIn(0.82, 0.99),

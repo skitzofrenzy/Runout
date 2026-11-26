@@ -141,6 +141,68 @@ val generateLegalDocuments = tasks.register<GenerateLegalDocumentsTask>("generat
     outputDirectory.set(layout.buildDirectory.dir("generated/legal/commonMain/kotlin"))
 }
 
+/**
+ * Generates [com.runout.app.version.GeneratedAppVersion] from `gradle.properties` and root `CHANGELOG.md`
+ * so the in-app version badge and What's New screen always match the packaged build.
+ */
+abstract class GenerateAppVersionTask : DefaultTask() {
+    @get:Input
+    abstract val versionName: Property<String>
+
+    @get:Input
+    abstract val versionCode: Property<Int>
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val changelogFile: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    private fun escape(line: String): String = buildString {
+        for (ch in line) {
+            when {
+                ch == '\\' -> append("\\\\")
+                ch == '"' -> append("\\\"")
+                ch == '$' -> append("\\$")
+                ch.code in 0x20..0x7E -> append(ch)
+                else -> append("\\u").append(ch.code.toString(16).padStart(4, '0'))
+            }
+        }
+    }
+
+    @TaskAction
+    fun generate() {
+        val text = changelogFile.get().asFile.readText(Charsets.UTF_8).replace("\r\n", "\n").trimEnd('\n')
+        val out = outputDirectory.get().asFile.resolve("com/runout/app/version")
+        out.mkdirs()
+        val body = StringBuilder()
+        body.appendLine("package com.runout.app.version")
+        body.appendLine()
+        body.appendLine("// Generated from gradle.properties and CHANGELOG.md at build time. Do not edit.")
+        body.appendLine("internal object GeneratedAppVersion {")
+        body.appendLine("    const val VERSION_NAME: String = \"${escape(versionName.get())}\"")
+        body.appendLine("    const val VERSION_CODE: Int = ${versionCode.get()}")
+        body.appendLine("    val CHANGELOG_LINES: List<String> = listOf(")
+        for (line in text.split('\n')) {
+            body.appendLine("        \"${escape(line)}\",")
+        }
+        body.appendLine("    )")
+        body.appendLine("}")
+        out.resolve("GeneratedAppVersion.kt").writeText(body.toString(), Charsets.UTF_8)
+    }
+}
+
+val appVersionName: String = providers.gradleProperty("runout.versionName").get()
+val appVersionCode: Int = providers.gradleProperty("runout.versionCode").get().toInt()
+
+val generateAppVersion = tasks.register<GenerateAppVersionTask>("generateAppVersion") {
+    versionName.set(appVersionName)
+    versionCode.set(appVersionCode)
+    changelogFile.set(rootProject.layout.projectDirectory.file("CHANGELOG.md"))
+    outputDirectory.set(layout.buildDirectory.dir("generated/version/commonMain/kotlin"))
+}
+
 val verifyLegalPlaceholders = tasks.register<VerifyLegalPlaceholdersTask>("verifyLegalPlaceholders") {
     group = "verification"
     description = "Fails while a bracketed placeholder remains in the bundled legal documents (release builds only)."
@@ -178,6 +240,7 @@ kotlin {
     sourceSets {
         commonMain {
             kotlin.srcDir(generateLegalDocuments.map { it.outputDirectory })
+            kotlin.srcDir(generateAppVersion.map { it.outputDirectory })
         }
         commonMain.dependencies {
             implementation(projects.engine)
@@ -194,7 +257,16 @@ kotlin {
         commonTest.dependencies {
             implementation(kotlin("test"))
         }
+        androidUnitTest.dependencies {
+            implementation(libs.junit)
+            implementation(libs.robolectric)
+            implementation(libs.androidx.compose.ui.test.junit4)
+        }
     }
+}
+
+dependencies {
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
 
 android {
@@ -205,8 +277,8 @@ android {
         applicationId = "com.runout.app"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
     }
 
     packaging {
@@ -224,5 +296,11 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
     }
 }

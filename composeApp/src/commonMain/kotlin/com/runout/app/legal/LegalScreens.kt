@@ -1,5 +1,6 @@
 package com.runout.app.legal
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -42,6 +44,7 @@ import com.runout.app.ui.RunoutColors
 import com.runout.app.ui.RunoutIcon
 import com.runout.app.ui.RunoutSpacing
 import com.runout.app.ui.RunoutVectorIcon
+import com.runout.app.version.AppVersion
 
 /**
  * Full-screen "Before you start" notice shown before setup until the person agrees to the current terms.
@@ -178,11 +181,15 @@ private fun acknowledgementAgreementText(onOpenTerms: () -> Unit, onOpenPrivacy:
 }
 
 /**
- * The About / Legal screen: the plain-language summary and a list of the bundled documents. Reading a document
- * is hosted by the caller so back navigation returns here.
+ * The About / Legal screen: installed app version with a link to What's New, the plain-language summary,
+ * and a list of the bundled legal documents. Reading a document is hosted by the caller so back navigation
+ * returns here.
  */
 @Composable
-fun AboutLegalScreen(onOpenDocument: (LegalDocument) -> Unit) {
+fun AboutLegalScreen(
+    onOpenDocument: (LegalDocument) -> Unit,
+    onOpenWhatsNew: (() -> Unit)? = null,
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -190,6 +197,42 @@ fun AboutLegalScreen(onOpenDocument: (LegalDocument) -> Unit) {
             .padding(RunoutSpacing.Margin),
         verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Margin),
     ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            color = RunoutColors.SurfaceMid,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.60f)),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(RunoutSpacing.Card),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(RunoutSpacing.Micro)) {
+                    Text(
+                        text = "Runout",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "Version ${AppVersion.versionName} (Build ${AppVersion.versionCode})",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (onOpenWhatsNew != null) {
+                    OutlinedButton(
+                        onClick = onOpenWhatsNew,
+                        modifier = Modifier.defaultMinSize(minHeight = RunoutSpacing.MinTouchTarget),
+                    ) {
+                        Text("What's New", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
         SelectionContainer {
             Text(
                 text = LegalConfig.applyPlaceholders(LegalCopy.ABOUT_SUMMARY),
