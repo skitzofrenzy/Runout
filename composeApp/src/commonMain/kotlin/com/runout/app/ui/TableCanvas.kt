@@ -995,7 +995,7 @@ fun PoolTableCanvas(
                 panOffset,
             )
             PathWaypointCallout(
-                card = describePathWaypoint(wp, displayMode, pathWaypoints.firstOrNull()),
+                card = describePathWaypointAt(pathWaypoints, tooltipIdx, displayMode),
                 accent = pathWaypointColor(wp.kind),
                 index = tooltipIdx,
                 count = pathWaypoints.size,
@@ -1146,15 +1146,74 @@ private fun englishSide(sideRatio: Double): String = if (sideRatio < 0.0) "left"
 
 private const val NOTICEABLE_ENGLISH_RATIO = 0.03
 
+internal fun isContactWaypoint(kind: PathWaypointKind): Boolean =
+    kind == PathWaypointKind.OBJECT_CONTACT ||
+        kind == PathWaypointKind.CUSHION_CONTACT ||
+        kind == PathWaypointKind.BALL_CONTACT
+
+private fun contactSpeedLine(
+    speedInMps: Double,
+    speedOutMps: Double,
+    strokeMps: Double,
+    pro: Boolean,
+    showTravelBreakdown: Boolean,
+): String {
+    val arrivePct = pctOf(speedInMps, strokeMps).coerceIn(0, 100)
+    val remainPct = pctOf(speedOutMps, strokeMps).coerceIn(0, 100)
+    val travelLossPct = (100 - arrivePct).coerceAtLeast(0)
+    val contactLossPct = (arrivePct - remainPct).coerceAtLeast(0)
+    return if (pro) {
+        if (showTravelBreakdown) {
+            "$remainPct% left (${fmtMps(speedOutMps)} of ${fmtMps(strokeMps)}): " +
+                "$travelLossPct% lost in travel, $contactLossPct% from contact."
+        } else {
+            "$remainPct% left (${fmtMps(speedOutMps)} of ${fmtMps(strokeMps)}; $contactLossPct% lost from contact)."
+        }
+    } else {
+        if (showTravelBreakdown) {
+            "$remainPct% speed left ($travelLossPct% lost in travel, $contactLossPct% from contact)."
+        } else {
+            "$remainPct% speed left ($contactLossPct% lost from contact)."
+        }
+    }
+}
+
+/**
+ * Describes the waypoint at [index] in [waypoints], resolving the strike reference speed and whether this point
+ * is the first contact or first non-strike waypoint along the path.
+ */
+internal fun describePathWaypointAt(
+    waypoints: List<PathWaypoint>,
+    index: Int,
+    mode: AppDisplayMode,
+): PathWaypointCardText {
+    val wp = waypoints[index]
+    val start = waypoints.firstOrNull { it.kind == PathWaypointKind.CUE_START } ?: waypoints.firstOrNull()
+    val firstContactIdx = waypoints.indexOfFirst { isContactWaypoint(it.kind) }
+    val firstWaypointIdx = waypoints.indexOfFirst { it.kind != PathWaypointKind.CUE_START }
+    return describePathWaypoint(
+        wp = wp,
+        mode = mode,
+        start = start,
+        isFirstContact = index == firstContactIdx,
+        isFirstWaypoint = index == firstWaypointIdx,
+    )
+}
+
 /**
  * Words for one path waypoint. [PathWaypoint]s carry numbers only; this turns them into the card text for
- * [mode]: [AppDisplayMode.SIMPLE] is plain English without units, [AppDisplayMode.PRO] adds m/s, %, cm and degrees.
- * [start] is the strike waypoint of the same shot, used for the stroke speed and the starting spin.
+ * [mode]: [AppDisplayMode.SIMPLE] is plain English without units, [AppDisplayMode.PRO] adds m/s, cm and degrees.
+ * [start] is the strike waypoint of the same shot, used for the 100% starting stroke speed and starting spin.
+ * All remaining-speed percentages are relative to the starting stroke speed. On the first contact point
+ * ([isFirstContact] = true), the card breaks down total loss into travel loss and contact loss; on subsequent
+ * contact points it shows total remaining speed and contact loss only.
  */
 internal fun describePathWaypoint(
     wp: PathWaypoint,
     mode: AppDisplayMode,
     start: PathWaypoint?,
+    isFirstContact: Boolean = true,
+    isFirstWaypoint: Boolean = false,
 ): PathWaypointCardText {
     val pro = mode == AppDisplayMode.PRO
     val strokeMps = start?.speedOutMps ?: 0.0
@@ -1166,8 +1225,8 @@ internal fun describePathWaypoint(
             val hasEnglish = abs(side) >= NOTICEABLE_ENGLISH_RATIO
             val lines = if (pro) {
                 listOf(
-                    "Stroke ${fmtMps(wp.speedOutMps ?: 0.0)}" +
-                        (wp.speedUnits?.let { ", speed ${fmtSpeedUnits(it)}/10" } ?: "") + ".",
+                    "Starting speed 100% (${fmtMps(wp.speedOutMps ?: 0.0)}" +
+                        (wp.speedUnits?.let { ", ${fmtSpeedUnits(it)}/10" } ?: "") + ").",
                     "Spin at the tip: ${spinPercentText(tipK)}.",
                     if (hasEnglish) {
                         "English: ${englishPercent(side)}% of max, ${englishSide(side)}."
@@ -1177,6 +1236,8 @@ internal fun describePathWaypoint(
                 )
             } else {
                 listOfNotNull(
+                    wp.speedUnits?.let { "Starting speed: 100% (speed ${fmtSpeedUnits(it)}/10)." }
+                        ?: "Starting speed: 100%.",
                     when {
                         tipK < -0.08 -> "Low on the ball: backspin (draw)."
                         tipK <= 0.18 -> "Centre ball: no spin (stun)."
@@ -1184,15 +1245,28 @@ internal fun describePathWaypoint(
                         else -> "High on the ball: topspin (follow)."
                     },
                     if (hasEnglish) "Side english on the ${englishSide(side)}." else null,
-                    wp.speedUnits?.let { "Stroke speed ${fmtSpeedUnits(it)} out of 10." },
                 )
             }
             PathWaypointCardText("Strike", lines)
         }
 
         PathWaypointKind.SPIN_TRANSITION -> {
-            val atSpeed = wp.speedOutMps ?: 0.0
-            val speedLine = "Cue ball at ${fmtMps(atSpeed)} (${pctOf(atSpeed, strokeMps)}% of stroke speed)."
+            val atSpeed = wp.speedOutMps ?: wp.speedInMps ?: 0.0
+            val remainPct = pctOf(atSpeed, strokeMps).coerceIn(0, 100)
+            val travelLossPct = (100 - remainPct).coerceAtLeast(0)
+            val speedLine = if (pro) {
+                if (isFirstWaypoint) {
+                    "$remainPct% speed left (${fmtMps(atSpeed)} of ${fmtMps(strokeMps)}; $travelLossPct% lost in travel)."
+                } else {
+                    "$remainPct% speed left (${fmtMps(atSpeed)} of ${fmtMps(strokeMps)})."
+                }
+            } else {
+                if (isFirstWaypoint) {
+                    "$remainPct% speed left ($travelLossPct% lost in travel)."
+                } else {
+                    "$remainPct% speed left."
+                }
+            }
             val after = fmtCm(wp.distanceAlongPathMeters)
             when (wp.transition) {
                 SpinPhysics.SpinRegimeChange.DRAW_TO_STUN -> PathWaypointCardText(
@@ -1200,7 +1274,7 @@ internal fun describePathWaypoint(
                     if (pro) {
                         listOf("Draw turns to stun after $after.", speedLine, "Sliding with no spin; roll comes next.")
                     } else {
-                        listOf("Backspin has worn off here.", "From this point the ball only slides.")
+                        listOf(speedLine, "Backspin has worn off here.", "From this point the ball only slides.")
                     },
                 )
 
@@ -1213,7 +1287,7 @@ internal fun describePathWaypoint(
                             "Spin now ${spinPercentText(wp.verticalSpinAfter ?: 0.0)}, rising.",
                         )
                     } else {
-                        listOf("The sliding ball starts to roll forward.", "The cloth is now adding topspin.")
+                        listOf(speedLine, "The sliding ball starts to roll forward.", "The cloth is now adding topspin.")
                     },
                 )
 
@@ -1230,11 +1304,11 @@ internal fun describePathWaypoint(
                             },
                         )
                     } else if (k0 > 1.02) {
-                        listOf("Extra topspin has gripped the cloth.", "From here the ball rolls naturally.")
+                        listOf(speedLine, "Extra topspin has gripped the cloth.", "From here the ball rolls naturally.")
                     } else if (k0 < -0.08) {
-                        listOf("All the backspin is gone.", "From here the ball just rolls forward.")
+                        listOf(speedLine, "All the backspin is gone.", "From here the ball just rolls forward.")
                     } else {
-                        listOf("The ball now rolls without slipping.", "Spin no longer changes its line.")
+                        listOf(speedLine, "The ball now rolls without slipping.", "Spin no longer changes its line.")
                     },
                 )
             }
@@ -1243,39 +1317,42 @@ internal fun describePathWaypoint(
         PathWaypointKind.OBJECT_CONTACT -> {
             val ball = ballTag(wp.otherBallNumber)
             val arrive = wp.speedInMps ?: 0.0
+            val vout = wp.speedOutMps ?: 0.0
             val given = wp.objectBallSpeedMps ?: 0.0
-            val transfer = pctOf(given, arrive)
             val keptK = wp.verticalSpinAfter ?: 0.0
+            val speedLine = contactSpeedLine(
+                speedInMps = arrive,
+                speedOutMps = vout,
+                strokeMps = strokeMps,
+                pro = pro,
+                showTravelBreakdown = isFirstContact,
+            )
             if (pro) {
                 val cut = ((wp.cutAngleRadians ?: 0.0) * 180.0 / PI).roundToInt()
                 val deflect = ((wp.cueDeflectionRadians ?: 0.0) * 180.0 / PI).roundToInt()
                 PathWaypointCardText(
                     "Contact $ball",
                     listOf(
-                        "Arrives at ${fmtMps(arrive)}, ${spinPercentText(wp.verticalSpinBefore ?: 0.0)}.",
-                        "$cut° cut sends $ball off at ${fmtMps(given)} ($transfer%).",
-                        "Leaves at ${fmtMps(wp.speedOutMps ?: 0.0)}, $deflect° off line, spin kept.",
+                        speedLine,
+                        "$cut° cut sends $ball at ${fmtMps(given)}; cue leaves $deflect° off line.",
+                        "Arrives with ${spinPercentText(wp.verticalSpinBefore ?: 0.0)}, kept after contact.",
                     ),
                 )
             } else {
                 PathWaypointCardText(
                     "Contact $ball",
                     listOf(
+                        speedLine,
                         when (wp.regimeBefore) {
-                            SpinPhysics.ImpactSpinState.BACKSPIN_DRAW -> "Arrives with the backspin still on."
+                            SpinPhysics.ImpactSpinState.BACKSPIN_DRAW -> "Arrives with backspin still on."
                             SpinPhysics.ImpactSpinState.STUN_SLIDE -> "Arrives sliding with no spin."
                             SpinPhysics.ImpactSpinState.PARTIAL_FORWARD_ROLL -> "Arrives part-way to rolling."
                             else -> "Arrives rolling forward."
                         },
-                        when {
-                            transfer >= 80 -> "$ball gets most of the speed."
-                            transfer >= 40 -> "$ball gets about half the speed."
-                            else -> "$ball gets only a little speed."
-                        },
                         if (keptK < -0.08 || keptK > 0.18) {
-                            "The cue ball keeps its ${spinWords(keptK)} after contact."
+                            "Keeps its ${spinWords(keptK)} after hitting $ball."
                         } else {
-                            "The cue ball leaves without much spin."
+                            "Leaves $ball without much spin."
                         },
                     ),
                 )
@@ -1300,6 +1377,8 @@ internal fun describePathWaypoint(
 
         PathWaypointKind.POST_IMPACT_TRANSITION -> {
             val kAt = wp.verticalSpinBefore ?: 0.0
+            val vout = wp.speedOutMps ?: wp.speedInMps ?: 0.0
+            val remainPct = pctOf(vout, strokeMps).coerceIn(0, 100)
             PathWaypointCardText(
                 when {
                     kAt < -0.08 -> "Draw bites"
@@ -1309,11 +1388,12 @@ internal fun describePathWaypoint(
                 if (pro) {
                     listOf(
                         "The slide after contact is over.",
-                        "Cue ball now rolls at ${fmtMps(wp.speedOutMps ?: 0.0)}.",
+                        "$remainPct% speed left (${fmtMps(vout)} of ${fmtMps(strokeMps)}).",
                         "It had ${spinPercentText(kAt)} at contact.",
                     )
                 } else {
                     listOf(
+                        "$remainPct% speed left.",
                         when {
                             kAt < -0.08 -> "The backspin has pulled the cue ball back."
                             kAt > 0.18 -> "The topspin has carried the cue ball forward."
@@ -1328,7 +1408,13 @@ internal fun describePathWaypoint(
         PathWaypointKind.CUSHION_CONTACT -> {
             val vin = wp.speedInMps ?: 0.0
             val vout = wp.speedOutMps ?: 0.0
-            val keep = pctOf(vout, vin)
+            val speedLine = contactSpeedLine(
+                speedInMps = vin,
+                speedOutMps = vout,
+                strokeMps = strokeMps,
+                pro = pro,
+                showTravelBreakdown = isFirstContact,
+            )
             val before = wp.sideSpinBefore ?: 0.0
             val after = wp.sideSpinAfter ?: 0.0
             val hasEnglish = abs(before) >= NOTICEABLE_ENGLISH_RATIO
@@ -1338,7 +1424,7 @@ internal fun describePathWaypoint(
                 "Cushion ${wp.cushionIndex ?: 1}",
                 if (pro) {
                     listOf(
-                        "Speed ${fmtMps(vin)} → ${fmtMps(vout)} (−${100 - keep}%).",
+                        speedLine,
                         if (hasEnglish) {
                             "English ${englishPercent(before)}% ${englishSide(before)} → ${englishPercent(after)}% ${englishSide(after)} of max."
                         } else {
@@ -1349,7 +1435,7 @@ internal fun describePathWaypoint(
                     )
                 } else {
                     listOf(
-                        "The cue ball keeps about $keep% of its speed.",
+                        speedLine,
                         if (hasEnglish) {
                             "Side english bends the bounce, and the rail changes it."
                         } else {
@@ -1369,15 +1455,22 @@ internal fun describePathWaypoint(
             val ball = ballTag(wp.otherBallNumber)
             val vin = wp.speedInMps ?: 0.0
             val vout = wp.speedOutMps ?: 0.0
+            val speedLine = contactSpeedLine(
+                speedInMps = vin,
+                speedOutMps = vout,
+                strokeMps = strokeMps,
+                pro = pro,
+                showTravelBreakdown = isFirstContact,
+            )
             PathWaypointCardText(
                 "Hits $ball",
                 if (pro) {
                     listOf(
                         "Cue ball meets $ball.",
-                        "Speed ${fmtMps(vin)} → ${fmtMps(vout)} (−${100 - pctOf(vout, vin)}%).",
+                        speedLine,
                     )
                 } else {
-                    listOf("The cue ball bumps $ball on its way.", "It slows down and pushes that ball.")
+                    listOf(speedLine, "The cue ball bumps $ball and pushes it aside.")
                 },
             )
         }
@@ -1386,29 +1479,35 @@ internal fun describePathWaypoint(
             "Stops short",
             if (pro) {
                 listOf(
-                    "Cloth stops the cue ball after ${fmtCm(wp.travelMeters ?: 0.0)}.",
+                    "0% speed left after ${fmtCm(wp.travelMeters ?: 0.0)}.",
                     "${fmtCm(wp.shortfallMeters ?: 0.0)} before contact with ${ballTag(wp.otherBallNumber)}.",
                     "Add stroke speed.",
                 )
             } else {
                 listOf(
-                    "Not enough speed: the cue ball stops short of ${ballTag(wp.otherBallNumber)}.",
+                    "0% speed left: stops short of ${ballTag(wp.otherBallNumber)}.",
                     "Hit it harder.",
                 )
             },
         )
 
-        PathWaypointKind.SCRATCH -> PathWaypointCardText(
-            "Scratch!",
-            if (pro) {
-                listOf(
-                    "Cue ball drops in this pocket at ${fmtMps(wp.speedInMps ?: 0.0)}.",
-                    "Change the speed or spin.",
-                )
+        PathWaypointKind.SCRATCH -> {
+            val arrive = wp.speedInMps
+            val dropLine = if (arrive != null) {
+                val arrivePct = pctOf(arrive, strokeMps).coerceIn(0, 100)
+                if (pro) {
+                    "Drops in this pocket with $arrivePct% speed left (${fmtMps(arrive)} of ${fmtMps(strokeMps)})."
+                } else {
+                    "Drops in this pocket with $arrivePct% speed left."
+                }
             } else {
-                listOf("The cue ball still has enough speed to drop in this pocket.", "Change the speed or spin.")
-            },
-        )
+                "The cue ball still has enough speed to drop in this pocket."
+            }
+            PathWaypointCardText(
+                "Scratch!",
+                listOf(dropLine, "Change the speed or spin."),
+            )
+        }
 
         PathWaypointKind.CUE_REST -> {
             val cushions = wp.cushionCount ?: 0
@@ -1416,9 +1515,9 @@ internal fun describePathWaypoint(
             PathWaypointCardText(
                 "Cue ball rests",
                 if (pro) {
-                    listOf("Rolls ${fmtCm(wp.travelMeters ?: 0.0)} after contact$via.", "Stops here: your next position.")
+                    listOf("0% speed left after rolling ${fmtCm(wp.travelMeters ?: 0.0)}$via.", "Stops here: your next position.")
                 } else {
-                    listOf("The cue ball stops here$via.", "This is your position for the next shot.")
+                    listOf("0% speed left: stops here$via.", "This is your position for the next shot.")
                 },
             )
         }

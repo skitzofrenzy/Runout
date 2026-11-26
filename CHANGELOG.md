@@ -2,6 +2,11 @@
 
 All notable user-facing changes to Runout are documented here and bundled into the in-app **What's New** screen.
 
+## [0.2.3] - 2026-11-25
+
+### Improved
+- **Path Physics Speed Readout:** Every point on the cue ball's path now shows the total speed still remaining as a share of your starting stroke (100% at the strike). The first contact point also breaks down how much was lost in travel versus from the contact itself (for example, 90% left: 7% lost in travel, 3% from contact); later contacts show the remaining speed and the loss from that contact only.
+
 ## [0.2.2] - 2026-11-25
 
 ### Fixed
